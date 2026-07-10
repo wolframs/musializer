@@ -18,10 +18,8 @@ bool build_musializer(void)
         nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "-fPIC", "-shared");
         nob_cmd_append(&cmd, "-o", "./build/libplug.dylib");
-        nob_cmd_append(&cmd,
-            "./src/plug.c",
-            "./src/ffmpeg_posix.c",
-            "./thirdparty/tinyfiledialogs.c");
+        append_posix_plug_sources(&cmd);
+        nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
         nob_cmd_append(&cmd, "./build/raylib/macos/libraylib.dylib");
         nob_cmd_append(&cmd, "-lm", "-ldl", "-lpthread");
     nob_da_append(&procs, nob_cmd_run_async(cmd));
@@ -50,9 +48,8 @@ bool build_musializer(void)
         nob_cmd_append(&cmd, "-I.");
         nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "-o", "./build/musializer");
+        append_posix_plug_sources(&cmd);
         nob_cmd_append(&cmd,
-            "./src/plug.c",
-            "./src/ffmpeg_posix.c",
             "./src/musializer.c",
             "./thirdparty/tinyfiledialogs.c");
         nob_cmd_append(&cmd, "./build/raylib/macos/libraylib.a");

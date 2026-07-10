@@ -27,8 +27,9 @@ int main(int argc, char **argv)
     if (!mkdir_if_not_exists("build")) return 1;
 
     if (argc > 0) {
-        const char *command_name = shift(argv, argc);
+        const char *command_name = argv[0];
         if (strcmp(command_name, "config") == 0) {
+            (void) shift(argv, argc);
             // TODO: an ability to set the target through the `config` command
             while (argc > 0) {
                 const char *flag_name = shift(argv, argc);
@@ -48,9 +49,6 @@ int main(int argc, char **argv)
             }
             if (!generate_default_config(CONFIG_PATH)) return 1;
             return 0;
-        } else {
-            nob_log(ERROR, "Unknown command `%s`", command_name);
-            return 1;
         }
     }
 

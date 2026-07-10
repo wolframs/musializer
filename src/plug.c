@@ -4,11 +4,13 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
-#include <complex.h>
 
 #include "build/config.h"
+#include "audio_analyzer.h"
 #include "plug.h"
 #include "ffmpeg.h"
+#include "sample_ring.h"
+#include "scene.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
 // #define NOB_WARN_DEPRECATED
@@ -69,8 +71,11 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 
 #define GLSL_VERSION 330
 
-#define FFT_SIZE (1<<13)
 #define FONT_SIZE 64
+#define SAMPLE_RING_CAPACITY (1u << 14)
+#define ASCII_GRID_MAX_COLUMNS 96
+#define ASCII_GRID_MAX_ROWS 54
+#define ASCII_GRID_MAX_CELLS (ASCII_GRID_MAX_COLUMNS*ASCII_GRID_MAX_ROWS)
 
 #define PREVIEW_FPS 60
 
@@ -78,6 +83,9 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define RENDER_FACTOR 100
 #define RENDER_WIDTH (16*RENDER_FACTOR)
 #define RENDER_HEIGHT (9*RENDER_FACTOR)
+
+#define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
+#define PLUG_STATE_VERSION 2
 
 #define COLOR_ACCENT                  ColorFromHSV(225, 0.75, 0.8)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -106,26 +114,6 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define KEY_FULLSCREEN  KEY_F
 #define KEY_CAPTURE     KEY_C
 #define KEY_TOGGLE_MUTE KEY_M
-
-// Microsoft could not update their parser OMEGALUL:
-// https://learn.microsoft.com/en-us/cpp/c-runtime-library/complex-math-support?view=msvc-170#types-used-in-complex-math
-#ifdef _MSC_VER
-#    define Float_Complex _Fcomplex
-#    define cbuild(re, im) _FCbuild(re, im)
-#    define cfromreal(re) _FCbuild(re, 0)
-#    define cfromimag(im) _FCbuild(0, im)
-#    define mulcc _FCmulcc
-#    define addcc(a, b) _FCbuild(crealf(a) + crealf(b), cimagf(a) + cimagf(b))
-#    define subcc(a, b) _FCbuild(crealf(a) - crealf(b), cimagf(a) - cimagf(b))
-#else
-#    define Float_Complex float complex
-#    define cbuild(re, im) ((re) + (im)*I)
-#    define cfromreal(re) (re)
-#    define cfromimag(im) ((im)*I)
-#    define mulcc(a, b) ((a)*(b))
-#    define addcc(a, b) ((a)+(b))
-#    define subcc(a, b) ((a)-(b))
-#endif
 
 typedef struct {
     char *file_path;
@@ -181,6 +169,13 @@ static const char *icon_file_paths[COUNT_UI_ICONS] = {
 };
 
 typedef struct {
+    // Hot-reload state header. Keep these fields at the beginning and bump the
+    // version whenever persisted layout semantics change.
+    uint64_t state_magic;
+    uint32_t state_version;
+    uint32_t state_reserved;
+    size_t state_size;
+
     // Assets
     Texture2D icon_textures[COUNT_UI_ICONS];
 
@@ -201,16 +196,21 @@ typedef struct {
     size_t wave_cursor;
     FFMPEG *ffmpeg;
     bool cancel_rendering;
+    bool render_failed;
 
-    // FFT Analyzer
-    float in_raw[FFT_SIZE];
-    float in_win[FFT_SIZE];
-    Float_Complex out_raw[FFT_SIZE];
-    float out_log[FFT_SIZE];
-    float out_smooth[FFT_SIZE];
-    float out_smear[FFT_SIZE];
-    // TODO: Make FFT Analyzer take into account multiple channels somehow
-    //   Extracted from https://github.com/tsoding/musializer/pull/11
+    // Audio analyzer and realtime-safe callback handoff
+    AudioAnalyzer analyzer;
+    SampleRing sample_ring;
+    SampleFrame sample_ring_storage[SAMPLE_RING_CAPACITY];
+
+    // Scene engine
+    Scene_Instance scene;
+    uint64_t scene_frame_index;
+    double scene_previous_time;
+    bool scene_clock_initialized;
+    AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
+    size_t ascii_columns;
+    size_t ascii_rows;
 
     uint64_t active_button_id;
 
@@ -231,230 +231,92 @@ typedef struct {
 
 static Plug *p = NULL;
 
+static void analyzer_configure(uint32_t sample_rate, uint32_t channels)
+{
+    AudioAnalyzerConfig config = {
+        .sample_rate = sample_rate,
+        .channel_count = channels,
+        .channel_mode = AUDIO_ANALYZER_CHANNEL_SELECT,
+        .selected_channel = 0,
+    };
+    NOB_ASSERT(audio_analyzer_init(&p->analyzer, config));
+    sample_ring_reset(&p->sample_ring);
+}
+
 static bool fft_settled(void)
 {
-    float eps = 1e-3;
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        if (p->out_smooth[i] > eps) return false;
-        if (p->out_smear[i] > eps) return false;
-    }
-    return true;
+    return audio_analyzer_settled(&p->analyzer, 1e-3f);
 }
 
 static void fft_clean(void)
 {
-    memset(p->in_raw, 0, sizeof(p->in_raw));
-    memset(p->in_win, 0, sizeof(p->in_win));
-    memset(p->out_raw, 0, sizeof(p->out_raw));
-    memset(p->out_log, 0, sizeof(p->out_log));
-    memset(p->out_smooth, 0, sizeof(p->out_smooth));
-    memset(p->out_smear, 0, sizeof(p->out_smear));
+    audio_analyzer_reset(&p->analyzer);
+    sample_ring_reset(&p->sample_ring);
 }
 
-// Ported from https://cp-algorithms.com/algebra/fft.html
-static void fft(float in[], Float_Complex out[], size_t n)
+static void analyzer_drain_realtime_samples(void)
 {
-    for(size_t i = 0; i < n; i++) {
-        out[i] = cfromreal(in[i]);
-    }
-
-    for (size_t i = 1, j = 0; i < n; i++) {
-        int bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            Float_Complex temp = out[i];
-            out[i] = out[j];
-            out[j] = temp;
+    SampleFrame frames[1024];
+    float mono[1024];
+#ifdef MUSIALIZER_MICROPHONE
+    float stereo[1024*2];
+#endif
+    size_t count;
+    while ((count = sample_ring_pop_many(&p->sample_ring, frames, NOB_ARRAY_LEN(frames))) > 0) {
+        // Do not treat an array of structs as a flat float array. Besides
+        // relying on padding, pointer arithmetic across member subobjects is
+        // undefined in C. Preview parity intentionally analyzes the left side.
+        for (size_t i = 0; i < count; ++i) {
+            mono[i] = frames[i].left;
+#ifdef MUSIALIZER_MICROPHONE
+            stereo[i*2] = frames[i].left;
+            stereo[i*2 + 1] = frames[i].right;
+#endif
         }
-    }
-
-    for (size_t len = 2; len <= n; len <<= 1) {
-        float ang = 2 * PI / len;
-        Float_Complex wlen = cbuild(cosf(ang), sinf(ang));
-        for (size_t i = 0; i < n; i += len) {
-            Float_Complex w = cfromreal(1);
-            for (size_t j = 0; j < len / 2; j++) {
-                Float_Complex u = out[i+j], v = mulcc(out[i+j+len/2], w);
-                out[i+j] = addcc(u, v);
-                out[i+j+len/2] = subcc(u, v);
-                w = mulcc(w, wlen);
+        audio_analyzer_push_mono(&p->analyzer, mono, count);
+#ifdef MUSIALIZER_MICROPHONE
+        if (p->capturing) {
+            // Recording I/O belongs to the render thread, never the realtime
+            // capture callback. A short write remains diagnosable in logs.
+            drwav_uint64 written = drwav_write_pcm_frames(&p->wav, count, stereo);
+            if (written != count) {
+                TraceLog(LOG_ERROR, "DRWAVE: wrote %llu of %zu captured frames",
+                         (unsigned long long)written, count);
             }
         }
+#endif
     }
 }
 
-static inline float amp(Float_Complex z)
+static AudioSpectrumView fft_analyze(float dt)
 {
-    float a = crealf(z);
-    float b = cimagf(z);
-    return logf(a*a + b*b);
+    analyzer_drain_realtime_samples();
+    if (!audio_analyzer_analyze(&p->analyzer, dt)) return (AudioSpectrumView){0};
+    return audio_analyzer_spectrum(&p->analyzer);
 }
 
-static size_t fft_analyze(float dt)
+static void queue_stereo_samples(const void *buffer_data, size_t frame_count)
 {
-    // Apply the Hann Window on the Input - https://en.wikipedia.org/wiki/Hann_function
-    for (size_t i = 0; i < FFT_SIZE; ++i) {
-        float t = (float)i/(FFT_SIZE - 1);
-        float hann = 0.5 - 0.5*cosf(2*PI*t);
-        p->in_win[i] = p->in_raw[i]*hann;
+    if (buffer_data == NULL) return;
+    const float (*samples)[2] = (const float (*)[2])buffer_data;
+
+    for (size_t i = 0; i < frame_count; ++i) {
+        sample_ring_push(&p->sample_ring, (SampleFrame){samples[i][0], samples[i][1]});
     }
-
-    // FFT
-    fft(p->in_win, p->out_raw, FFT_SIZE);
-
-    // "Squash" into the Logarithmic Scale
-    float step = 1.06;
-    float lowf = 1.0f;
-    size_t m = 0;
-    float max_amp = 1.0f;
-    for (float f = lowf; (size_t) f < FFT_SIZE/2; f = ceilf(f*step)) {
-        float f1 = ceilf(f*step);
-        float a = 0.0f;
-        for (size_t q = (size_t) f; q < FFT_SIZE/2 && q < (size_t) f1; ++q) {
-            float b = amp(p->out_raw[q]);
-            if (b > a) a = b;
-        }
-        if (max_amp < a) max_amp = a;
-        p->out_log[m++] = a;
-    }
-
-    // Normalize Frequencies to 0..1 range
-    for (size_t i = 0; i < m; ++i) {
-        p->out_log[i] /= max_amp;
-    }
-
-    // Smooth out and smear the values
-    for (size_t i = 0; i < m; ++i) {
-        float smoothness = 8;
-        p->out_smooth[i] += (p->out_log[i] - p->out_smooth[i])*smoothness*dt;
-        float smearness = 3;
-        p->out_smear[i] += (p->out_smooth[i] - p->out_smear[i])*smearness*dt;
-    }
-
-    return m;
 }
 
-static void fft_render(Rectangle boundary, size_t m)
-{
-    // The width of a single bar
-    float cell_width = boundary.width/m;
-
-    // Global color parameters
-    float saturation = 0.75f;
-    float value = 1.0f;
-
-    // Display the Bars
-    for (size_t i = 0; i < m; ++i) {
-        float t = p->out_smooth[i];
-        float hue = (float)i/m;
-        Color color = ColorFromHSV(hue*360, saturation, value);
-        Vector2 startPos = {
-            boundary.x + i*cell_width + cell_width/2,
-            boundary.y + boundary.height - boundary.height*2/3*t,
-        };
-        Vector2 endPos = {
-            boundary.x + i*cell_width + cell_width/2,
-            boundary.y + boundary.height,
-        };
-        float thick = cell_width/3*sqrtf(t);
-        DrawLineEx(startPos, endPos, thick, color);
-    }
-
-    Texture2D texture = { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
-
-    // Display the Smears
-    SetShaderValue(p->circle, p->circle_radius_location, (float[1]){ 0.3f }, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(p->circle, p->circle_power_location, (float[1]){ 3.0f }, SHADER_UNIFORM_FLOAT);
-    BeginShaderMode(p->circle);
-    for (size_t i = 0; i < m; ++i) {
-        float start = p->out_smear[i];
-        float end = p->out_smooth[i];
-        float hue = (float)i/m;
-        Color color = ColorFromHSV(hue*360, saturation, value);
-        Vector2 startPos = {
-            boundary.x + i*cell_width + cell_width/2,
-            boundary.y + boundary.height - boundary.height*2/3*start,
-        };
-        Vector2 endPos = {
-            boundary.x + i*cell_width + cell_width/2,
-            boundary.y + boundary.height - boundary.height*2/3*end,
-        };
-        float radius = cell_width*3*sqrtf(end);
-        Vector2 origin = {0};
-        if (endPos.y >= startPos.y) {
-            Rectangle dest = {
-                .x = startPos.x - radius/2,
-                .y = startPos.y,
-                .width = radius,
-                .height = endPos.y - startPos.y
-            };
-            Rectangle source = {0, 0, 1, 0.5};
-            DrawTexturePro(texture, source, dest, origin, 0, color);
-        } else {
-            Rectangle dest = {
-                .x = endPos.x - radius/2,
-                .y = endPos.y,
-                .width = radius,
-                .height = startPos.y - endPos.y
-            };
-            Rectangle source = {0, 0.5, 1, 0.5};
-            DrawTexturePro(texture, source, dest, origin, 0, color);
-        }
-    }
-    EndShaderMode();
-
-    // Display the Circles
-    SetShaderValue(p->circle, p->circle_radius_location, (float[1]){ 0.07f }, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(p->circle, p->circle_power_location, (float[1]){ 5.0f }, SHADER_UNIFORM_FLOAT);
-    BeginShaderMode(p->circle);
-    for (size_t i = 0; i < m; ++i) {
-        float t = p->out_smooth[i];
-        float hue = (float)i/m;
-        Color color = ColorFromHSV(hue*360, saturation, value);
-        Vector2 center = {
-            boundary.x + i*cell_width + cell_width/2,
-            boundary.y + boundary.height - boundary.height*2/3*t,
-        };
-        float radius = cell_width*6*sqrtf(t);
-        Vector2 position = {
-            .x = center.x - radius,
-            .y = center.y - radius,
-        };
-        DrawTextureEx(texture, position, 0, 2*radius, color);
-    }
-    EndShaderMode();
-}
-
-static void fft_push(float frame)
-{
-    memmove(p->in_raw, p->in_raw + 1, (FFT_SIZE - 1)*sizeof(p->in_raw[0]));
-    p->in_raw[FFT_SIZE-1] = frame;
-}
-
-// TODO: make sure the audio callback is thread-safe
 static void callback(void *bufferData, unsigned int frames)
 {
-    // https://cdecl.org/?q=float+%28*fs%29%5B2%5D
-    float (*fs)[2] = bufferData;
-
-    for (size_t i = 0; i < frames; ++i) {
-        fft_push(fs[i][0]);
-    }
-
-#ifdef MUSIALIZER_MICROPHONE
-    if (p->capturing) {
-        // TODO: according to documentation drwav_write_pcm_frames may not write all the frames.
-        // Make sure it does.
-        drwav_write_pcm_frames(&p->wav, frames, bufferData);
-    }
-#endif // MUSIALIZER_MICROPHONE
+    // raylib invokes stream processors after conversion to its stereo mixing
+    // format (AUDIO_DEVICE_CHANNELS == 2 in the vendored configuration).
+    queue_stereo_samples(bufferData, frames);
 }
 
 #ifdef MUSIALIZER_MICROPHONE
 static void ma_callback(ma_device *pDevice, void *pOutput, const void *pInput,ma_uint32 frameCount)
 {
-    callback((void*)pInput,frameCount);
+    if (pInput == NULL) return;
+    queue_stereo_samples(pInput, frameCount);
     (void)pOutput;
     (void)pDevice;
 }
@@ -466,6 +328,183 @@ static Track *current_track(void)
         return &p->tracks.items[p->current_track];
     }
     return NULL;
+}
+
+static void start_preview_track(Track *track)
+{
+    analyzer_configure(track->music.stream.sampleRate, 2);
+    p->scene_frame_index = 0;
+    p->scene_clock_initialized = false;
+    PlayMusicStream(track->music);
+}
+
+static float scene_clock_delta(double time_seconds)
+{
+    if (!p->scene_clock_initialized) {
+        p->scene_previous_time = time_seconds;
+        p->scene_clock_initialized = true;
+        return 0.0f;
+    }
+
+    double elapsed = time_seconds - p->scene_previous_time;
+    p->scene_previous_time = time_seconds;
+    if (elapsed < 0.0 || elapsed > 0.5) {
+        // Seeking is a discontinuity, not a half-second simulation step.
+        return 0.0f;
+    }
+    return (float)elapsed;
+}
+
+MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
+{
+    if (file_path == NULL || file_path[0] == '\0') return false;
+
+    Music music = LoadMusicStream(file_path);
+    if (!IsMusicValid(music)) return false;
+
+    char *owned_path = strdup(file_path);
+    if (owned_path == NULL) {
+        UnloadMusicStream(music);
+        return false;
+    }
+
+    AttachAudioStreamProcessor(music.stream, callback);
+    size_t new_index = p->tracks.count;
+    nob_da_append(&p->tracks, (CLITERAL(Track) {
+        .file_path = owned_path,
+        .music = music,
+    }));
+
+    if (current_track() == NULL) {
+        p->current_track = (int)new_index;
+        start_preview_track(&p->tracks.items[new_index]);
+    }
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_load_ascii_image(const char *file_path)
+{
+    if (file_path == NULL || file_path[0] == '\0') return false;
+
+    Image image = LoadImage(file_path);
+    if (!IsImageValid(image)) return false;
+    ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+
+    size_t columns = (size_t)image.width;
+    if (columns > ASCII_GRID_MAX_COLUMNS) columns = ASCII_GRID_MAX_COLUMNS;
+    size_t rows = (size_t)image.height*columns/(size_t)image.width;
+    rows = (rows + 1)/2; // Alegreya glyphs are roughly twice as tall as wide.
+    if (rows < 1) rows = 1;
+    if (rows > ASCII_GRID_MAX_ROWS) rows = ASCII_GRID_MAX_ROWS;
+
+    bool converted = ascii_art_convert_rgba8(
+        image.data,
+        (size_t)image.width,
+        (size_t)image.height,
+        columns,
+        rows,
+        p->ascii_cells,
+        NOB_ARRAY_LEN(p->ascii_cells));
+    UnloadImage(image);
+    if (!converted) return false;
+
+    p->ascii_columns = columns;
+    p->ascii_rows = rows;
+    TraceLog(LOG_INFO, "ASCII: imported %s as %zux%zu glyphs", file_path, columns, rows);
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_select_scene(const char *name)
+{
+    if (name == NULL) return false;
+
+    Scene_Id id;
+    if (strcmp(name, "spectrum") == 0) {
+        id = SCENE_SPECTRUM;
+    } else if (strcmp(name, "pulse") == 0 || strcmp(name, "pulse-field") == 0) {
+        id = SCENE_PULSE_FIELD;
+    } else if (strcmp(name, "orbital") == 0 || strcmp(name, "orbital-lattice") == 0) {
+        id = SCENE_ORBITAL_LATTICE;
+    } else if (strcmp(name, "ascii") == 0 || strcmp(name, "ascii-field") == 0) {
+        id = SCENE_ASCII_FIELD;
+    } else if (strcmp(name, "atlas") == 0 || strcmp(name, "song-atlas") == 0) {
+        id = SCENE_SONG_ATLAS;
+    } else if (strcmp(name, "terrarium") == 0 || strcmp(name, "spectral-terrarium") == 0) {
+        id = SCENE_SPECTRAL_TERRARIUM;
+    } else {
+        return false;
+    }
+
+    return scene_instance_select(&p->scene, id, p->scene.seed);
+}
+
+static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seconds, float delta_seconds)
+{
+    float square_sum = 0.0f;
+    float peak = 0.0f;
+    float flux = 0.0f;
+    for (size_t i = 0; i < spectrum.band_count; ++i) {
+        float band = spectrum.smooth[i];
+        square_sum += band*band;
+        if (peak < band) peak = band;
+        if (spectrum.smear[i] < band) flux += band - spectrum.smear[i];
+    }
+
+    float rms = spectrum.band_count > 0 ? sqrtf(square_sum/spectrum.band_count) : 0.0f;
+    if (spectrum.band_count > 0) flux /= spectrum.band_count;
+
+    return (Scene_Frame) {
+        .time_seconds = time_seconds,
+        .delta_seconds = delta_seconds,
+        .frame_index = p->scene_frame_index++,
+        .audio = {
+            .bands = spectrum.smooth,
+            .trails = spectrum.smear,
+            .bands_count = spectrum.band_count,
+            .rms = rms,
+            .peak = peak,
+            .spectral_flux = flux,
+            .onset = flux > 0.08f,
+        },
+    };
+}
+
+static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double time_seconds, float delta_seconds)
+{
+    Scene_Frame frame = make_scene_frame(spectrum, time_seconds, delta_seconds);
+    Scene_Renderer renderer = {
+        .circle_shader = p->circle,
+        .circle_radius_location = p->circle_radius_location,
+        .circle_power_location = p->circle_power_location,
+        .font = p->font,
+        .ascii_cells = p->ascii_cells,
+        .ascii_columns = p->ascii_columns,
+        .ascii_rows = p->ascii_rows,
+    };
+    scene_instance_update(&p->scene, &frame);
+    scene_instance_draw(&p->scene, &frame, &renderer, boundary);
+}
+
+static void update_scene_shortcuts(void)
+{
+    if (IsKeyPressed(KEY_ONE)) {
+        scene_instance_select(&p->scene, SCENE_SPECTRUM, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_TWO)) {
+        scene_instance_select(&p->scene, SCENE_PULSE_FIELD, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_THREE)) {
+        scene_instance_select(&p->scene, SCENE_ORBITAL_LATTICE, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_FOUR)) {
+        scene_instance_select(&p->scene, SCENE_ASCII_FIELD, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_FIVE)) {
+        scene_instance_select(&p->scene, SCENE_SONG_ATLAS, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_SIX)) {
+        scene_instance_select(&p->scene, SCENE_SPECTRAL_TERRARIUM, p->scene.seed);
+    }
 }
 
 
@@ -774,7 +813,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             if (state & BS_CLICKED) {
                 Track *track = current_track();
                 if (track) StopMusicStream(track->music);
-                PlayMusicStream(p->tracks.items[i].music);
+                start_preview_track(&p->tracks.items[i]);
                 p->current_track = i;
             }
         } else {
@@ -1266,26 +1305,77 @@ static void toggle_track_playing(Track *track)
     }
 }
 
-static void start_rendering_track(Track *track)
+static void finish_rendering_track(Track *track);
+
+static bool start_rendering_track_to(Track *track, const char *output_path)
 {
-    char const * filter_params[] = { "*.mp4" };
-    char *output_path = tinyfd_saveFileDialog("Path to rendered video", "./", NOB_ARRAY_LEN(filter_params), filter_params, "mp4 video file");
-    if (output_path == NULL) return;
+    if (track == NULL || output_path == NULL || output_path[0] == '\0') return false;
 
     StopMusicStream(track->music);
 
-    fft_clean();
     // TODO: LoadWave is pretty slow on big files
-    p->wave = LoadWave(track->file_path);
+    Wave wave = LoadWave(track->file_path);
+    if (!IsWaveValid(wave)) {
+        start_preview_track(track);
+        return false;
+    }
+    float *wave_samples = LoadWaveSamples(wave);
+    if (wave_samples == NULL) {
+        UnloadWave(wave);
+        start_preview_track(track);
+        return false;
+    }
+    Scene_Id scene_id = p->scene.id;
+    uint64_t scene_seed = p->scene.seed;
+    if (!scene_instance_select(&p->scene, scene_id, scene_seed)) {
+        UnloadWaveSamples(wave_samples);
+        UnloadWave(wave);
+        start_preview_track(track);
+        return false;
+    }
+
+    fft_clean();
+    p->wave = wave;
     p->wave_cursor = 0;
-    p->wave_samples = LoadWaveSamples(p->wave);
+    p->wave_samples = wave_samples;
+    analyzer_configure(p->wave.sampleRate, p->wave.channels);
+    p->scene_frame_index = 0;
+    p->scene_clock_initialized = false;
     // TODO: set the rendering output path based on the input path
     // Basically output into the same folder
     p->ffmpeg = ffmpeg_start_rendering(output_path, p->screen.texture.width, p->screen.texture.height, RENDER_FPS, track->file_path);
+    p->render_failed = p->ffmpeg == NULL;
     SetTargetFPS(0);
     p->rendering = true;
     p->cancel_rendering = false;
     SetTraceLogLevel(LOG_WARNING);
+    if (p->ffmpeg == NULL) {
+        finish_rendering_track(track);
+        return false;
+    }
+    return true;
+}
+
+static void start_rendering_track(Track *track)
+{
+    char const * filter_params[] = { "*.mp4" };
+    char *output_path = tinyfd_saveFileDialog("Path to rendered video", "./", NOB_ARRAY_LEN(filter_params), filter_params, "mp4 video file");
+    if (output_path != NULL) start_rendering_track_to(track, output_path);
+}
+
+MUSIALIZER_PLUG bool plug_start_render(const char *output_path)
+{
+    return start_rendering_track_to(current_track(), output_path);
+}
+
+MUSIALIZER_PLUG bool plug_render_active(void)
+{
+    return p->rendering && p->ffmpeg != NULL;
+}
+
+MUSIALIZER_PLUG bool plug_render_failed(void)
+{
+    return p->render_failed;
 }
 
 static void finish_rendering_track(Track *track)
@@ -1295,8 +1385,7 @@ static void finish_rendering_track(Track *track)
     UnloadWaveSamples(p->wave_samples);
     SetTargetFPS(PREVIEW_FPS);
     p->rendering = false;
-    fft_clean();
-    PlayMusicStream(track->music);
+    start_preview_track(track);
 }
 
 #ifdef MUSIALIZER_MICROPHONE
@@ -1335,6 +1424,13 @@ static void start_capture(void)
         drwav_uninit(&p->wav);
         return;
     }
+
+    // sample_ring is SPSC. Ensure the raylib playback callback cannot become a
+    // second producer while the microphone owns the producer side.
+    Track *track = current_track();
+    if (track != NULL) StopMusicStream(track->music);
+    analyzer_configure(deviceConfig.sampleRate, deviceConfig.capture.channels);
+    p->scene_frame_index = 0;
 
     result = ma_device_start(&p->microphone);
     if (result != MA_SUCCESS) {
@@ -1439,25 +1535,9 @@ static void preview_screen(void)
         // TODO: loading files synchronously like that actually blocks the UI thread
         // Maybe we should do that in a separate thread.
         for (size_t i = 0; i < droppedFiles.count; ++i) {
-            Music music = LoadMusicStream(droppedFiles.paths[i]);
-            if (IsMusicValid(music)) {
-                AttachAudioStreamProcessor(music.stream, callback);
-                char *file_path = strdup(droppedFiles.paths[i]);
-                assert(file_path != NULL);
-                nob_da_append(&p->tracks, (CLITERAL(Track) {
-                    .file_path = file_path,
-                    .music = music,
-                }));
-            } else {
-                popup_tray_push(&p->pt);
-            }
+            if (!plug_load_track(droppedFiles.paths[i])) popup_tray_push(&p->pt);
         }
         UnloadDroppedFiles(droppedFiles);
-
-        if (current_track() == NULL && p->tracks.count > 0) {
-            p->current_track = 0;
-            PlayMusicStream(p->tracks.items[0].music);
-        }
     }
 
 #ifdef MUSIALIZER_MICROPHONE
@@ -1480,7 +1560,10 @@ static void preview_screen(void)
             p->fullscreen = !p->fullscreen;
         }
 
-        size_t m = fft_analyze(GetFrameTime());
+        double scene_time = GetMusicTimePlayed(track->music);
+        float scene_dt = scene_clock_delta(scene_time);
+        AudioSpectrumView spectrum = fft_analyze(scene_dt);
+        update_scene_shortcuts();
 
         float toolbar_height = HUD_BUTTON_SIZE;
         if (p->fullscreen) {
@@ -1512,7 +1595,7 @@ static void preview_screen(void)
             bool moved = fabsf(delta.x) + fabsf(delta.y) > 0.0;
             if (moved) hud_timer = HUD_TIMER_SECS;
 
-            fft_render(preview_boundary, m);
+            scene_render(preview_boundary, spectrum, scene_time, scene_dt);
 
 #if 0
             // TODO: toggle track playing on right mouse click on the preview
@@ -1544,7 +1627,7 @@ static void preview_screen(void)
 #endif
 
             BeginScissorMode(preview_boundary.x, preview_boundary.y, preview_boundary.width, preview_boundary.height);
-            fft_render(preview_boundary, m);
+            scene_render(preview_boundary, spectrum, scene_time, scene_dt);
             popup_tray(&p->pt, preview_boundary);
             EndScissorMode();
 
@@ -1599,25 +1682,7 @@ static void preview_screen(void)
             int allow_multiple_selects = 0; // TODO: enable multiple selects
             char const *filter_params[] = {"*.wav", "*.ogg", "*.mp3", "*.qoa", "*.xm", "*.mod", "*.flac"};
             char *input_path = tinyfd_openFileDialog("Path to music file", "./", NOB_ARRAY_LEN(filter_params), filter_params, "music file", allow_multiple_selects);
-            if (input_path) {
-                Music music = LoadMusicStream(input_path);
-                if (IsMusicValid(music)) {
-                    AttachAudioStreamProcessor(music.stream, callback);
-                    char *file_path = strdup(input_path);
-                    assert(file_path != NULL);
-                    nob_da_append(&p->tracks, (CLITERAL(Track) {
-                        .file_path = file_path,
-                        .music = music,
-                    }));
-                } else {
-                    popup_tray_push(&p->pt);
-                }
-
-                if (current_track() == NULL && p->tracks.count > 0) {
-                    p->current_track = 0;
-                    PlayMusicStream(p->tracks.items[0].music);
-                }
-            }
+            if (input_path && !plug_load_track(input_path)) popup_tray_push(&p->pt);
         }
     }
 }
@@ -1632,35 +1697,22 @@ static void capture_screen(void)
         if (IsKeyPressed(KEY_CAPTURE) || IsKeyPressed(KEY_ESCAPE)) {
             // Microphone is working, so it needs to be uninited
             ma_device_uninit(&p->microphone);
+            analyzer_drain_realtime_samples();
             drwav_uninit(&p->wav);
             p->microphone_working = false;
             p->capturing = false;
 
             const char *recording_file_path = "recording.wav";
-            Music music = LoadMusicStream(recording_file_path);
-            if (IsMusicValid(music)) {
-                AttachAudioStreamProcessor(music.stream, callback);
-                char *file_path = strdup(recording_file_path);
-                assert(file_path != NULL);
-                nob_da_append(&p->tracks, (CLITERAL(Track) {
-                    .file_path = file_path,
-                    .music = music,
-                }));
-            } else {
-                popup_tray_push(&p->pt);
-            }
-
-            if (current_track() == NULL && p->tracks.count > 0) {
-                p->current_track = 0;
-                PlayMusicStream(p->tracks.items[0].music);
-            }
+            if (!plug_load_track(recording_file_path)) popup_tray_push(&p->pt);
         }
 
 
-        size_t m = fft_analyze(GetFrameTime());
-        fft_render(CLITERAL(Rectangle) {
+        float scene_dt = GetFrameTime();
+        AudioSpectrumView spectrum = fft_analyze(scene_dt);
+        update_scene_shortcuts();
+        scene_render(CLITERAL(Rectangle) {
             0, 0, GetScreenWidth(), GetScreenHeight()
-        }, m);
+        }, spectrum, GetTime(), scene_dt);
     } else {
         if (IsKeyPressed(KEY_ESCAPE)) {
             // Microphone is not working, so it does no need to be uninited
@@ -1726,6 +1778,7 @@ static void rendering_screen(void)
                 // It should be safe to set ffmpeg to NULL even if ffmpeg_end_rendering() failed
                 // cause it should deallocate all the resources even in case of a failure.
                 p->ffmpeg = NULL;
+                p->render_failed = true;
             } else {
                 finish_rendering_track(track);
             }
@@ -1782,26 +1835,49 @@ static void rendering_screen(void)
             }
 
             // Rendering
-            {
+            if (p->scene_frame_index > 0) {
                 size_t chunk_size = p->wave.sampleRate/RENDER_FPS;
+                // Carry the rational remainder so sample rates not divisible
+                // by the render FPS never accumulate transport drift.
+                size_t next_cursor = (size_t)(((uint64_t)p->scene_frame_index
+                                             * p->wave.sampleRate)/RENDER_FPS);
+                if (next_cursor > p->wave_cursor) chunk_size = next_cursor - p->wave_cursor;
                 float *fs = (float*)p->wave_samples;
-                for (size_t i = 0; i < chunk_size; ++i) {
-                    if (p->wave_cursor < p->wave.frameCount) {
-                        fft_push(fs[p->wave_cursor*p->wave.channels + 0]);
-                    } else {
-                        fft_push(0);
-                    }
-                    p->wave_cursor += 1;
+                size_t available = 0;
+                if (p->wave_cursor < p->wave.frameCount) {
+                    available = p->wave.frameCount - p->wave_cursor;
+                    if (available > chunk_size) available = chunk_size;
+                    audio_analyzer_push_interleaved(
+                        &p->analyzer,
+                        fs + p->wave_cursor*p->wave.channels,
+                        available);
                 }
+
+                static const float silence[1024] = {0};
+                size_t silence_count = chunk_size - available;
+                while (silence_count > 0) {
+                    size_t batch = silence_count;
+                    if (batch > NOB_ARRAY_LEN(silence)) batch = NOB_ARRAY_LEN(silence);
+                    audio_analyzer_push_mono(&p->analyzer, silence, batch);
+                    silence_count -= batch;
+                }
+                p->wave_cursor += chunk_size;
             }
 
-            size_t m = fft_analyze(1.0f/RENDER_FPS);
+            float scene_dt = p->scene_frame_index == 0 ? 0.0f : 1.0f/RENDER_FPS;
+            AudioSpectrumView spectrum = audio_analyzer_spectrum(&p->analyzer);
+            if (!audio_analyzer_analyze(&p->analyzer, scene_dt)) {
+                spectrum = (AudioSpectrumView){0};
+            } else {
+                spectrum = audio_analyzer_spectrum(&p->analyzer);
+            }
+            double scene_time = (double)p->scene_frame_index/RENDER_FPS;
 
             BeginTextureMode(p->screen);
             ClearBackground(COLOR_BACKGROUND);
-            fft_render(CLITERAL(Rectangle) {
+            scene_render(CLITERAL(Rectangle) {
                 0, 0, p->screen.texture.width, p->screen.texture.height
-            }, m);
+            }, spectrum, scene_time, scene_dt);
             EndTextureMode();
 
             Image image = LoadImageFromTexture(p->screen.texture);
@@ -1812,6 +1888,7 @@ static void rendering_screen(void)
                 // should log any additional errors anyway.
                 ffmpeg_end_rendering(p->ffmpeg, false);
                 p->ffmpeg = NULL;
+                p->render_failed = true;
             }
             UnloadImage(image);
         }
@@ -1868,6 +1945,13 @@ MUSIALIZER_PLUG void plug_init(void)
     assert(p != NULL && "Buy more RAM lol");
     memset(p, 0, sizeof(*p));
 
+    p->state_magic = PLUG_STATE_MAGIC;
+    p->state_version = PLUG_STATE_VERSION;
+    p->state_size = sizeof(*p);
+    NOB_ASSERT(sample_ring_init(&p->sample_ring, p->sample_ring_storage, SAMPLE_RING_CAPACITY));
+    analyzer_configure(48000, 2);
+    NOB_ASSERT(scene_instance_init(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
+
     load_assets();
     p->screen = LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT);
     p->current_track = -1;
@@ -1879,6 +1963,17 @@ MUSIALIZER_PLUG void plug_init(void)
 
 MUSIALIZER_PLUG void *plug_pre_reload(void)
 {
+#ifdef MUSIALIZER_MICROPHONE
+    // A miniaudio device stores the callback's function pointer. It must not
+    // survive unloading the shared object that contains ma_callback.
+    if (p->microphone_working) {
+        ma_device_uninit(&p->microphone);
+        analyzer_drain_realtime_samples();
+        drwav_uninit(&p->wav);
+        p->microphone_working = false;
+        p->capturing = false;
+    }
+#endif
     for (size_t i = 0; i < p->tracks.count; ++i) {
         Track *it = &p->tracks.items[i];
         DetachAudioStreamProcessor(it->music.stream, callback);
@@ -1889,12 +1984,55 @@ MUSIALIZER_PLUG void *plug_pre_reload(void)
 
 MUSIALIZER_PLUG void plug_post_reload(void *pp)
 {
-    p = pp;
+    Plug *persisted = pp;
+    if (persisted == NULL ||
+        persisted->state_magic != PLUG_STATE_MAGIC ||
+        persisted->state_version != PLUG_STATE_VERSION ||
+        persisted->state_size != sizeof(*persisted)) {
+        TraceLog(LOG_WARNING, "HOTRELOAD: incompatible plug state; starting a fresh session");
+        free(pp);
+        plug_init();
+        return;
+    }
+
+    p = persisted;
+    if (!scene_instance_rebind(&p->scene)) {
+        TraceLog(LOG_WARNING, "HOTRELOAD: scene state is incompatible; restoring Spectrum");
+        NOB_ASSERT(scene_instance_select(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
+    }
     for (size_t i = 0; i < p->tracks.count; ++i) {
         Track *it = &p->tracks.items[i];
         AttachAudioStreamProcessor(it->music.stream, callback);
     }
     load_assets();
+}
+
+MUSIALIZER_PLUG void plug_shutdown(void)
+{
+    if (p == NULL) return;
+#ifdef MUSIALIZER_MICROPHONE
+    if (p->microphone_working) {
+        ma_device_uninit(&p->microphone);
+        drwav_uninit(&p->wav);
+    }
+#endif
+    if (p->rendering) {
+        if (p->ffmpeg != NULL) ffmpeg_end_rendering(p->ffmpeg, true);
+        if (IsWaveValid(p->wave)) UnloadWave(p->wave);
+        if (p->wave_samples != NULL) UnloadWaveSamples(p->wave_samples);
+    }
+    for (size_t i = 0; i < p->tracks.count; ++i) {
+        Track *track = &p->tracks.items[i];
+        DetachAudioStreamProcessor(track->music.stream, callback);
+        UnloadMusicStream(track->music);
+        free(track->file_path);
+    }
+    free(p->tracks.items);
+    scene_instance_unload(&p->scene);
+    if (IsRenderTextureValid(p->screen)) UnloadRenderTexture(p->screen);
+    unload_assets();
+    free(p);
+    p = NULL;
 }
 
 MUSIALIZER_PLUG void plug_update(void)

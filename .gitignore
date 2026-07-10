@@ -1,12 +1,21 @@
 # Music folder for testing. Ignoring to prevent accidental copyright infringement.
 music/
 
+# Local credentials
+.env
+.env.*
+!.env.example
+
 # Musializer output
 *.mp4
 *.wav
 
 # Vim
 *.swp
+
+# Python analysis helpers
+__pycache__/
+*.py[cod]
 
 # Nob artifacts
 build/

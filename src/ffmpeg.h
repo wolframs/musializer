@@ -8,6 +8,7 @@ typedef struct FFMPEG FFMPEG;
 
 FFMPEG *ffmpeg_start_rendering(const char *output_path, size_t width, size_t height, size_t fps, const char *sound_file_path);
 bool ffmpeg_send_frame_flipped(FFMPEG *ffmpeg, void *data, size_t width, size_t height);
+// Always consumes ffmpeg. Intentional termination during cancellation is not an error.
 bool ffmpeg_end_rendering(FFMPEG *ffmpeg, bool cancel);
 
 #endif // FFMPEG_H_

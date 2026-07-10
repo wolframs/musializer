@@ -20,10 +20,8 @@ bool build_musializer(void)
             nob_cmd_append(&cmd, "/Fobuild\\", "/Fe./build/libplug.dll");
             nob_cmd_append(&cmd, "/I", "./");
             nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER);
-            nob_cmd_append(&cmd,
-                "src/plug.c",
-                "src/ffmpeg_windows.c",
-                "./thirdparty/tinyfiledialogs.c");
+            append_windows_plug_sources(&cmd);
+            nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
             nob_cmd_append(&cmd,
                 "/link",
                 nob_temp_sprintf("/LIBPATH:build/raylib/%s", MUSIALIZER_TARGET_NAME),
@@ -55,11 +53,9 @@ bool build_musializer(void)
         nob_cmd_append(&cmd, "/I", "./");
         nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "/Fobuild\\", "/Febuild\\musializer.exe");
-        nob_cmd_append(&cmd,
-            "./src/musializer.c",
-            "./src/plug.c",
-            "./src/ffmpeg_windows.c",
-            "./thirdparty/tinyfiledialogs.c");
+        nob_cmd_append(&cmd, "./src/musializer.c");
+        append_windows_plug_sources(&cmd);
+        nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
         nob_cmd_append(&cmd,
             "/link",
             "/SUBSYSTEM:WINDOWS",

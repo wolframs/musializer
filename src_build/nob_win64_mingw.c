@@ -28,10 +28,8 @@ bool build_musializer(void)
     cmd_append(&cmd, "-fPIC", "-shared");
     cmd_append(&cmd, "-static-libgcc");
     cmd_append(&cmd, "-o", "./build/libplug.dll");
-    cmd_append(&cmd,
-        "./src/plug.c",
-        "./src/ffmpeg_windows.c",
-        "./thirdparty/tinyfiledialogs.c");
+    append_windows_plug_sources(&cmd);
+    cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
     cmd_append(&cmd,
         "-L./build",
         "-l:raylib.dll");
@@ -65,9 +63,8 @@ bool build_musializer(void)
     cmd_append(&cmd, "-I.");
     cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
     cmd_append(&cmd, "-o", "./build/musializer");
+    append_windows_plug_sources(&cmd);
     cmd_append(&cmd,
-        "./src/plug.c",
-        "./src/ffmpeg_windows.c",
         "./src/musializer.c",
         "./thirdparty/tinyfiledialogs.c",
         "./build/musializer.res"

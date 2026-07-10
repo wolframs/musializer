@@ -51,6 +51,50 @@ $ ./nob
 $ ./build/musializer
 ```
 
+Development profiles and the headless test suite are available after the same
+bootstrap:
+
+```console
+$ ./nob build debug
+$ ./nob build sanitize
+$ ./nob build hotreload
+$ ./nob test
+$ ./nob test sanitize
+```
+
+Tracks may also be loaded from the command line. The optional scene selector is
+useful for repeatable smoke tests:
+
+```console
+$ ./build/musializer --scene orbital path/to/track.mp3
+$ ./build/musializer --scene atlas path/to/track.mp3
+$ ./build/musializer --scene terrarium path/to/track.mp3
+$ ./build/musializer --ascii-image path/to/image.png path/to/track.mp3
+$ ./build/musializer --scene orbital path/to/track.wav --render output.mp4
+```
+
+Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`, and
+`terrarium`. While the app is running, <kbd>1</kbd> through <kbd>6</kbd> switch
+between them. A
+command-line render exits automatically after FFmpeg finishes, making it useful
+for smoke tests and scripted renders.
+
+For a repeatable legacy-scene export smoke, use any short WAV fixture and check
+the resulting streams:
+
+```console
+$ ./build/musializer --scene spectrum fixture.wav --render /tmp/musializer-smoke.mp4
+$ ffprobe -v error -show_entries stream=codec_type,width,height,r_frame_rate \
+    -of compact /tmp/musializer-smoke.mp4
+```
+
+Optional offline analysis helpers for measured audio, Whisper timings, and
+cached MiMo interpretations are documented in
+[`tools/ANALYSIS_ADAPTERS.md`](tools/ANALYSIS_ADAPTERS.md) and
+[`tools/MEASURED_ANALYSIS.md`](tools/MEASURED_ANALYSIS.md). They are separate
+from the C renderer and never make network calls unless the MiMo helper is
+explicitly invoked without `--dry-run`.
+
 If the build fails because of missing header files, you may need to install the X11 dev packages.
 
 On Debian, Ubuntu, etc, do this:

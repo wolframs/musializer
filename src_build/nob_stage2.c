@@ -18,6 +18,95 @@ static const char *raylib_modules[] = {
     "utils",
 };
 
+typedef enum {
+    BUILD_PROFILE_RELEASE,
+    BUILD_PROFILE_DEBUG,
+    BUILD_PROFILE_SANITIZE,
+    BUILD_PROFILE_HOTRELOAD,
+} Build_Profile;
+
+// The no-argument build intentionally remains equivalent to the historical
+// optimized build. Named profiles are invocation-local; they do not rewrite
+// build/config.h.
+static Build_Profile build_profile = BUILD_PROFILE_RELEASE;
+
+static const char *build_profile_name(Build_Profile profile)
+{
+    switch (profile) {
+    case BUILD_PROFILE_RELEASE:   return "release";
+    case BUILD_PROFILE_DEBUG:     return "debug";
+    case BUILD_PROFILE_SANITIZE:  return "sanitize";
+    case BUILD_PROFILE_HOTRELOAD: return "hotreload";
+    }
+    return "unknown";
+}
+
+static bool parse_build_profile(const char *name, Build_Profile *profile)
+{
+    if (strcmp(name, "release") == 0) {
+        *profile = BUILD_PROFILE_RELEASE;
+    } else if (strcmp(name, "debug") == 0) {
+        *profile = BUILD_PROFILE_DEBUG;
+    } else if (strcmp(name, "sanitize") == 0) {
+        *profile = BUILD_PROFILE_SANITIZE;
+    } else if (strcmp(name, "hotreload") == 0) {
+        *profile = BUILD_PROFILE_HOTRELOAD;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static bool build_uses_hotreload(void)
+{
+    if (build_profile == BUILD_PROFILE_HOTRELOAD) return true;
+#ifdef MUSIALIZER_HOTRELOAD
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Centralized engine sources give every platform one clean insertion point.
+// Platform recipes append their own FFmpeg and host implementations.
+static void append_engine_sources(Nob_Cmd *cmd)
+{
+    nob_cmd_append(cmd,
+        "./src/plug.c",
+        "./src/audio_analyzer.c",
+        "./src/sample_ring.c",
+        "./src/ascii_art.c",
+        "./src/project.c",
+        "./src/scene.c",
+        "./src/scene_spectrum.c",
+        "./src/scene_pulse_field.c",
+        "./src/scene_orbital_lattice.c",
+        "./src/scene_ascii_field.c",
+        "./src/scene_song_atlas.c",
+        "./src/scene_spectral_terrarium.c");
+}
+
+static void append_posix_plug_sources(Nob_Cmd *cmd)
+{
+    append_engine_sources(cmd);
+    nob_cmd_append(cmd, "./src/ffmpeg_posix.c");
+}
+
+static void append_windows_plug_sources(Nob_Cmd *cmd)
+{
+    append_engine_sources(cmd);
+    nob_cmd_append(cmd, "./src/ffmpeg_windows.c");
+}
+
+static void append_tested_core_sources(Nob_Cmd *cmd)
+{
+    nob_cmd_append(cmd,
+        "./src/audio_analyzer.c",
+        "./src/sample_ring.c",
+        "./src/ascii_art.c",
+        "./src/project.c");
+}
+
 // @backcomp
 #if defined(MUSIALIZER_TARGET)
 #error "We recently replaced a single MUSIALIZER_TARGET macro with a bunch of MUSIALIZER_TARGET_<TARGET> macros instead. Since MUSIALIZER_TARGET is still defined your ./build/ is probably old. Please remove it so ./build/config.h gets regenerated."
@@ -41,12 +130,59 @@ static const char *raylib_modules[] = {
 
 void log_available_subcommands(const char *program, Nob_Log_Level level)
 {
-    nob_log(level, "Usage: %s [subcommand]", program);
+    nob_log(level, "Usage: %s [subcommand] [profile]", program);
     nob_log(level, "Subcommands:");
-    nob_log(level, "    build (default)");
+    nob_log(level, "    build [release|debug|sanitize|hotreload] (default: release)");
+    nob_log(level, "    test  [release|debug|sanitize] (default: debug)");
     nob_log(level, "    dist");
     nob_log(level, "    svg");
     nob_log(level, "    help");
+}
+
+static bool build_and_run_tests(Build_Profile profile)
+{
+    bool result = true;
+    Nob_Cmd cmd = {0};
+    Nob_File_Paths children = {0};
+
+    if (!nob_mkdir_if_not_exists("./build/tests")) nob_return_defer(false);
+    if (!nob_read_entire_dir("./tests", &children)) nob_return_defer(false);
+
+    nob_cmd_append(&cmd, "cc", "-std=c11", "-Wall", "-Wextra", "-Wpedantic", "-I.", "-Isrc", "-Itests");
+    if (profile == BUILD_PROFILE_RELEASE) {
+        nob_cmd_append(&cmd, "-O3", "-DNDEBUG");
+    } else if (profile == BUILD_PROFILE_SANITIZE) {
+        nob_cmd_append(&cmd, "-O1", "-g3", "-fno-omit-frame-pointer", "-fno-sanitize-recover=all",
+                       "-fsanitize=address,undefined");
+    } else {
+        nob_cmd_append(&cmd, "-O0", "-g3", "-fno-omit-frame-pointer");
+    }
+
+    nob_cmd_append(&cmd, "./tests/test_support.c", "./tests/audio_fixtures.c");
+    for (size_t i = 0; i < children.count; ++i) {
+        Nob_String_View name = nob_sv_from_cstr(children.items[i]);
+        if (name.count > 5 && strcmp(children.items[i], "test_support.c") != 0 &&
+            strncmp(name.data, "test_", 5) == 0 && nob_sv_end_with(name, ".c")) {
+            nob_cmd_append(&cmd, nob_temp_sprintf("./tests/%s", children.items[i]));
+        }
+    }
+    append_tested_core_sources(&cmd);
+    nob_cmd_append(&cmd, "-o", "./build/tests/musializer_tests", "-lm");
+    if (!nob_cmd_run(&cmd)) nob_return_defer(false);
+
+    if (profile == BUILD_PROFILE_SANITIZE) {
+        // LeakSanitizer cannot operate under ptrace-based sandboxes. ASan's
+        // bounds/use-after-free checks and UBSan remain fully enabled; use a
+        // separate leak checker on hosts where ptrace is available.
+        nob_cmd_append(&cmd, "env", "ASAN_OPTIONS=detect_leaks=0");
+    }
+    nob_cmd_append(&cmd, "./build/tests/musializer_tests");
+    if (!nob_cmd_run(&cmd)) nob_return_defer(false);
+
+defer:
+    nob_cmd_free(cmd);
+    nob_da_free(children);
+    return result;
 }
 
 typedef struct {
@@ -147,11 +283,38 @@ int main(int argc, char **argv)
     }
 
     if (strcmp(subcommand, "build") == 0) {
+        if (argc > 0) {
+            const char *profile_name = nob_shift_args(&argc, &argv);
+            if (!parse_build_profile(profile_name, &build_profile)) {
+                nob_log(NOB_ERROR, "Unknown build profile `%s`", profile_name);
+                return 1;
+            }
+        }
+        if (argc > 0) {
+            nob_log(NOB_ERROR, "Unexpected argument `%s`", argv[0]);
+            return 1;
+        }
+        nob_log(NOB_INFO, "Build profile: %s", build_profile_name(build_profile));
         if (!build_raylib()) return 1;
 #ifndef MUSIALIZER_UNBUNDLE
         if (!generate_resource_bundle()) return 1;
 #endif // MUSIALIZER_UNBUNDLE
         if (!build_musializer()) return 1;
+    } else if (strcmp(subcommand, "test") == 0) {
+        build_profile = BUILD_PROFILE_DEBUG;
+        if (argc > 0) {
+            const char *profile_name = nob_shift_args(&argc, &argv);
+            if (!parse_build_profile(profile_name, &build_profile) || build_profile == BUILD_PROFILE_HOTRELOAD) {
+                nob_log(NOB_ERROR, "Unknown or unsupported test profile `%s`", profile_name);
+                return 1;
+            }
+        }
+        if (argc > 0) {
+            nob_log(NOB_ERROR, "Unexpected argument `%s`", argv[0]);
+            return 1;
+        }
+        nob_log(NOB_INFO, "Test profile: %s", build_profile_name(build_profile));
+        if (!build_and_run_tests(build_profile)) return 1;
     } else if (strcmp(subcommand, "dist") == 0) {
         if (!build_dist()) return 1;
     } else if (strcmp(subcommand, "config") == 0) {

@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://musializer.local/schemas/project-v1.schema.json",
+  "title": "Musializer project v1",
+  "description": "Canonical .musi project contract. Arrays are serialized in evaluation order. Cue ordering and non-overlap constraints described below are additionally enforced by the C validator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "metadata",
+    "audio",
+    "output",
+    "deterministic_seed",
+    "scenes",
+    "cues",
+    "analysis_lanes"
+  ],
+  "properties": {
+    "schema_version": {"const": "musializer.project/v1"},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "audio": {"$ref": "#/$defs/audio_asset"},
+    "output": {"$ref": "#/$defs/output_settings"},
+    "deterministic_seed": {"$ref": "#/$defs/uint64"},
+    "scenes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/scene"},
+      "description": "Layer order is back to front. instance_id values must be unique."
+    },
+    "cues": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/parameter_cue"},
+      "description": "Must be sorted by (start_seconds, cue_id), with unique cue_id values. Ranges are half-open [start_seconds,end_seconds); cues for the same scene and parameter must not overlap. At a cue end the to_value persists until the next matching cue."
+    },
+    "analysis_lanes": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/analysis_lane"},
+      "description": "At most one reference of each kind is allowed. Each audio_sha256 must equal audio.sha256."
+    }
+  },
+  "$defs": {
+    "uint64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "positive_uint64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stable_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "title", "application_version"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/stable_name"},
+        "title": {"type": "string", "minLength": 1, "maxLength": 128},
+        "author": {"type": "string", "maxLength": 128, "default": ""},
+        "created_utc": {"type": "string", "maxLength": 32, "default": ""},
+        "modified_utc": {"type": "string", "maxLength": 32, "default": ""},
+        "application_version": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "audio_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "path", "sha256", "duration_seconds", "sample_rate", "channels"],
+      "properties": {
+        "mode": {"enum": ["imported", "referenced"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "sample_rate": {"type": "integer", "minimum": 1, "maximum": 768000},
+        "channels": {"type": "integer", "minimum": 1, "maximum": 64}
+      }
+    },
+    "output_settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "fps_numerator", "fps_denominator", "start_seconds", "end_seconds", "format"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 1600},
+        "height": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 900},
+        "fps_numerator": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 30},
+        "fps_denominator": {"type": "integer", "minimum": 1, "maximum": 1001, "default": 1},
+        "start_seconds": {"type": "number", "minimum": 0, "default": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "format": {"enum": ["mp4_h264", "mkv_h264", "webm_vp9", "mov_prores", "png_sequence"], "default": "mp4_h264"}
+      },
+      "description": "end_seconds must be greater than start_seconds and no greater than audio.duration_seconds. FPS is the exact rational fps_numerator/fps_denominator."
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "source", "band_index", "input_min", "input_max", "output_min", "output_max", "interpolation", "clamp"],
+      "properties": {
+        "parameter": {"$ref": "#/$defs/stable_name"},
+        "source": {"enum": ["rms", "peak", "spectral_flux", "beat_phase", "band"]},
+        "band_index": {"type": "integer", "minimum": 0, "maximum": 65535, "default": 0},
+        "input_min": {"type": "number"},
+        "input_max": {"type": "number"},
+        "output_min": {"type": "number"},
+        "output_max": {"type": "number"},
+        "interpolation": {"enum": ["step", "linear", "smoothstep", "ease_in", "ease_out"]},
+        "clamp": {"type": "boolean", "default": true}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"source": {"not": {"const": "band"}}}},
+          "then": {"properties": {"band_index": {"const": 0}}}
+        }
+      ],
+      "description": "input_max must be greater than input_min. Parameter names must be unique within their scene. clamp=false permits deterministic curve extrapolation."
+    },
+    "scene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "scene_type", "enabled", "start_seconds", "end_seconds", "opacity", "blend_mode", "mappings"],
+      "properties": {
+        "instance_id": {"$ref": "#/$defs/positive_uint64"},
+        "scene_type": {"$ref": "#/$defs/stable_name"},
+        "enabled": {"type": "boolean"},
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "opacity": {"type": "number", "minimum": 0, "maximum": 1},
+        "blend_mode": {"enum": ["normal", "add", "multiply", "screen"]},
+        "mappings": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/mapping"}
+        }
+      },
+      "description": "end_seconds must be greater than start_seconds and no greater than audio.duration_seconds."
+    },
+    "parameter_cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cue_id", "target_scene_id", "parameter", "start_seconds", "end_seconds", "from_value", "to_value", "interpolation"],
+      "properties": {
+        "cue_id": {"$ref": "#/$defs/positive_uint64"},
+        "target_scene_id": {"$ref": "#/$defs/positive_uint64"},
+        "parameter": {"$ref": "#/$defs/stable_name"},
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "from_value": {"type": "number"},
+        "to_value": {"type": "number"},
+        "interpolation": {"enum": ["step", "linear", "smoothstep", "ease_in", "ease_out"]}
+      },
+      "description": "target_scene_id must identify a scene; end_seconds must be greater than start_seconds and no greater than audio.duration_seconds."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "adapter_version", "schema_version"],
+      "properties": {
+        "adapter": {"$ref": "#/$defs/stable_name"},
+        "adapter_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "schema_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "model": {"type": "string", "maxLength": 128, "default": ""},
+        "provider": {"type": "string", "maxLength": 128, "default": ""},
+        "prompt_version": {"type": "string", "maxLength": 64, "default": ""}
+      }
+    },
+    "analysis_lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256", "audio_sha256", "provenance"],
+      "properties": {
+        "kind": {"enum": ["measured_signal", "lyric_timing", "semantic_score"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "audio_sha256": {"$ref": "#/$defs/sha256"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    }
+  }
+}
