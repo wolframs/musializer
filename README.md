@@ -62,6 +62,13 @@ $ ./nob test
 $ ./nob test sanitize
 ```
 
+The `release`, `debug`, and `hotreload` application profiles are implemented by
+the Linux, macOS, OpenBSD, MinGW-w64, and MSVC recipes. The full
+AddressSanitizer + UndefinedBehaviorSanitizer `sanitize` application profile is
+available on Linux and macOS; OpenBSD, MinGW-w64, and MSVC reject it explicitly
+instead of silently emitting a non-sanitized build. The test sanitizer likewise
+requires a host `cc` with compatible ASan and UBSan runtimes.
+
 Tracks may also be loaded from the command line. The optional scene selector is
 useful for repeatable smoke tests:
 
@@ -69,15 +76,18 @@ useful for repeatable smoke tests:
 $ ./build/musializer --scene orbital path/to/track.mp3
 $ ./build/musializer --scene atlas path/to/track.mp3
 $ ./build/musializer --scene terrarium path/to/track.mp3
+$ ./build/musializer --scene constellation \
+    --event lyric:1.25:42:0.9 --event cue:2.0:43:1.0 path/to/track.mp3
 $ ./build/musializer --ascii-image path/to/image.png path/to/track.mp3
 $ ./build/musializer --scene orbital path/to/track.wav --render output.mp4
 ```
 
-Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`, and
-`terrarium`. While the app is running, <kbd>1</kbd> through <kbd>6</kbd> switch
-between them. A
-command-line render exits automatically after FFmpeg finishes, making it useful
-for smoke tests and scripted renders.
+Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
+`terrarium`, and `constellation`. While the app is running, <kbd>1</kbd> through
+<kbd>7</kbd> switch between them. Repeatable `--event`
+`type:seconds:id:value` arguments accept `lyric`, `semantic`, `cue`, or `custom`
+events for Constellation replay. A command-line render exits automatically
+after FFmpeg finishes, making it useful for smoke tests and scripted renders.
 
 For a repeatable legacy-scene export smoke, use any short WAV fixture and check
 the resulting streams:
@@ -128,13 +138,16 @@ $ wine ./build/musializer.exe
 
 ## Hot Reloading
 
-Edit `./build/config.h` and enable `MUSIALIZER_HOTRELOAD`.
-
 ```console
-$ ./nob
+$ ./nob build hotreload
 $ ./build/musializer
 ```
 
+Enabling `MUSIALIZER_HOTRELOAD` in `./build/config.h` remains supported for
+existing local configurations, but the named profile is the recommended path.
+
 Keep the app running. Rebuild with `./nob`. Hot reload by focusing on the window of the app and pressing <kbd>h</kbd>.
+For an automated one-cycle handoff smoke, pass `--reload-once` together with a
+track or scripted render.
 
 The way it works is by putting the majority of the logic of the application into a `libplug` dynamic library and just reloading it when requested. The [rpath](https://en.wikipedia.org/wiki/Rpath) (aka hard-coded run-time search path) for that library is set to `.` and `./build/`. See [src_build/nob_linux.c](src_build/nob_linux.c) for more information on how everything is configured.

@@ -76,6 +76,7 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/audio_analyzer.c",
         "./src/sample_ring.c",
         "./src/ascii_art.c",
+        "./src/event_timeline.c",
         "./src/project.c",
         "./src/scene.c",
         "./src/scene_spectrum.c",
@@ -83,7 +84,8 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/scene_orbital_lattice.c",
         "./src/scene_ascii_field.c",
         "./src/scene_song_atlas.c",
-        "./src/scene_spectral_terrarium.c");
+        "./src/scene_spectral_terrarium.c",
+        "./src/scene_constellation.c");
 }
 
 static void append_posix_plug_sources(Nob_Cmd *cmd)
@@ -104,6 +106,7 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/audio_analyzer.c",
         "./src/sample_ring.c",
         "./src/ascii_art.c",
+        "./src/event_timeline.c",
         "./src/project.c");
 }
 

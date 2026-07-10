@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <complex.h>
+#include <errno.h>
 
 #include <raylib.h>
 
@@ -10,6 +11,50 @@
 #endif // _WIN32
 
 #include "./hotreload.h"
+
+static bool parse_command_line_event(const char *spec, Event_Record *event)
+{
+    if (spec == NULL || event == NULL) return false;
+    const char *separator = strchr(spec, ':');
+    if (separator == NULL || separator == spec || (size_t)(separator - spec) >= 16) return false;
+    char type[16] = {0};
+    memcpy(type, spec, (size_t)(separator - spec));
+
+    char *end = NULL;
+    errno = 0;
+    double timestamp = strtod(separator + 1, &end);
+    if (errno == ERANGE || end == separator + 1 || *end != ':') return false;
+
+    const char *id_text = end + 1;
+    const char *id_end = strchr(id_text, ':');
+    if (id_end == NULL || id_end == id_text) return false;
+    for (const char *digit = id_text; digit < id_end; ++digit) {
+        if (*digit < '0' || *digit > '9') return false;
+    }
+    errno = 0;
+    unsigned long long parsed_id = strtoull(id_text, &end, 10);
+    if (errno == ERANGE || end != id_end) return false;
+
+    const char *value_text = end + 1;
+    errno = 0;
+    float value = strtof(value_text, &end);
+    if (errno == ERANGE || end == value_text || *end != '\0') return false;
+    uint32_t event_type = 0;
+    if (strcmp(type, "lyric") == 0) event_type = EVENT_TYPE_LYRIC;
+    else if (strcmp(type, "semantic") == 0) event_type = EVENT_TYPE_SEMANTIC;
+    else if (strcmp(type, "cue") == 0) event_type = EVENT_TYPE_CUE;
+    else if (strcmp(type, "custom") == 0) event_type = EVENT_TYPE_CUSTOM;
+    else return false;
+
+    *event = (Event_Record) {
+        .timestamp_seconds = timestamp,
+        .id = (uint64_t)parsed_id,
+        .type = event_type,
+        .value_count = 1,
+        .values = {value},
+    };
+    return true; // The plug owns canonical validation and insertion.
+}
 
 int main(int argc, char **argv)
 {
@@ -51,6 +96,7 @@ int main(int argc, char **argv)
     plug_init();
     const char *render_output = NULL;
     bool command_line_error = false;
+    bool reload_once = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
@@ -69,6 +115,16 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--event") == 0) {
+            Event_Record event;
+            if (i + 1 >= argc ||
+                !parse_command_line_event(argv[++i], &event) ||
+                !plug_record_event(event)) {
+                TraceLog(LOG_WARNING, "Invalid command-line event; expected type:seconds:id:value");
+                command_line_error = true;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--render") == 0) {
             if (i + 1 >= argc) {
                 TraceLog(LOG_WARNING, "Missing command-line render output path");
@@ -76,6 +132,10 @@ int main(int argc, char **argv)
             } else {
                 render_output = argv[++i];
             }
+            continue;
+        }
+        if (strcmp(argv[i], "--reload-once") == 0) {
+            reload_once = true;
             continue;
         }
         if (!plug_load_track(argv[i])) {
@@ -86,6 +146,14 @@ int main(int argc, char **argv)
 
     bool exit_after_render = false;
     int exit_status = command_line_error ? 1 : 0;
+    if (reload_once && exit_status == 0) {
+        void *state = plug_pre_reload();
+        if (!reload_libplug()) {
+            exit_status = 1;
+        } else {
+            plug_post_reload(state);
+        }
+    }
     if (render_output != NULL && exit_status == 0) {
         exit_after_render = plug_start_render(render_output);
         if (!exit_after_render) {

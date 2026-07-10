@@ -1,10 +1,49 @@
 #define MUSIALIZER_TARGET_NAME "win64-msvc"
 
+static bool msvc_profile_supported(void)
+{
+    if (build_profile == BUILD_PROFILE_SANITIZE) {
+        nob_log(NOB_ERROR,
+                "The sanitize profile is not supported by the MSVC recipe (MSVC has no UBSan equivalent for the requested ASan+UBSan profile)");
+        return false;
+    }
+    return true;
+}
+
+static void append_msvc_profile_flags(Nob_Cmd *cmd)
+{
+    switch (build_profile) {
+    case BUILD_PROFILE_RELEASE:
+        nob_cmd_append(cmd, "/O2", "/DNDEBUG", "/GL");
+        break;
+    case BUILD_PROFILE_DEBUG:
+    case BUILD_PROFILE_HOTRELOAD:
+        nob_cmd_append(cmd, "/Od", "/Z7", "/Oy-");
+        break;
+    case BUILD_PROFILE_SANITIZE:
+        break; // Rejected by msvc_profile_supported().
+    }
+}
+
+static const char *msvc_raylib_build_path(void)
+{
+    if (build_profile == BUILD_PROFILE_RELEASE && !build_uses_hotreload()) {
+        return nob_temp_sprintf("./build/raylib/%s", MUSIALIZER_TARGET_NAME);
+    }
+    return nob_temp_sprintf("./build/raylib/%s-%s-%s", MUSIALIZER_TARGET_NAME,
+                            build_profile_name(build_profile),
+                            build_uses_hotreload() ? "shared" : "static");
+}
+
 bool build_musializer(void)
 {
     bool result = true;
     Nob_Cmd cmd = {0};
     Nob_Procs procs = {0};
+
+    if (!msvc_profile_supported()) nob_return_defer(false);
+    const bool hotreload = build_uses_hotreload();
+    const char *raylib_path = msvc_raylib_build_path();
 
     cmd.count = 0;
         nob_cmd_append(&cmd, "rc");
@@ -12,11 +51,13 @@ bool build_musializer(void)
         nob_cmd_append(&cmd, "./src/musializer.rc");
         // NOTE: Do not change the order of commandline arguments to rc. Their argparser is weird.
     if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
-#ifdef MUSIALIZER_HOTRELOAD
+    if (hotreload) {
     procs.count = 0;
         cmd.count = 0;
             nob_cmd_append(&cmd, "cl.exe");
             nob_cmd_append(&cmd, "/LD");
+            nob_cmd_append(&cmd, "/DMUSIALIZER_HOTRELOAD");
+            append_msvc_profile_flags(&cmd);
             nob_cmd_append(&cmd, "/Fobuild\\", "/Fe./build/libplug.dll");
             nob_cmd_append(&cmd, "/I", "./");
             nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER);
@@ -24,13 +65,15 @@ bool build_musializer(void)
             nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
             nob_cmd_append(&cmd,
                 "/link",
-                nob_temp_sprintf("/LIBPATH:build/raylib/%s", MUSIALIZER_TARGET_NAME),
+                nob_temp_sprintf("/LIBPATH:%s", raylib_path),
                 "raylib.lib");
             nob_cmd_append(&cmd, "Winmm.lib", "gdi32.lib", "User32.lib", "Shell32.lib", "Ole32.lib", "comdlg32.lib");
         nob_da_append(&procs, nob_cmd_run_async(cmd));
 
         cmd.count = 0;
             nob_cmd_append(&cmd, "cl.exe");
+            nob_cmd_append(&cmd, "/DMUSIALIZER_HOTRELOAD");
+            append_msvc_profile_flags(&cmd);
             nob_cmd_append(&cmd, "/I", "./");
             nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER);
             nob_cmd_append(&cmd, "/Fobuild\\", "/Febuild\\musializer.exe");
@@ -42,17 +85,18 @@ bool build_musializer(void)
                 "/link",
                 "/SUBSYSTEM:WINDOWS",
                 "/entry:mainCRTStartup",
-                nob_temp_sprintf("/LIBPATH:build/raylib/%s", MUSIALIZER_TARGET_NAME),
+                nob_temp_sprintf("/LIBPATH:%s", raylib_path),
                 "raylib.lib");
             nob_cmd_append(&cmd, "Winmm.lib", "gdi32.lib", "User32.lib", "Shell32.lib", "./build/musializer.res");
         nob_da_append(&procs, nob_cmd_run_async(cmd));
     if (!nob_procs_wait(procs)) nob_return_defer(false);
-#else
+    } else {
     cmd.count = 0;
         nob_cmd_append(&cmd, "cl.exe");
         nob_cmd_append(&cmd, "/I", "./");
         nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "/Fobuild\\", "/Febuild\\musializer.exe");
+        append_msvc_profile_flags(&cmd);
         nob_cmd_append(&cmd, "./src/musializer.c");
         append_windows_plug_sources(&cmd);
         nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
@@ -60,13 +104,13 @@ bool build_musializer(void)
             "/link",
             "/SUBSYSTEM:WINDOWS",
             "/entry:mainCRTStartup",
-            nob_temp_sprintf("/LIBPATH:build/raylib/%s", MUSIALIZER_TARGET_NAME),
+            nob_temp_sprintf("/LIBPATH:%s", raylib_path),
             "raylib.lib");
         nob_cmd_append(&cmd, "Winmm.lib", "gdi32.lib", "User32.lib", "Shell32.lib", "Ole32.lib", "comdlg32.lib", "./build/musializer.res");
         // TODO: is some sort of `-static` flag needed for MSVC to get a statically linked executable
         //nob_cmd_append(&cmd, "-static");
     if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
-#endif // MUSIALIZER_HOTRELOAD
+    }
 
 defer:
     nob_cmd_free(cmd);
@@ -80,13 +124,15 @@ bool build_raylib(void)
     Nob_Cmd cmd = {0};
     Nob_File_Paths object_files = {0};
 
+    if (!msvc_profile_supported()) nob_return_defer(false);
+
     if (!nob_mkdir_if_not_exists("./build/raylib")) {
         nob_return_defer(false);
     }
 
     Nob_Procs procs = {0};
 
-    const char *build_path = nob_temp_sprintf("./build/raylib/%s", MUSIALIZER_TARGET_NAME);
+    const char *build_path = msvc_raylib_build_path();
 
     if (!nob_mkdir_if_not_exists(build_path)) {
         nob_return_defer(false);
@@ -101,9 +147,10 @@ bool build_raylib(void)
         if (nob_needs_rebuild(output_path, &input_path, 1)) {
             cmd.count = 0;
             nob_cmd_append(&cmd, "cl.exe", "/DPLATFORM_DESKTOP", "/DSUPPORT_FILEFORMAT_FLAC=1");
-            #ifdef MUSIALIZER_HOTRELOAD
+            if (build_uses_hotreload()) {
                 nob_cmd_append(&cmd, "/DBUILD_LIBTYPE_SHARED");
-            #endif
+            }
+            append_msvc_profile_flags(&cmd);
             nob_cmd_append(&cmd, "/I", RAYLIB_SRC_FOLDER"external/glfw/include");
             nob_cmd_append(&cmd, "/c", input_path);
             nob_cmd_append(&cmd, nob_temp_sprintf("/Fo%s", output_path));
@@ -114,7 +161,7 @@ bool build_raylib(void)
     cmd.count = 0;
 
     if (!nob_procs_wait(procs)) nob_return_defer(false);
-#ifndef MUSIALIZER_HOTRELOAD
+    if (!build_uses_hotreload()) {
     const char *libraylib_path = nob_temp_sprintf("%s/raylib.lib", build_path);
     if (nob_needs_rebuild(libraylib_path, object_files.items, object_files.count)) {
         nob_cmd_append(&cmd, "lib");
@@ -125,7 +172,7 @@ bool build_raylib(void)
         nob_cmd_append(&cmd, nob_temp_sprintf("/OUT:%s", libraylib_path));
         if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
     }
-#else
+    } else {
     if (nob_needs_rebuild("./build/raylib.dll", object_files.items, object_files.count)) {
         nob_cmd_append(&cmd, "link.exe", "/DLL");
         for (size_t i = 0; i < NOB_ARRAY_LEN(raylib_modules); ++i) {
@@ -137,7 +184,7 @@ bool build_raylib(void)
         nob_cmd_append(&cmd, "/OUT:./build/raylib.dll");
         if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
     }
-#endif // MUSIALIZER_HOTRELOAD
+    }
 
 defer:
     nob_cmd_free(cmd);
@@ -147,11 +194,11 @@ defer:
 
 bool build_dist(void)
 {
-#ifdef MUSIALIZER_HOTRELOAD
+    if (build_uses_hotreload()) {
     nob_log(NOB_ERROR, "We do not ship with hotreload enabled");
     return false;
-#else
+    } else {
     nob_log(NOB_ERROR, "TODO: Creating distro for MSVC build is not implemented yet");
     return false;
-#endif // MUSIALIZER_HOTRELOAD
+    }
 }

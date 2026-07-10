@@ -1,50 +1,81 @@
 #include <stddef.h>
 #define MUSIALIZER_TARGET_NAME "macos"
 
+static void append_macos_profile_flags(Nob_Cmd *cmd)
+{
+    switch (build_profile) {
+    case BUILD_PROFILE_RELEASE:
+        nob_cmd_append(cmd, "-O3", "-DNDEBUG", "-flto");
+        break;
+    case BUILD_PROFILE_SANITIZE:
+        nob_cmd_append(cmd, "-O1", "-g3", "-fno-omit-frame-pointer",
+                       "-fno-sanitize-recover=all", "-fsanitize=address,undefined");
+        break;
+    case BUILD_PROFILE_DEBUG:
+    case BUILD_PROFILE_HOTRELOAD:
+        nob_cmd_append(cmd, "-O0", "-g3", "-fno-omit-frame-pointer");
+        break;
+    }
+}
+
+static const char *macos_raylib_build_path(void)
+{
+    if (build_profile == BUILD_PROFILE_RELEASE && !build_uses_hotreload()) {
+        return nob_temp_sprintf("./build/raylib/%s", MUSIALIZER_TARGET_NAME);
+    }
+    return nob_temp_sprintf("./build/raylib/%s-%s-%s", MUSIALIZER_TARGET_NAME,
+                            build_profile_name(build_profile),
+                            build_uses_hotreload() ? "shared" : "static");
+}
+
 bool build_musializer(void)
 {
     bool result = true;
     Nob_Cmd cmd = {0};
     Nob_Procs procs = {0};
 
-#ifdef MUSIALIZER_HOTRELOAD
+    const bool hotreload = build_uses_hotreload();
+    const char *raylib_path = macos_raylib_build_path();
+    if (hotreload) {
     procs.count = 0;
     cmd.count = 0;
         // TODO: add a way to replace `cc` with something else GCC compatible on POSIX
         // Like `clang` for instance
         nob_cmd_append(&cmd, "clang");
-        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-DMUSIALIZER_HOTRELOAD");
         nob_cmd_append(&cmd, "-I.");
         nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "-fPIC", "-shared");
         nob_cmd_append(&cmd, "-o", "./build/libplug.dylib");
         append_posix_plug_sources(&cmd);
         nob_cmd_append(&cmd, "./thirdparty/tinyfiledialogs.c");
-        nob_cmd_append(&cmd, "./build/raylib/macos/libraylib.dylib");
+        nob_cmd_append(&cmd, nob_temp_sprintf("%s/libraylib.dylib", raylib_path));
+        append_macos_profile_flags(&cmd);
         nob_cmd_append(&cmd, "-lm", "-ldl", "-lpthread");
     nob_da_append(&procs, nob_cmd_run_async(cmd));
 
     cmd.count = 0;
         nob_cmd_append(&cmd, "clang");
-        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
+        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-DMUSIALIZER_HOTRELOAD");
         nob_cmd_append(&cmd, "-I.");
         nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "-o", "./build/musializer");
         nob_cmd_append(&cmd,
             "./src/musializer.c",
             "./src/hotreload_posix.c");
-        nob_cmd_append(&cmd, "./build/raylib/macos/libraylib.dylib");
+        nob_cmd_append(&cmd, nob_temp_sprintf("%s/libraylib.dylib", raylib_path));
+        append_macos_profile_flags(&cmd);
         nob_cmd_append(&cmd, "-lm", "-ldl", "-lpthread");
         nob_cmd_append(&cmd, "-rpath", "./build");
-        nob_cmd_append(&cmd, "-rpath", "./build/raylib/macos");
+        nob_cmd_append(&cmd, "-rpath", raylib_path);
         nob_cmd_append(&cmd, "-rpath", "./");
-        nob_cmd_append(&cmd, "-rpath", "./raylib/macos");
+        nob_cmd_append(&cmd, "-rpath", nob_temp_sprintf(".%s", raylib_path + strlen("./build")));
     nob_da_append(&procs, nob_cmd_run_async(cmd));
     if (!nob_procs_wait(procs)) nob_return_defer(false);
-#else
+    } else {
     cmd.count = 0;
         nob_cmd_append(&cmd, "clang");
-        nob_cmd_append(&cmd, "-Wall", "-Wextra", "-g");
+        nob_cmd_append(&cmd, "-Wall", "-Wextra");
         nob_cmd_append(&cmd, "-I.");
         nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER);
         nob_cmd_append(&cmd, "-o", "./build/musializer");
@@ -52,7 +83,8 @@ bool build_musializer(void)
         nob_cmd_append(&cmd,
             "./src/musializer.c",
             "./thirdparty/tinyfiledialogs.c");
-        nob_cmd_append(&cmd, "./build/raylib/macos/libraylib.a");
+        nob_cmd_append(&cmd, nob_temp_sprintf("%s/libraylib.a", raylib_path));
+        append_macos_profile_flags(&cmd);
 
         nob_cmd_append(&cmd, "-framework", "CoreVideo");
         nob_cmd_append(&cmd, "-framework", "IOKit");
@@ -62,7 +94,7 @@ bool build_musializer(void)
 
         nob_cmd_append(&cmd, "-lm", "-ldl", "-lpthread");
     if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
-#endif // MUSIALIZER_HOTRELOAD
+    }
 
 defer:
     nob_cmd_free(cmd);
@@ -82,7 +114,7 @@ bool build_raylib(void)
 
     Nob_Procs procs = {0};
 
-    const char *build_path = nob_temp_sprintf("./build/raylib/%s", MUSIALIZER_TARGET_NAME);
+    const char *build_path = macos_raylib_build_path();
 
     if (!nob_mkdir_if_not_exists(build_path)) {
         nob_return_defer(false);
@@ -101,6 +133,7 @@ bool build_raylib(void)
             nob_cmd_append(&cmd, "-I"RAYLIB_SRC_FOLDER"external/glfw/include");
             nob_cmd_append(&cmd, "-Iexternal/glfw/deps/ming");
             nob_cmd_append(&cmd, "-DGRAPHICS_API_OPENGL_33");
+            append_macos_profile_flags(&cmd);
             if(strcmp(raylib_modules[i], "rglfw") == 0) {
                 nob_cmd_append(&cmd, "-x", "objective-c");
             }
@@ -115,7 +148,7 @@ bool build_raylib(void)
 
     if (!nob_procs_wait(procs)) nob_return_defer(false);
 
-#ifndef MUSIALIZER_HOTRELOAD
+    if (!build_uses_hotreload()) {
     const char *libraylib_path = nob_temp_sprintf("%s/libraylib.a", build_path);
 
     if (nob_needs_rebuild(libraylib_path, object_files.items, object_files.count)) {
@@ -126,7 +159,7 @@ bool build_raylib(void)
         }
         if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
     }
-#else
+    } else {
     const char *libraylib_path = nob_temp_sprintf("%s/libraylib.dylib", build_path);
 
     if (nob_needs_rebuild(libraylib_path, object_files.items, object_files.count)) {
@@ -143,9 +176,10 @@ bool build_raylib(void)
             const char *input_path = nob_temp_sprintf("%s/%s.o", build_path, raylib_modules[i]);
             nob_cmd_append(&cmd, input_path);
         }
+        append_macos_profile_flags(&cmd);
         if (!nob_cmd_run_sync(cmd)) nob_return_defer(false);
     }
-#endif // MUSIALIZER_HOTRELOAD
+    }
 
 defer:
     nob_cmd_free(cmd);
@@ -155,10 +189,11 @@ defer:
 
 bool build_dist(void)
 {
-#if defined(MUSIALIZER_HOTRELOAD)
+    if (build_uses_hotreload()) {
     nob_log(NOB_ERROR, "We do not ship with hotreload enabled");
     return false;
-#elif defined(MUSIALIZER_UNBUNDLE)
+    }
+#if defined(MUSIALIZER_UNBUNDLE)
     nob_log(NOB_ERROR, "We do not ship with unbundled resources");
     return false;
 #else
@@ -211,5 +246,5 @@ bool build_dist(void)
                         "./build/AppIcon.iconset");
     if (!nob_cmd_run_sync(cmd)) return false;
     return true;
-#endif // MUSIALIZER_HOTRELOAD
+#endif // MUSIALIZER_UNBUNDLE
 }

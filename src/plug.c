@@ -85,7 +85,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define RENDER_HEIGHT (9*RENDER_FACTOR)
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 2
+#define PLUG_STATE_VERSION 4
 
 #define COLOR_ACCENT                  ColorFromHSV(225, 0.75, 0.8)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -211,6 +211,7 @@ typedef struct {
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;
+    Event_Timeline event_timeline;
 
     uint64_t active_button_id;
 
@@ -414,9 +415,9 @@ MUSIALIZER_PLUG bool plug_load_ascii_image(const char *file_path)
     return true;
 }
 
-MUSIALIZER_PLUG bool plug_select_scene(const char *name)
+static bool scene_id_from_name(const char *name, Scene_Id *result)
 {
-    if (name == NULL) return false;
+    if (name == NULL || result == NULL) return false;
 
     Scene_Id id;
     if (strcmp(name, "spectrum") == 0) {
@@ -431,11 +432,42 @@ MUSIALIZER_PLUG bool plug_select_scene(const char *name)
         id = SCENE_SONG_ATLAS;
     } else if (strcmp(name, "terrarium") == 0 || strcmp(name, "spectral-terrarium") == 0) {
         id = SCENE_SPECTRAL_TERRARIUM;
+    } else if (strcmp(name, "constellation") == 0) {
+        id = SCENE_CONSTELLATION;
     } else {
         return false;
     }
 
+    *result = id;
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_select_scene(const char *name)
+{
+    Scene_Id id;
+    if (!scene_id_from_name(name, &id)) return false;
+
     return scene_instance_select(&p->scene, id, p->scene.seed);
+}
+
+static const char *scene_stable_name(Scene_Id id)
+{
+    switch (id) {
+    case SCENE_SPECTRUM: return "spectrum";
+    case SCENE_PULSE_FIELD: return "pulse";
+    case SCENE_ORBITAL_LATTICE: return "orbital";
+    case SCENE_ASCII_FIELD: return "ascii";
+    case SCENE_SONG_ATLAS: return "atlas";
+    case SCENE_SPECTRAL_TERRARIUM: return "terrarium";
+    case SCENE_CONSTELLATION: return "constellation";
+    case COUNT_SCENES: break;
+    }
+    return "spectrum";
+}
+
+MUSIALIZER_PLUG bool plug_record_event(Event_Record event)
+{
+    return event_timeline_record(&p->event_timeline, &event) == EVENT_TIMELINE_OK;
 }
 
 static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seconds, float delta_seconds)
@@ -457,6 +489,7 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         .time_seconds = time_seconds,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
+        .events = event_timeline_view(&p->event_timeline),
         .audio = {
             .bands = spectrum.smooth,
             .trails = spectrum.smear,
@@ -504,6 +537,9 @@ static void update_scene_shortcuts(void)
     }
     if (IsKeyPressed(KEY_SIX)) {
         scene_instance_select(&p->scene, SCENE_SPECTRAL_TERRARIUM, p->scene.seed);
+    }
+    if (IsKeyPressed(KEY_SEVEN)) {
+        scene_instance_select(&p->scene, SCENE_CONSTELLATION, p->scene.seed);
     }
 }
 
@@ -1930,12 +1966,176 @@ static void load_assets(void)
     }
 }
 
-static void unload_assets()
+static void unload_assets(void)
 {
     UnloadFont(p->font);
     UnloadShader(p->circle);
     for (UI_Icon icon = 0; icon < COUNT_UI_ICONS; ++icon) {
         UnloadTexture(p->icon_textures[icon]);
+    }
+    memset(&p->font, 0, sizeof(p->font));
+    memset(&p->circle, 0, sizeof(p->circle));
+    memset(p->icon_textures, 0, sizeof(p->icon_textures));
+}
+
+static void release_reload_sensitive_resources(void)
+{
+#ifdef MUSIALIZER_MICROPHONE
+    // miniaudio retains ma_callback, so the device must be stopped before the
+    // old shared object is unmapped.
+    if (p->microphone_working) {
+        ma_device_uninit(&p->microphone);
+        analyzer_drain_realtime_samples();
+        drwav_uninit(&p->wav);
+        memset(&p->microphone, 0, sizeof(p->microphone));
+        memset(&p->wav, 0, sizeof(p->wav));
+        p->microphone_working = false;
+        p->capturing = false;
+    }
+#endif
+
+    // An encoder pipe/child cannot be resumed by code with a different ABI.
+    // Cancel it deterministically while the implementation that created the
+    // handle is still loaded.
+    if (p->ffmpeg != NULL) {
+        ffmpeg_end_rendering(p->ffmpeg, true);
+        p->ffmpeg = NULL;
+    }
+    if (p->wave_samples != NULL) {
+        UnloadWaveSamples(p->wave_samples);
+        p->wave_samples = NULL;
+    }
+    if (IsWaveValid(p->wave)) UnloadWave(p->wave);
+    memset(&p->wave, 0, sizeof(p->wave));
+    p->wave_cursor = 0;
+    p->rendering = false;
+    p->cancel_rendering = false;
+    SetTargetFPS(PREVIEW_FPS);
+
+    for (size_t i = 0; i < p->tracks.count; ++i) {
+        Track *track = &p->tracks.items[i];
+        DetachAudioStreamProcessor(track->music.stream, callback);
+        UnloadMusicStream(track->music);
+        memset(&track->music, 0, sizeof(track->music));
+    }
+
+    const Scene_Descriptor *descriptor = scene_descriptor(p->scene.id);
+    if (descriptor != NULL && descriptor->unload != NULL) {
+        // A scene-specific destructor is code from this shared object.  Run it
+        // now; post-reload will recreate the selected scene from its id/seed.
+        Scene_Id id = p->scene.id;
+        uint64_t seed = p->scene.seed;
+        scene_instance_unload(&p->scene);
+        p->scene.id = id;
+        p->scene.seed = seed;
+        p->scene.state_version = descriptor->state_version;
+        p->scene.state_size = descriptor->state_size;
+    }
+
+    if (IsRenderTextureValid(p->screen)) UnloadRenderTexture(p->screen);
+    memset(&p->screen, 0, sizeof(p->screen));
+    unload_assets();
+    sample_ring_reset(&p->sample_ring);
+}
+
+static void free_rejected_reload_allocations(Plug_Reload_Handoff *handoff)
+{
+    if (handoff == NULL) return;
+    if (handoff->owned_allocation_count <= handoff->owned_allocation_capacity) {
+        for (size_t i = 0; i < handoff->owned_allocation_count; ++i) {
+            free(handoff->owned_allocations[i]);
+        }
+    }
+    free(handoff->owned_allocations);
+    handoff->owned_allocations = NULL;
+    handoff->owned_allocation_count = 0;
+    handoff->owned_allocation_capacity = 0;
+}
+
+// Exact prefix emitted by checkpoint c842841. ABI 2 appends the bounded event
+// snapshot, but must still be able to release and recover an in-flight ABI-1
+// handoff created before the new shared object is loaded.
+typedef struct Plug_Reload_Handoff_V1 {
+    uint64_t magic;
+    uint32_t abi_version;
+    uint32_t struct_size;
+    void *opaque_state;
+    uint64_t state_magic;
+    uint32_t state_version;
+    uint32_t reserved;
+    size_t state_size;
+    void **owned_allocations;
+    size_t owned_allocation_count;
+    size_t owned_allocation_capacity;
+    char current_track_path[PLUG_RELOAD_PATH_CAPACITY];
+    char scene_name[PLUG_RELOAD_SCENE_NAME_CAPACITY];
+    float current_track_position;
+    uint64_t scene_seed;
+    bool current_track_was_playing;
+} Plug_Reload_Handoff_V1;
+
+static void restore_incompatible_handoff(Plug_Reload_Handoff *handoff,
+                                         bool includes_events)
+{
+    char track_path[PLUG_RELOAD_PATH_CAPACITY];
+    char selected_scene[PLUG_RELOAD_SCENE_NAME_CAPACITY];
+    memcpy(track_path, handoff->current_track_path, sizeof(track_path));
+    memcpy(selected_scene, handoff->scene_name, sizeof(selected_scene));
+    float position = handoff->current_track_position;
+    bool was_playing = handoff->current_track_was_playing;
+    uint64_t seed = handoff->scene_seed;
+
+    free_rejected_reload_allocations(handoff);
+    plug_init();
+
+    Scene_Id recovered_scene;
+    if (selected_scene[0] != '\0' &&
+        scene_id_from_name(selected_scene, &recovered_scene)) {
+        scene_instance_select(&p->scene, recovered_scene, seed);
+    }
+    if (includes_events && handoff->event_count <= EVENT_TIMELINE_CAPACITY) {
+        for (size_t i = 0; i < handoff->event_count; ++i) {
+            if (event_timeline_record(&p->event_timeline, &handoff->events[i]) != EVENT_TIMELINE_OK) {
+                TraceLog(LOG_WARNING, "HOTRELOAD: stopped restoring invalid event timeline");
+                break;
+            }
+        }
+    }
+    if (track_path[0] != '\0' && plug_load_track(track_path)) {
+        Track *track = current_track();
+        if (position > 0.0f) SeekMusicStream(track->music, position);
+        if (!was_playing) PauseMusicStream(track->music);
+    }
+    free(handoff);
+}
+
+static void restore_reloaded_tracks(float current_position, bool current_was_playing)
+{
+    size_t write_index = 0;
+    int restored_current = -1;
+    for (size_t read_index = 0; read_index < p->tracks.count; ++read_index) {
+        Track track = p->tracks.items[read_index];
+        track.music = LoadMusicStream(track.file_path);
+        if (!IsMusicValid(track.music)) {
+            TraceLog(LOG_WARNING, "HOTRELOAD: could not restore track %s", track.file_path);
+            free(track.file_path);
+            continue;
+        }
+        AttachAudioStreamProcessor(track.music.stream, callback);
+        p->tracks.items[write_index] = track;
+        if ((int)read_index == p->current_track) restored_current = (int)write_index;
+        write_index += 1;
+    }
+    p->tracks.count = write_index;
+    p->current_track = restored_current >= 0 ? restored_current : (write_index > 0 ? 0 : -1);
+
+    Track *track = current_track();
+    if (track != NULL) {
+        start_preview_track(track);
+        if (current_position > 0.0f) SeekMusicStream(track->music, current_position);
+        if (!current_was_playing) PauseMusicStream(track->music);
+    } else {
+        analyzer_configure(48000, 2);
     }
 }
 
@@ -1949,6 +2149,7 @@ MUSIALIZER_PLUG void plug_init(void)
     p->state_version = PLUG_STATE_VERSION;
     p->state_size = sizeof(*p);
     NOB_ASSERT(sample_ring_init(&p->sample_ring, p->sample_ring_storage, SAMPLE_RING_CAPACITY));
+    event_timeline_init(&p->event_timeline);
     analyzer_configure(48000, 2);
     NOB_ASSERT(scene_instance_init(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
 
@@ -1963,48 +2164,125 @@ MUSIALIZER_PLUG void plug_init(void)
 
 MUSIALIZER_PLUG void *plug_pre_reload(void)
 {
-#ifdef MUSIALIZER_MICROPHONE
-    // A miniaudio device stores the callback's function pointer. It must not
-    // survive unloading the shared object that contains ma_callback.
-    if (p->microphone_working) {
-        ma_device_uninit(&p->microphone);
-        analyzer_drain_realtime_samples();
-        drwav_uninit(&p->wav);
-        p->microphone_working = false;
-        p->capturing = false;
+    if (p == NULL) return NULL;
+
+    const size_t allocation_count = 3 + p->tracks.count;
+    Plug_Reload_Handoff *handoff = calloc(1, sizeof(*handoff));
+    void **owned_allocations = calloc(allocation_count, sizeof(*owned_allocations));
+    if (handoff != NULL && owned_allocations != NULL) {
+        handoff->magic = PLUG_RELOAD_HANDOFF_MAGIC;
+        handoff->abi_version = PLUG_RELOAD_HANDOFF_ABI_VERSION;
+        handoff->struct_size = sizeof(*handoff);
+        handoff->opaque_state = p;
+        handoff->state_magic = p->state_magic;
+        handoff->state_version = p->state_version;
+        handoff->state_size = p->state_size;
+        handoff->owned_allocations = owned_allocations;
+        handoff->owned_allocation_capacity = allocation_count;
+        handoff->scene_seed = p->scene.seed;
+        Event_Timeline_View events = event_timeline_view(&p->event_timeline);
+        handoff->event_count = events.count;
+        if (handoff->event_count > EVENT_TIMELINE_CAPACITY) {
+            handoff->event_count = EVENT_TIMELINE_CAPACITY;
+        }
+        memcpy(handoff->events, events.events,
+               handoff->event_count*sizeof(handoff->events[0]));
+        const char *selected_scene = scene_stable_name(p->scene.id);
+        snprintf(handoff->scene_name, sizeof(handoff->scene_name), "%s", selected_scene);
+
+        Track *track = current_track();
+        if (track != NULL) {
+            snprintf(handoff->current_track_path, sizeof(handoff->current_track_path), "%s", track->file_path);
+            handoff->current_track_position = GetMusicTimePlayed(track->music);
+            handoff->current_track_was_playing = IsMusicStreamPlaying(track->music);
+        }
+
+        owned_allocations[handoff->owned_allocation_count++] = p;
+        if (p->tracks.items != NULL) owned_allocations[handoff->owned_allocation_count++] = p->tracks.items;
+        for (size_t i = 0; i < p->tracks.count; ++i) {
+            if (p->tracks.items[i].file_path != NULL) {
+                owned_allocations[handoff->owned_allocation_count++] = p->tracks.items[i].file_path;
+            }
+        }
+        const Scene_Descriptor *descriptor = scene_descriptor(p->scene.id);
+        if (p->scene.state != NULL && (descriptor == NULL || descriptor->unload == NULL)) {
+            owned_allocations[handoff->owned_allocation_count++] = p->scene.state;
+        }
     }
-#endif
-    for (size_t i = 0; i < p->tracks.count; ++i) {
-        Track *it = &p->tracks.items[i];
-        DetachAudioStreamProcessor(it->music.stream, callback);
+
+    release_reload_sensitive_resources();
+    if (handoff == NULL || owned_allocations == NULL) {
+        // Allocation failure is rare, but dlclose is still imminent.  Prefer a
+        // clean fresh session over leaking resources or retaining callbacks.
+        free(handoff);
+        free(owned_allocations);
+        for (size_t i = 0; i < p->tracks.count; ++i) free(p->tracks.items[i].file_path);
+        free(p->tracks.items);
+        if (p->scene.state != NULL) scene_instance_unload(&p->scene);
+        free(p);
+        p = NULL;
+        return NULL;
     }
-    unload_assets();
-    return p;
+    p = NULL;
+    return handoff;
 }
 
 MUSIALIZER_PLUG void plug_post_reload(void *pp)
 {
-    Plug *persisted = pp;
-    if (persisted == NULL ||
-        persisted->state_magic != PLUG_STATE_MAGIC ||
-        persisted->state_version != PLUG_STATE_VERSION ||
-        persisted->state_size != sizeof(*persisted)) {
-        TraceLog(LOG_WARNING, "HOTRELOAD: incompatible plug state; starting a fresh session");
-        free(pp);
+    Plug_Reload_Handoff *handoff = pp;
+    if (handoff == NULL || handoff->magic != PLUG_RELOAD_HANDOFF_MAGIC) {
+        // A pre-handoff plug cannot provide a layout-independent allocation
+        // inventory.  This is the one unsupported upgrade edge: restart once
+        // when crossing from such a development build.
+        TraceLog(LOG_WARNING, "HOTRELOAD: legacy/invalid handoff; starting a fresh session");
+        plug_init();
+        return;
+    }
+    if (handoff->abi_version == 1u &&
+        handoff->struct_size == sizeof(Plug_Reload_Handoff_V1)) {
+        TraceLog(LOG_INFO, "HOTRELOAD: upgrading ABI-1 handoff");
+        restore_incompatible_handoff(handoff, false);
+        return;
+    }
+    if (handoff->abi_version != PLUG_RELOAD_HANDOFF_ABI_VERSION ||
+        handoff->struct_size != sizeof(*handoff)) {
+        TraceLog(LOG_WARNING, "HOTRELOAD: unknown handoff ABI; restart required");
         plug_init();
         return;
     }
 
+    Plug *persisted = handoff->opaque_state;
+    if (persisted == NULL ||
+        handoff->state_magic != PLUG_STATE_MAGIC ||
+        handoff->state_version != PLUG_STATE_VERSION ||
+        handoff->state_size != sizeof(*persisted) ||
+        persisted->state_magic != handoff->state_magic ||
+        persisted->state_version != handoff->state_version ||
+        persisted->state_size != handoff->state_size ||
+        handoff->owned_allocations == NULL ||
+        handoff->owned_allocation_count > handoff->owned_allocation_capacity) {
+        TraceLog(LOG_WARNING, "HOTRELOAD: incompatible plug state; starting a fresh session");
+        restore_incompatible_handoff(handoff, true);
+        return;
+    }
+
     p = persisted;
-    if (!scene_instance_rebind(&p->scene)) {
-        TraceLog(LOG_WARNING, "HOTRELOAD: scene state is incompatible; restoring Spectrum");
-        NOB_ASSERT(scene_instance_select(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
-    }
-    for (size_t i = 0; i < p->tracks.count; ++i) {
-        Track *it = &p->tracks.items[i];
-        AttachAudioStreamProcessor(it->music.stream, callback);
-    }
+    Scene_Id selected_scene_id = p->scene.id;
+    uint64_t selected_scene_seed = p->scene.seed;
+    float current_position = handoff->current_track_position;
+    bool current_was_playing = handoff->current_track_was_playing;
+    free(handoff->owned_allocations);
+    free(handoff);
+
     load_assets();
+    p->screen = LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT);
+    if (!scene_instance_rebind(&p->scene)) {
+        TraceLog(LOG_WARNING, "HOTRELOAD: scene state is incompatible; recreating selection");
+        if (!scene_instance_init(&p->scene, selected_scene_id, selected_scene_seed)) {
+            NOB_ASSERT(scene_instance_init(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
+        }
+    }
+    restore_reloaded_tracks(current_position, current_was_playing);
 }
 
 MUSIALIZER_PLUG void plug_shutdown(void)

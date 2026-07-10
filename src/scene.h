@@ -8,6 +8,7 @@
 #include <raylib.h>
 
 #include "ascii_art.h"
+#include "event_timeline.h"
 
 typedef enum {
     SCENE_SPECTRUM,
@@ -16,6 +17,7 @@ typedef enum {
     SCENE_ASCII_FIELD,
     SCENE_SONG_ATLAS,
     SCENE_SPECTRAL_TERRARIUM,
+    SCENE_CONSTELLATION,
     COUNT_SCENES,
 } Scene_Id;
 
@@ -35,6 +37,7 @@ typedef struct {
     float delta_seconds;
     uint64_t frame_index;
     Scene_Audio_Frame audio;
+    Event_Timeline_View events;
 } Scene_Frame;
 
 typedef struct {

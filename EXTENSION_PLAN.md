@@ -8,9 +8,9 @@
 ## Current status
 
 - **Last updated:** 2026-07-10, Europe/Berlin.
-- **Active milestone:** M1 audit hardening alongside M3/M4 prototypes.
-- **Next vertical slice:** connect measured-analysis caches to saved projects
-  and Atlas prefill, then add project JSON I/O and authored scene controls.
+- **Active milestone:** M2 project persistence and authored analysis lanes.
+- **Next vertical slice:** add project JSON I/O, connect measured-analysis
+  caches to Atlas prefill, and persist Constellation event recordings.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
 - **Remote caution:** `origin` is the public upstream repository
@@ -97,13 +97,17 @@ Current machine:
 - FFmpeg 8.0.1.
 - Stock `nob` bootstrap and full application build: **passed**.
 - Release, debug, sanitizer, and runtime hot-reload builds: **passed**.
-- Headless C tests: **24/24 passed** under debug, release, and ASan+UBSan.
+- Headless C tests: **31/31 passed** under debug, release, and ASan+UBSan.
 - Offline Python adapter tests: **17/17 passed**; HTTP remains mocked and the
   measured lane is entirely local.
 - Live demo-track smoke test: window, RTX 3090 OpenGL context, shaders,
   PulseAudio, MP3 loading/playback, analyzer, and legacy scene all initialized
   and rendered successfully. The sanitizer build ran the same path for eight
   seconds without reporting an ASan/UBSan fault.
+- A full sanitizer Constellation export reached clean application shutdown with
+  no ASan/UBSan access error; LeakSanitizer then reported about 270 KB retained
+  inside the system `libdbus`/PulseAudio client stack. Core sanitizer tests use
+  `detect_leaks=0` because this environment also runs under ptrace constraints.
 - Link check: application resolved only the expected system C/math loader
   dependencies because raylib was linked statically.
 - Non-blocking build warnings exist in `nob_stage2.c`, vendored raylib text
@@ -362,7 +366,7 @@ M0 acceptance gate:
 - No credential, copyrighted music fixture, generated video, or local absolute
   path is accidentally tracked as runtime content.
 
-### M1 - Deterministic analyzer and scene kernel (audit hardening)
+### M1 - Deterministic analyzer and scene kernel (complete for current ABI)
 
 - [x] Extract FFT state and operations into `audio_analyzer.c/.h` with a pure,
   testable API.
@@ -374,9 +378,10 @@ M0 acceptance gate:
   registry.
 - [x] Move `fft_render()` into the registered legacy spectrum scene with visual
   parity.
-- [ ] Add versioned plug state and resource-safe reload/reinitialization
-  behavior. Layout validation prevents stale casts, but incompatible reloads
-  still need an old-code cleanup/handoff protocol for live external resources.
+- [x] Add versioned plug state and resource-safe reload/reinitialization
+  behavior. The stable handoff makes old code release callbacks, audio/GPU
+  handles, FFmpeg, and scene resources before unload; crossing directly from a
+  legacy build predating the handoff still requires one process restart.
 - [x] Drive preview and export through the same `SceneFrame` and scene update
   path; final offline-export parity automation remains open.
 - [x] Add one deliberately simple second scene to prove registration without
@@ -444,7 +449,10 @@ M3 acceptance gate:
 - [ ] Spectral Terrarium. A bounded fixed-step ecosystem prototype now works;
   saved parameters, reusable instancing, and failure tests remain before
   graduation.
-- [ ] Constellation Mode with recordable/replayable external events.
+- [ ] Constellation Mode with recordable/replayable external events. A bounded
+  1,024-event canonical timeline, seek/replay cursor, CLI recorder, and 3D scene
+  work in preview/export; project serialization and live transport adapters
+  remain before graduation.
 
 Each prototype graduates only after it has a deterministic seed, saveable
 parameters, bounded resource use, offline export support, and at least one
@@ -481,7 +489,7 @@ failure-path test.
 ### 2026-07-10 - Foundation implementation wave
 
 - Added four build profiles, a headless C test harness, synthetic in-memory
-  audio fixtures, and a 24-test sanitizer-clean core suite.
+  audio fixtures, and a 31-test sanitizer-clean core suite.
 - Extracted the legacy analyzer, replaced callback buffer shifting with a
   bounded C11-atomic SPSC ring, and introduced a hot-reload-safe scene registry.
 - Registered Spectrum, Pulse Field, Orbital Lattice, ASCII Field, Song Atlas,
@@ -512,8 +520,30 @@ failure-path test.
   cancels/reaps FFmpeg before releasing audio and OpenGL resources.
 - Two independent Terrarium renders of the same fixture were byte-identical
   (`197dc722d46bfcfb93c740686e1a49d633ee9664ae839c3c75671baef3e04942`).
-- Kept M1 open: incompatible hot-reload resource handoff, repeated-export
-  in-process automation, and broader scene/CLI failure tests are still required.
+- At this checkpoint M1 remained open for incompatible hot-reload resource
+  handoff, repeated-export in-process automation, and broader scene/CLI tests.
+
+### 2026-07-10 - Event replay and reload-safety wave
+
+- Added a fixed 1,024-record event timeline with canonical ordering, validation,
+  overflow behavior, revision-safe cursors, deterministic seek/replay, and seven
+  focused tests.
+- Added Constellation Mode as scene seven. CLI `--event` records lyric,
+  semantic, cue, or custom events into the immutable per-frame event view;
+  quiet mode does not fabricate recorded evidence.
+- Made incompatible hot reload resource-safe through a stable ABI-v1 handoff:
+  the old plug releases live code-owned resources before unload, inventories
+  opaque allocations, and lets the new plug restore compatible state or safely
+  reject/free it. The recovery record preserves track/scene seed and the bounded
+  event snapshot; active renders are intentionally cancelled.
+- Made named profiles honest across macOS, OpenBSD, MinGW-w64, and MSVC.
+  Unsupported sanitizer combinations now fail explicitly; target compilation
+  still requires validation on those operating systems/toolchains.
+- Visually verified an offline Constellation render with three recorded event
+  types. No rendered output or demo audio was added to the repository.
+- Verified a compatible real shared-library handoff with `--reload-once`, then
+  rendered Constellation successfully; the recorded event highlights survived
+  the unload/reload cycle.
 
 ## Milestones
 
