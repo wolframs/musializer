@@ -85,7 +85,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define RENDER_HEIGHT (9*RENDER_FACTOR)
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 4
+#define PLUG_STATE_VERSION 5
 
 #define COLOR_ACCENT                  ColorFromHSV(225, 0.75, 0.8)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -212,6 +212,7 @@ typedef struct {
     size_t ascii_columns;
     size_t ascii_rows;
     Event_Timeline event_timeline;
+    uint64_t next_event_id;
 
     uint64_t active_button_id;
 
@@ -467,7 +468,13 @@ static const char *scene_stable_name(Scene_Id id)
 
 MUSIALIZER_PLUG bool plug_record_event(Event_Record event)
 {
-    return event_timeline_record(&p->event_timeline, &event) == EVENT_TIMELINE_OK;
+    if (event_timeline_record(&p->event_timeline, &event) != EVENT_TIMELINE_OK) {
+        return false;
+    }
+    if (event.id >= p->next_event_id && event.id != UINT64_MAX) {
+        p->next_event_id = event.id + 1;
+    }
+    return true;
 }
 
 static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seconds, float delta_seconds)
@@ -678,13 +685,113 @@ static void tooltip(Rectangle boundary, const char *text, Side align, bool persi
     p->tooltip_element_boundary = boundary;
 }
 
+typedef enum {
+    BS_NONE      = 0,
+    BS_HOVEROVER = 1,
+    BS_CLICKED   = 2,
+} Button_State;
+
+static int button_with_id(uint64_t id, Rectangle boundary);
+
+static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
+{
+    int state = button_with_id(id, boundary);
+    Color background = selected ? COLOR_TRACK_BUTTON_SELECTED : COLOR_TRACK_BUTTON_BACKGROUND;
+    if (state & BS_HOVEROVER) background = COLOR_TRACK_BUTTON_HOVEROVER;
+    DrawRectangleRounded(boundary, 0.18f, 10, background);
+    float font_size = fminf(boundary.height*0.52f, 22.0f);
+    Vector2 size = MeasureTextEx(p->font, label, font_size, 0.0f);
+    DrawTextEx(p->font, label,
+               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
+                         boundary.y + (boundary.height - size.y)*0.5f},
+               font_size, 0.0f, WHITE);
+    return state;
+}
+
+static Color event_type_color(uint32_t type)
+{
+    switch (type) {
+    case EVENT_TYPE_LYRIC: return (Color){236, 89, 190, 255};
+    case EVENT_TYPE_SEMANTIC: return (Color){242, 190, 66, 255};
+    case EVENT_TYPE_CUE: return (Color){63, 220, 171, 255};
+    case EVENT_TYPE_CUSTOM: return (Color){151, 111, 241, 255};
+    default: return GRAY;
+    }
+}
+
+static void record_timeline_event(Track *track, uint32_t type)
+{
+    if (track == NULL || p->next_event_id == UINT64_MAX) {
+        popup_tray_push(&p->pt);
+        return;
+    }
+    Event_Record event = {
+        .timestamp_seconds = GetMusicTimePlayed(track->music),
+        .id = p->next_event_id,
+        .type = type,
+        .value_count = 1,
+        .values = {1.0f},
+    };
+    if (!plug_record_event(event)) {
+        popup_tray_push(&p->pt);
+        return;
+    }
+    if (p->scene.id != SCENE_CONSTELLATION) {
+        scene_instance_select(&p->scene, SCENE_CONSTELLATION, p->scene.seed);
+    }
+}
+
 static void timeline(Rectangle timeline_boundary, Track *track)
 {
     DrawRectangleRec(timeline_boundary, COLOR_TIMELINE_BACKGROUND);
 
     float played = GetMusicTimePlayed(track->music);
     float len = GetMusicTimeLength(track->music);
-    float x = played/len*GetScreenWidth();
+    if (len <= 0.0f) return;
+
+    const float controls_height = 38.0f;
+    const float margin = 6.0f;
+    const float event_button_width = 74.0f;
+    Rectangle controls = {
+        timeline_boundary.x + margin,
+        timeline_boundary.y + margin,
+        event_button_width*5.0f + margin*4.0f,
+        controls_height,
+    };
+    const char *labels[4] = {"+ Lyric", "+ Feel", "+ Cue", "+ Custom"};
+    const uint32_t types[4] = {
+        EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC, EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
+    };
+    bool over_controls = CheckCollisionPointRec(GetMousePosition(), controls);
+    float control_x = controls.x;
+    for (size_t i = 0; i < 4; ++i) {
+        Rectangle boundary = {control_x, controls.y, event_button_width, controls.height};
+        int state = text_button(UINT64_C(0x45564E5400000000) + i, boundary, labels[i], false);
+        DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(event_type_color(types[i]), 0.8f));
+        if (state & BS_CLICKED) record_timeline_event(track, types[i]);
+        control_x += event_button_width + margin;
+    }
+    Rectangle clear_boundary = {control_x, controls.y, event_button_width, controls.height};
+    if (text_button(UINT64_C(0x45564E54FFFFFFFF), clear_boundary, "Clear", false) & BS_CLICKED) {
+        event_timeline_clear(&p->event_timeline);
+        p->next_event_id = 1;
+    }
+
+    Event_Timeline_View events = event_timeline_view(&p->event_timeline);
+    for (size_t i = 0; i < events.count; ++i) {
+        const Event_Record *event = &events.events[i];
+        float t = (float)(event->timestamp_seconds/len);
+        if (t < 0.0f || t > 1.0f) continue;
+        float marker_x = timeline_boundary.x + t*timeline_boundary.width;
+        Color color = event_type_color(event->type);
+        DrawLineEx((Vector2){marker_x, timeline_boundary.y + controls_height + margin*2.0f},
+                   (Vector2){marker_x, timeline_boundary.y + timeline_boundary.height},
+                   3.0f, ColorAlpha(color, 0.75f));
+        DrawCircleV((Vector2){marker_x, timeline_boundary.y + controls_height + margin*2.0f},
+                    5.0f, color);
+    }
+
+    float x = timeline_boundary.x + played/len*timeline_boundary.width;
     Vector2 startPos = {
         .x = x,
         .y = timeline_boundary.y
@@ -696,7 +803,7 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     DrawLineEx(startPos, endPos, 10, COLOR_TIMELINE_CURSOR);
 
     Vector2 mouse = GetMousePosition();
-    if (CheckCollisionPointRec(mouse, timeline_boundary)) {
+    if (CheckCollisionPointRec(mouse, timeline_boundary) && !over_controls) {
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             float t = (mouse.x - timeline_boundary.x)/timeline_boundary.width;
             SeekMusicStream(track->music, t*len);
@@ -707,12 +814,6 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     // TODO: enable the user to render a specific region instead of the whole song.
     // TODO: visualize sound wave on the timeline
 }
-
-typedef enum {
-    BS_NONE      = 0, // 00
-    BS_HOVEROVER = 1, // 01
-    BS_CLICKED   = 2, // 10
-} Button_State;
 
 static int button_with_id(uint64_t id, Rectangle boundary)
 {
@@ -949,6 +1050,61 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
         }
     }
 
+}
+
+static void scene_browser(Rectangle boundary)
+{
+    DrawRectangleRec(boundary, ColorBrightness(COLOR_TRACK_PANEL_BACKGROUND, -0.05f));
+    DrawLineEx((Vector2){boundary.x, boundary.y},
+               (Vector2){boundary.x + boundary.width, boundary.y},
+               2.0f, ColorAlpha(COLOR_ACCENT, 0.45f));
+
+    const float padding = 8.0f;
+    const float header_height = 27.0f;
+    float header_font = 18.0f;
+    DrawTextEx(p->font, "SCENES", (Vector2){boundary.x + padding, boundary.y + 5.0f},
+               header_font, 0.0f, ColorAlpha(WHITE, 0.78f));
+    char status[48];
+    snprintf(status, sizeof(status), "%zu events", p->event_timeline.count);
+    Vector2 status_size = MeasureTextEx(p->font, status, 14.0f, 0.0f);
+    DrawTextEx(p->font, status,
+               (Vector2){boundary.x + boundary.width - status_size.x - padding,
+                         boundary.y + 8.0f},
+               14.0f, 0.0f, ColorAlpha(WHITE, 0.48f));
+
+    const float footer_height = 36.0f;
+    const float gap = 3.0f;
+    float row_height = (boundary.height - header_height - footer_height - padding*2.0f
+                      - gap*(COUNT_SCENES - 1))/(float)COUNT_SCENES;
+    if (row_height > 34.0f) row_height = 34.0f;
+    if (row_height < 20.0f) return;
+    float y = boundary.y + header_height;
+    for (Scene_Id id = 0; id < COUNT_SCENES; ++id) {
+        Rectangle row = {boundary.x + padding, y, boundary.width - padding*2.0f, row_height};
+        if (text_button(UINT64_C(0x5343454E45000000) + (uint64_t)id,
+                        row, scene_name(id), p->scene.id == id) & BS_CLICKED) {
+            scene_instance_select(&p->scene, id, p->scene.seed);
+        }
+        y += row_height + gap;
+    }
+
+    Rectangle import_button = {
+        boundary.x + padding,
+        boundary.y + boundary.height - footer_height,
+        boundary.width - padding*2.0f,
+        footer_height - padding*0.5f,
+    };
+    if (text_button(UINT64_C(0x41534349494D504F), import_button,
+                    "Import image -> ASCII", false) & BS_CLICKED) {
+        const char *filters[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp"};
+        char *path = tinyfd_openFileDialog("Image for ASCII Field", "./",
+                                           NOB_ARRAY_LEN(filters), filters,
+                                           "image files", 0);
+        if (path == NULL) return;
+        if (!plug_load_ascii_image(path) || !plug_select_scene("ascii")) {
+            popup_tray_push(&p->pt);
+        }
+    }
 }
 
 #define fullscreen_button(preview_boundary) \
@@ -1571,7 +1727,16 @@ static void preview_screen(void)
         // TODO: loading files synchronously like that actually blocks the UI thread
         // Maybe we should do that in a separate thread.
         for (size_t i = 0; i < droppedFiles.count; ++i) {
-            if (!plug_load_track(droppedFiles.paths[i])) popup_tray_push(&p->pt);
+            const char *path = droppedFiles.paths[i];
+            bool image = IsFileExtension(path, ".png") || IsFileExtension(path, ".jpg") ||
+                         IsFileExtension(path, ".jpeg") || IsFileExtension(path, ".bmp");
+            if (image) {
+                if (!plug_load_ascii_image(path) || !plug_select_scene("ascii")) {
+                    popup_tray_push(&p->pt);
+                }
+            } else if (!plug_load_track(path)) {
+                popup_tray_push(&p->pt);
+            }
         }
         UnloadDroppedFiles(droppedFiles);
     }
@@ -1667,11 +1832,21 @@ static void preview_screen(void)
             popup_tray(&p->pt, preview_boundary);
             EndScissorMode();
 
+            float sidebar_height = h - timeline_height;
+            float scene_panel_height = fminf(292.0f, fmaxf(0.0f, sidebar_height - 120.0f));
+            float tracks_panel_height = sidebar_height - scene_panel_height;
             tracks_panel((CLITERAL(Rectangle) {
                 .x = 0,
                 .y = 0,
                 .width = tracks_panel_width,
-                .height = h - timeline_height,
+                .height = tracks_panel_height,
+            }));
+
+            scene_browser((CLITERAL(Rectangle) {
+                .x = 0,
+                .y = tracks_panel_height,
+                .width = tracks_panel_width,
+                .height = scene_panel_height,
             }));
 
             timeline(CLITERAL(Rectangle) {
@@ -2095,7 +2270,7 @@ static void restore_incompatible_handoff(Plug_Reload_Handoff *handoff,
     }
     if (includes_events && handoff->event_count <= EVENT_TIMELINE_CAPACITY) {
         for (size_t i = 0; i < handoff->event_count; ++i) {
-            if (event_timeline_record(&p->event_timeline, &handoff->events[i]) != EVENT_TIMELINE_OK) {
+            if (!plug_record_event(handoff->events[i])) {
                 TraceLog(LOG_WARNING, "HOTRELOAD: stopped restoring invalid event timeline");
                 break;
             }
@@ -2150,6 +2325,7 @@ MUSIALIZER_PLUG void plug_init(void)
     p->state_size = sizeof(*p);
     NOB_ASSERT(sample_ring_init(&p->sample_ring, p->sample_ring_storage, SAMPLE_RING_CAPACITY));
     event_timeline_init(&p->event_timeline);
+    p->next_event_id = 1;
     analyzer_configure(48000, 2);
     NOB_ASSERT(scene_instance_init(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
 

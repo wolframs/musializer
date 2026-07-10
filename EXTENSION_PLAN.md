@@ -10,13 +10,13 @@
 - **Last updated:** 2026-07-10, Europe/Berlin.
 - **Active milestone:** M2 project persistence and authored analysis lanes.
 - **Next vertical slice:** add project JSON I/O, connect measured-analysis
-  caches to Atlas prefill, and persist Constellation event recordings.
+  caches to Atlas prefill, and persist the new UI-authored event recordings.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
-- **Remote caution:** `origin` is the public upstream repository
-  `https://github.com/tsoding/musializer.git`. Its contribution policy asks
-  feature development to happen in a fork. Do not push feature work to this
-  remote unintentionally.
+- **Remotes:** `origin` is the private Forgejo repository,
+  `github` is `wolframs/musializer`, and public project provenance lives at
+  `upstream` (`tsoding/musializer`). Normal pushes default to private
+  Forgejo; do not push feature work to `upstream` unintentionally.
 - **Build status:** the stock Linux build completed successfully on this
   machine. Generated artifacts are ignored under `build/`.
 - **Tracked planning/security changes:** `.gitignore`, `.env.example`, and this
@@ -433,7 +433,8 @@ M2 acceptance gate:
   encoding are still synchronous.
 - [ ] Add generated/local image import, glyph analysis, cached ASCII grids, and
   2D/3D ASCII scenes. Local import, deterministic glyph analysis, and the 2D
-  audio-reactive ASCII Field are working; cache serialization and 3D remain.
+  audio-reactive ASCII Field are working through CLI, drag-and-drop, and the
+  scene rail; cache serialization and 3D remain.
 
 M3 acceptance gate:
 
@@ -450,9 +451,9 @@ M3 acceptance gate:
   saved parameters, reusable instancing, and failure tests remain before
   graduation.
 - [ ] Constellation Mode with recordable/replayable external events. A bounded
-  1,024-event canonical timeline, seek/replay cursor, CLI recorder, and 3D scene
-  work in preview/export; project serialization and live transport adapters
-  remain before graduation.
+  1,024-event canonical timeline, seek/replay cursor, CLI/UI recorder, colored
+  timeline markers, and 3D scene work in preview/export; project serialization
+  and live transport adapters remain before graduation.
 
 Each prototype graduates only after it has a deterministic seed, saveable
 parameters, bounded resource use, offline export support, and at least one
@@ -544,6 +545,17 @@ failure-path test.
 - Verified a compatible real shared-library handoff with `--reload-once`, then
   rendered Constellation successfully; the recorded event highlights survived
   the unload/reload cycle.
+
+### 2026-07-10 - First-class authoring UI
+
+- Split the existing left rail into track and scene libraries with all seven
+  scenes selectable by mouse and an unambiguous active state.
+- Added an image picker and image drag-and-drop path that imports the glyph grid
+  and selects ASCII Field without CLI arguments.
+- Added timeline authoring controls for lyric, semantic/feel, cue, and custom
+  Constellation events, including colored markers, event count, and clear-all.
+- Kept rendering scene-agnostic: the existing film button exports whichever
+  scene and event timeline the UI currently holds.
 
 ## Milestones
 

@@ -89,6 +89,20 @@ Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 events for Constellation replay. A command-line render exits automatically
 after FFmpeg finishes, making it useful for smoke tests and scripted renders.
 
+The same workflow is available in the application UI:
+
+- click the empty screen or drop an audio file to load a track;
+- choose any built-in scene from the **Scenes** rail on the left;
+- click **Import image -> ASCII**, or drop an image, to populate and select
+  ASCII Field;
+- use **+ Lyric**, **+ Feel**, **+ Cue**, and **+ Custom** on the timeline to
+  record color-coded Constellation events at the current playhead;
+- use **Clear** to remove recorded events, and the film icon to render the
+  currently selected scene.
+
+CLI arguments remain useful for repeatable automation, but are not required for
+normal scene, image, event, or render workflows.
+
 For a repeatable legacy-scene export smoke, use any short WAV fixture and check
 the resulting streams:
 
