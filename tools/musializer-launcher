@@ -1,0 +1,50 @@
+#!/bin/sh
+
+set -u
+
+PROJECT_ROOT=@PROJECT_ROOT_SHELL@
+APP="$PROJECT_ROOT/build/musializer"
+STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
+LOG_DIR="$STATE_HOME/musializer"
+LOG_FILE="$LOG_DIR/launcher.log"
+
+show_error()
+{
+    message=$1
+    if command -v kdialog >/dev/null 2>&1; then
+        kdialog --title Musializer --error "$message"
+    elif command -v zenity >/dev/null 2>&1; then
+        zenity --title=Musializer --error --text="$message"
+    else
+        printf '%s\n' "Musializer: $message" >&2
+    fi
+}
+
+if [ ! -x "$APP" ]; then
+    show_error "The Musializer executable is missing. Run tools/install-linux-launcher.sh again to rebuild it."
+    exit 1
+fi
+
+if ! mkdir -p "$LOG_DIR"; then
+    show_error "Could not create the launcher log directory: $LOG_DIR"
+    exit 1
+fi
+
+# Keep failures launched from a desktop menu diagnosable without growing a log
+# forever. The previous session is enough context for this development launcher.
+if [ -f "$LOG_FILE" ] && [ "$(wc -c <"$LOG_FILE")" -gt 1048576 ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.old"
+fi
+
+{
+    printf '\n[%s] Launching %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$APP"
+    cd "$PROJECT_ROOT" || exit 1
+    "$APP" "$@"
+} >>"$LOG_FILE" 2>&1
+status=$?
+
+if [ "$status" -ne 0 ]; then
+    show_error "Musializer exited with status $status. Details were written to $LOG_FILE"
+fi
+
+exit "$status"

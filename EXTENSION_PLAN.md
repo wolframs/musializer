@@ -7,7 +7,7 @@
 
 ## Current status
 
-- **Last updated:** 2026-07-10, Europe/Berlin.
+- **Last updated:** 2026-07-12, Europe/Berlin.
 - **Active milestone:** M2 project persistence and authored analysis lanes.
 - **Next vertical slice:** add project JSON I/O, connect measured-analysis
   caches to Atlas prefill, and persist the new UI-authored event recordings.
@@ -21,6 +21,17 @@
   machine. Generated artifacts are ignored under `build/`.
 - **Tracked planning/security changes:** `.gitignore`, `.env.example`, and this
   document. The real `.env` is intentionally untracked.
+
+### Desktop launcher
+
+The Linux development checkout ships an idempotent, per-user XDG launcher
+installer at `tools/install-linux-launcher.sh`. It builds the release profile,
+registers Musializer in KDE/GNOME application menus, installs the project icon,
+accepts supported audio files, and launches with the repository as its working
+directory. The runtime wrapper logs desktop-started sessions and surfaces
+startup failures through `kdialog` or `zenity`. This is intentionally a
+checkout-backed launcher; a relocatable packaged application remains future
+distribution work.
 
 ## Non-negotiable invariants
 

@@ -103,6 +103,29 @@ The same workflow is available in the application UI:
 CLI arguments remain useful for repeatable automation, but are not required for
 normal scene, image, event, or render workflows.
 
+### Linux application launcher
+
+On Linux desktops, including KDE Plasma, install a per-user application-menu
+launcher once:
+
+```console
+$ ./tools/install-linux-launcher.sh
+```
+
+After that, open **Musializer** from the application menu like any other app.
+Audio files can also be passed through the desktop launcher or dropped onto its
+icon. The installer builds the release executable once; ordinary launches run
+that executable directly and do not invoke the compiler. Re-run the installer
+after pulling code changes when you want a fresh release build.
+
+The launcher is installed entirely under `~/.local`, requires no `sudo`, and
+writes diagnostic output to
+`~/.local/state/musializer/launcher.log`. To remove it:
+
+```console
+$ ./tools/install-linux-launcher.sh --uninstall
+```
+
 For a repeatable legacy-scene export smoke, use any short WAV fixture and check
 the resulting streams:
 

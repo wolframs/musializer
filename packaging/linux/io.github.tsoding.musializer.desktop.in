@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Musializer
+GenericName=Music Visualization Studio
+Comment=Create and render music visualizations
+Exec="@LAUNCHER@" %F
+Path=@PROJECT_ROOT@
+Icon=io.github.tsoding.musializer
+Terminal=false
+StartupNotify=true
+StartupWMClass=Musializer
+Categories=AudioVideo;AudioVideoEditing;
+Keywords=music;audio;visualizer;visualization;render;video;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-wav;audio/x-mod;audio/x-xm;
