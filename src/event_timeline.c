@@ -92,6 +92,19 @@ Event_Timeline_Result event_timeline_record(Event_Timeline *timeline,
     return EVENT_TIMELINE_OK;
 }
 
+Event_Timeline_Result event_timeline_replace(Event_Timeline *destination,
+                                             const Event_Timeline *source)
+{
+    if (destination == NULL || source == NULL) return EVENT_TIMELINE_ERROR_NULL;
+    Event_Timeline_Result valid = event_timeline_validate(source);
+    if (valid != EVENT_TIMELINE_OK) return valid;
+    uint64_t revision = destination->revision + 1;
+    if (revision == 0) revision = 1;
+    if (destination != source) memcpy(destination, source, sizeof(*destination));
+    destination->revision = revision;
+    return EVENT_TIMELINE_OK;
+}
+
 Event_Timeline_View event_timeline_view(const Event_Timeline *timeline)
 {
     if (timeline == NULL || timeline->count > EVENT_TIMELINE_CAPACITY) {

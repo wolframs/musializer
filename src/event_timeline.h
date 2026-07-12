@@ -67,6 +67,10 @@ Event_Timeline_Result event_timeline_validate(const Event_Timeline *timeline);
 // deterministic regardless of the order in which producers submit events.
 Event_Timeline_Result event_timeline_record(Event_Timeline *timeline,
                                             const Event_Record *event);
+// Atomically replace validated contents while advancing the destination's
+// revision even when source and destination contain the same number of events.
+Event_Timeline_Result event_timeline_replace(Event_Timeline *destination,
+                                             const Event_Timeline *source);
 Event_Timeline_View event_timeline_view(const Event_Timeline *timeline);
 
 // Replay cursors are invalidated by subsequent recording. seek() deliberately

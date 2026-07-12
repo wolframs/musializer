@@ -80,6 +80,9 @@ $ ./build/musializer --scene constellation \
     --event lyric:1.25:42:0.9 --event cue:2.0:43:1.0 path/to/track.mp3
 $ ./build/musializer --ascii-image path/to/image.png path/to/track.mp3
 $ ./build/musializer --scene orbital path/to/track.wav --render output.mp4
+$ ./build/musializer path/to/track.mp3 \
+    --analysis-bridge build/analysis/track/analysis.bridge.tsv \
+    --auto-scenes --render output.mp4
 ```
 
 Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
@@ -88,6 +91,14 @@ Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 `type:seconds:id:value` arguments accept `lyric`, `semantic`, `cue`, or `custom`
 events for Constellation replay. A command-line render exits automatically
 after FFmpeg finishes, making it useful for smoke tests and scripted renders.
+`--analysis-bridge` verifies the bridge's audio SHA-256 before importing lyric,
+semantic, or scene lanes; `--auto-scenes` opts into its section recommendations
+for both preview and offline rendering.
+
+Preview rendering requests 4x MSAA. Offline rendering uses a 2x spatial render
+followed by a fixed-resolution downsample; set
+`MUSIALIZER_RENDER_SUPERSAMPLE=0` to exercise the 1600x900 fallback directly on
+GPUs that cannot allocate the larger render target.
 
 The same workflow is available in the application UI:
 
@@ -95,10 +106,25 @@ The same workflow is available in the application UI:
 - choose any built-in scene from the **Scenes** rail on the left;
 - click **Import image -> ASCII**, or drop an image, to populate and select
   ASCII Field;
-- use **+ Lyric**, **+ Feel**, **+ Cue**, and **+ Custom** on the timeline to
-  record color-coded Constellation events at the current playhead;
+- open **Lyrics** to add/select lyric cue blocks, edit their UTF-8 content,
+  nudge or set start/end times at the playhead, and import/export a bounded
+  `.lyrics.tsv` editing file;
+- open **Assist** to run local timed-lyrics assistance (Whisper plus an
+  evidence-only headless Codex review), measured scene-change planning,
+  MiMo feeling analysis, or the complete pipeline without blocking playback;
+- enable **Auto scenes** after inspecting generated section markers when scene
+  recommendations should drive preview and deterministic export;
+- use **+ Feel**, **+ Cue**, and **+ Custom** on the timeline to record
+  color-coded Constellation events at the current playhead;
 - use **Clear** to remove recorded events, and the film icon to render the
   currently selected scene.
+
+Analysis artifacts and logs are cached under `build/analysis/`. Canonical JSON
+keeps measured audio, Whisper evidence, Codex review, MiMo interpretation, and
+scene recommendations separate; only a validated derived bridge enters the C
+editor. **MiMo feelings** and **Full assist** are the explicit authorization
+boundary for an OpenRouter request. They read `OPENROUTER_API_KEY` from the
+environment or the ignored repository `.env` without sourcing that file.
 
 CLI arguments remain useful for repeatable automation, but are not required for
 normal scene, image, event, or render workflows.
@@ -134,6 +160,13 @@ $ ./build/musializer --scene spectrum fixture.wav --render /tmp/musializer-smoke
 $ ffprobe -v error -show_entries stream=codec_type,width,height,r_frame_rate \
     -of compact /tmp/musializer-smoke.mp4
 ```
+
+For an anti-aliasing visual smoke, repeat the render with `spectrum`, `ascii`,
+and `constellation`, extract a frame with `ffmpeg -ss 1 -i output.mp4 -frames:v
+1 frame.png`, and inspect it at 100% scale. These cover shader edges, font
+glyphs, and fine 3D geometry respectively. Repeat one render with
+`MUSIALIZER_RENDER_SUPERSAMPLE=0`; `ffprobe` should still report 1600x900 at
+30 fps.
 
 Optional offline analysis helpers for measured audio, Whisper timings, and
 cached MiMo interpretations are documented in

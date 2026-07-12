@@ -70,7 +70,10 @@ int main(int argc, char **argv)
 
     if (!reload_libplug()) return 1;
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN);
+    // The default framebuffer is the preview path. Offline rendering uses a
+    // deterministic supersampling resolve in plug.c, so both paths smooth the
+    // same scene geometry without temporal jitter.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN | FLAG_MSAA_4X_HINT);
     size_t factor = 80;
     InitWindow(factor*16, factor*9, "Musializer");
     if (!IsWindowReady()) {
@@ -83,6 +86,7 @@ int main(int argc, char **argv)
         void *data = plug_load_resource(file_path, &data_size);
         Image logo = LoadImageFromMemory(GetFileExtension(file_path), data, data_size);
         SetWindowIcon(logo);
+        UnloadImage(logo);
         plug_free_resource(data);
     }
     SetExitKey(KEY_NULL);
@@ -95,8 +99,10 @@ int main(int argc, char **argv)
 
     plug_init();
     const char *render_output = NULL;
+    const char *analysis_bridge = NULL;
     bool command_line_error = false;
     bool reload_once = false;
+    bool auto_scenes = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
@@ -134,6 +140,19 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--analysis-bridge") == 0) {
+            if (i + 1 >= argc) {
+                TraceLog(LOG_WARNING, "Missing command-line analysis bridge path");
+                command_line_error = true;
+            } else {
+                analysis_bridge = argv[++i];
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--auto-scenes") == 0) {
+            auto_scenes = true;
+            continue;
+        }
         if (strcmp(argv[i], "--reload-once") == 0) {
             reload_once = true;
             continue;
@@ -142,6 +161,17 @@ int main(int argc, char **argv)
             TraceLog(LOG_WARNING, "Could not load command-line track: %s", argv[i]);
             command_line_error = true;
         }
+    }
+
+    if (analysis_bridge != NULL &&
+        (command_line_error || !plug_load_analysis_bridge(analysis_bridge))) {
+        TraceLog(LOG_WARNING, "Could not load command-line analysis bridge: %s",
+                 analysis_bridge);
+        command_line_error = true;
+    }
+    if (auto_scenes && (command_line_error || !plug_set_auto_scenes(true))) {
+        TraceLog(LOG_WARNING, "Could not enable automatic scene switching");
+        command_line_error = true;
     }
 
     bool exit_after_render = false;

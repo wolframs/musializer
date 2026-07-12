@@ -5,6 +5,8 @@
 
 #include <rlgl.h>
 
+#include "scene_draw.h"
+
 // Streaming prototype: the ring below records only the recent past. A future
 // measured-analysis cache can prefill the same slices before playback, turning
 // this local fly-through into a true whole-song atlas without changing draw.
@@ -203,8 +205,9 @@ static void atlas_draw_surface(const Song_Atlas_State *atlas)
             const Atlas_Slice *newer = atlas_slice(atlas, atlas->count - row);
             const Atlas_Slice *older = atlas_slice(atlas, atlas->count - row - 1);
             Color line = ColorAlpha(atlas_color(atlas, newer, band, row), 0.36f);
-            DrawLine3D(atlas_vertex(newer, band, row - 1),
-                       atlas_vertex(older, band, row), line);
+            scene_draw_tube(atlas_vertex(newer, band, row - 1),
+                            atlas_vertex(older, band, row),
+                            0.007f + newer->flux*0.006f, 5, line);
         }
     }
 }

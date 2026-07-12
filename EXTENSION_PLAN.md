@@ -9,8 +9,9 @@
 
 - **Last updated:** 2026-07-12, Europe/Berlin.
 - **Active milestone:** M2 project persistence and authored analysis lanes.
-- **Next vertical slice:** add project JSON I/O, connect measured-analysis
-  caches to Atlas prefill, and persist the new UI-authored event recordings.
+- **Next vertical slice:** project JSON I/O for lyrics, analysis references,
+  scene-switch opt-in state, and UI-authored events; then measured-cache Atlas
+  prefill. The standalone lyrics bridge remains an interim editing format.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
 - **Remotes:** `origin` is the private Forgejo repository,
@@ -32,6 +33,36 @@ directory. The runtime wrapper logs desktop-started sessions and surfaces
 startup failures through `kdialog` or `zenity`. This is intentionally a
 checkout-backed launcher; a relocatable packaged application remains future
 distribution work.
+
+### M2 editing and assisted-analysis slice (implemented 2026-07-12)
+
+- Apply anti-aliasing consistently to interactive preview and deterministic
+  offline rendering; do not create a preview-only visual path.
+- Add explicit UI jobs for local Whisper timing, a headless Codex cleanup pass,
+  measured section/change detection, and MiMo semantic interpretation. Jobs run
+  outside realtime/audio callbacks, expose progress/failure, use bounded
+  timeouts, and only promote validated sidecars into editor state.
+- The Codex pass receives a repository-owned system instruction and structured
+  output schema. It may normalize text and repair timing from supplied evidence,
+  but must never invent unheard lyrics or blur Whisper evidence with user edits.
+- Add a bounded lyrics document with stable IDs, text, start/end timestamps,
+  provenance, and deterministic ordering. The UI edits lyric content and sync on
+  the shared playback timeline with tabular timing and explicit save/apply.
+- Scene-switch suggestions are authored cues derived from measured section
+  boundaries. Users can inspect/edit/enable them; model output must not silently
+  take control of the render.
+- MiMo contributes subjective feeling/semantic lanes and creative suggestions,
+  never measured audio facts. Keep raw response, normalized sidecar, provider,
+  model, prompt version, and source audio hash available for provenance.
+
+Implementation checkpoint: preview uses 4x MSAA; offline export uses a
+deterministic 2x spatial resolve with a validated 1x fallback. The UI now owns
+cancellable external-analysis jobs, strict bridge import, an opt-in automatic
+scene-switch timeline, and a bounded lyric content/timing editor with explicit
+import/export. Pure C tests cover lyric editing, bridge parsing, and seek-safe
+scene switching; Python tests cover orchestration, credential isolation,
+timeouts, Codex evidence bounds, cache reuse, and provenance separation. Full
+project JSON persistence is still the next durability milestone.
 
 ## Non-negotiable invariants
 
@@ -108,8 +139,8 @@ Current machine:
 - FFmpeg 8.0.1.
 - Stock `nob` bootstrap and full application build: **passed**.
 - Release, debug, sanitizer, and runtime hot-reload builds: **passed**.
-- Headless C tests: **31/31 passed** under debug, release, and ASan+UBSan.
-- Offline Python adapter tests: **17/17 passed**; HTTP remains mocked and the
+- Headless C tests: **56/56 passed** under debug, release, and ASan+UBSan.
+- Offline Python adapter tests: **29/29 passed**; HTTP remains mocked and the
   measured lane is entirely local.
 - Live demo-track smoke test: window, RTX 3090 OpenGL context, shaders,
   PulseAudio, MP3 loading/playback, analyzer, and legacy scene all initialized
@@ -414,14 +445,15 @@ M1 acceptance gate:
   asset provenance, and deterministic seeds.
 - [x] Add whole-track measured analysis and a versioned cache.
 - [x] Import Whisper word/line timing with confidence and manual corrections,
-  including the prior Remotion whisper.cpp/caption formats.
+  including the prior Remotion whisper.cpp/caption formats and an in-app
+  content/timing editor with interim bridge import/export.
 - [x] Implement the optional MiMo/OpenRouter helper with `input_audio`, a
   600-second timeout, bounded retries, provenance, privacy controls, and raw
   plus normalized outputs.
 - [ ] Add a semantic-score editor/inspector that never overwrites measured or
   corrected lyric lanes.
-- [ ] Add deterministic recipe generation from measured, lyric, and semantic
-  lanes.
+- [x] Add deterministic section/scene recommendations from measured, lyric,
+  and semantic lanes; broader parameter/stack recipe generation remains.
 
 M2 acceptance gate:
 
@@ -567,6 +599,28 @@ failure-path test.
   Constellation events, including colored markers, event count, and clear-all.
 - Kept rendering scene-agnostic: the existing film button exports whichever
   scene and event timeline the UI currently holds.
+
+### 2026-07-12 - Anti-aliasing, assisted analysis, and lyric editing
+
+- Added 4x preview MSAA, analytic shader edge coverage, bounded 3D tube
+  geometry, and deterministic 2x offline spatial supersampling with a tested
+  1x fallback. Preview and export still share scene code.
+- Added a cache-aware external-analysis orchestrator with separate measured,
+  Whisper, Codex-review, MiMo, and scene-plan provenance; a repository-owned
+  evidence-only Codex system instruction; bounded timeouts; credential
+  isolation; process-tree cancellation; and a strict derived bridge.
+- Added first-class UI panels for timed lyric content/sync editing and assisted
+  analysis. Lyric cues support add/select/edit/apply/delete, playhead timing,
+  100 ms nudging, and interim import/export. Analysis jobs do not block audio.
+- Added opt-in scene switching from measured/semantic section recommendations.
+  Preview, seeking, hot reload, and offline export use the same tested timeline
+  selection model; recommendations never enable themselves.
+- Added SHA-256 identity checks before bridge import, per-track replacement of
+  semantic cues, bounded pre-allocation checks, and atomic cross-lane import.
+  A wrong-song same-duration bridge is rejected by CLI smoke coverage.
+- Validation: 56/56 C tests in debug/release/ASan+UBSan, 29/29 Python adapter
+  tests, release/sanitize/hotreload builds, real demo section planning, and a
+  validated 1600x900/30 fps bridge-driven render across one hot reload.
 
 ## Milestones
 

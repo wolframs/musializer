@@ -5,6 +5,8 @@
 
 #include <rlgl.h>
 
+#include "scene_draw.h"
+
 enum {
     TERRARIUM_PARTICLE_COUNT = 56,
     TERRARIUM_PLANT_COUNT = 24,
@@ -250,8 +252,10 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                         plant->root.z + sinf(plant->phase)*sway*0.55f };
         Color stem = ColorFromHSV(fmodf(hue + 72.0f + (float)i*2.7f, 360.0f),
                                   0.72f, 0.38f + amplitude*0.48f);
-        DrawLine3D(plant->root, middle, ColorAlpha(stem, 0.78f));
-        DrawLine3D(middle, tip, stem);
+        float stem_radius = 0.012f + amplitude*0.012f;
+        scene_draw_tube(plant->root, middle, stem_radius, 6,
+                        ColorAlpha(stem, 0.78f));
+        scene_draw_tube(middle, tip, stem_radius*0.72f, 6, stem);
         DrawSphere(tip, 0.055f + amplitude*0.14f + terrarium->onset_pulse*0.025f,
                    ColorFromHSV(fmodf(hue + 145.0f + (float)i*8.0f, 360.0f),
                                 0.62f, 0.55f + amplitude*0.42f));
@@ -276,7 +280,8 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                          position.z + tangent.z*length };
         Color color = ColorFromHSV(fmodf(hue + 190.0f + (float)i*13.0f, 360.0f),
                                    0.58f, 0.58f + amplitude*0.38f);
-        DrawLine3D(position, head, ColorAlpha(color, 0.8f));
+        scene_draw_tube(position, head, 0.014f + amplitude*0.012f, 6,
+                        ColorAlpha(color, 0.8f));
         DrawSphere(head, 0.07f + amplitude*0.09f, color);
         DrawSphere(position, 0.045f + terrarium->energy*0.035f, ColorAlpha(RAYWHITE, 0.72f));
     }

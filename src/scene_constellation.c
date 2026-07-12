@@ -5,6 +5,8 @@
 
 #include <rlgl.h>
 
+#include "scene_draw.h"
+
 enum { CONSTELLATION_NODE_COUNT = 72 };
 
 typedef struct Constellation_State {
@@ -207,7 +209,9 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
             Color line = ColorFromHSV(fmodf(base_hue + (float)i*1.7f, 360.0f),
                                       0.48f + active*0.35f,
                                       0.16f + constellation->energy*0.13f + active*0.53f);
-            DrawLine3D(positions[i], positions[other], ColorAlpha(line, 0.32f + active*0.58f));
+            scene_draw_tube(positions[i], positions[other],
+                            0.006f + active*0.012f, 5,
+                            ColorAlpha(line, 0.32f + active*0.58f));
         }
     }
 

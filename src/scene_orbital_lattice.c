@@ -4,6 +4,8 @@
 
 #include <rlgl.h>
 
+#include "scene_draw.h"
+
 enum {
     ORBITAL_RING_COUNT = 12,
     ORBITAL_NODES_PER_RING = 16,
@@ -207,11 +209,13 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
             if (node == 0) first = position;
             if (node > 0) {
                 Color edge = ColorAlpha(color, fog*(0.12f + energy*0.18f));
-                DrawLine3D(previous, position, edge);
+                scene_draw_tube(previous, position, 0.007f + energy*0.008f,
+                                6, edge);
             }
             previous = position;
         }
-        DrawLine3D(previous, first, ColorAlpha(RAYWHITE, (1.0f - depth_t)*0.16f));
+        scene_draw_tube(previous, first, 0.007f + energy*0.008f, 6,
+                        ColorAlpha(RAYWHITE, (1.0f - depth_t)*0.16f));
     }
     EndMode3D();
 

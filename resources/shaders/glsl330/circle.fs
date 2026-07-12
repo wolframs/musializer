@@ -14,15 +14,9 @@ void main()
 {
     float r = radius;
     vec2 p = fragTexCoord - vec2(0.5);
-    if (length(p) <= 0.5) {
-        float s = length(p) - r;
-        if (s <= 0) {
-            finalColor = fragColor*1.5;
-        } else {
-            float t = 1 - s / (0.5 - r);
-            finalColor = mix(vec4(fragColor.xyz, 0), fragColor*1.5, pow(t, power));
-        }
-    } else {
-        finalColor = vec4(0);
-    }
+    float distanceFromCenter = length(p);
+    float edgeWidth = max(fwidth(distanceFromCenter), 1.0/4096.0);
+    float glow = pow(clamp(1.0 - (distanceFromCenter - r)/(0.5 - r), 0.0, 1.0), power);
+    float coverage = 1.0 - smoothstep(0.5 - edgeWidth, 0.5 + edgeWidth, distanceFromCenter);
+    finalColor = fragColor*1.5*glow*coverage;
 }

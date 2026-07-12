@@ -148,3 +148,20 @@ TEST(event_timeline_view_is_bounded_and_read_only)
     EXPECT_EQ_SIZE(view.count, 0);
     EXPECT_TRUE(view.events == NULL);
 }
+
+TEST(event_timeline_replace_invalidates_same_count_different_values)
+{
+    Event_Timeline destination;
+    Event_Timeline source;
+    event_timeline_init(&destination);
+    event_timeline_init(&source);
+    Event_Record old_event = make_event(1.0, 7, EVENT_TYPE_SEMANTIC, 0.2f);
+    Event_Record new_event = make_event(1.0, 7, EVENT_TYPE_SEMANTIC, 0.9f);
+    REQUIRE_TRUE(event_timeline_record(&destination, &old_event) == EVENT_TIMELINE_OK);
+    REQUIRE_TRUE(event_timeline_record(&source, &new_event) == EVENT_TIMELINE_OK);
+    uint64_t previous_revision = destination.revision;
+    REQUIRE_TRUE(event_timeline_replace(&destination, &source) == EVENT_TIMELINE_OK);
+    EXPECT_TRUE(destination.revision != previous_revision);
+    EXPECT_EQ_SIZE(destination.count, 1);
+    EXPECT_NEAR(destination.events[0].values[0], 0.9, 0.000001);
+}

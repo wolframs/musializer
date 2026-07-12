@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -6,11 +7,15 @@
 #include <string.h>
 
 #include "build/config.h"
+#include "analysis_bridge.h"
 #include "audio_analyzer.h"
 #include "plug.h"
 #include "ffmpeg.h"
+#include "lyrics.h"
 #include "sample_ring.h"
 #include "scene.h"
+#include "scene_switch.h"
+#include "sha256.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
 // #define NOB_WARN_DEPRECATED
@@ -83,9 +88,10 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define RENDER_FACTOR 100
 #define RENDER_WIDTH (16*RENDER_FACTOR)
 #define RENDER_HEIGHT (9*RENDER_FACTOR)
+#define RENDER_SUPERSAMPLE_FACTOR 2
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 5
+#define PLUG_STATE_VERSION 6
 
 #define COLOR_ACCENT                  ColorFromHSV(225, 0.75, 0.8)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -118,6 +124,9 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 typedef struct {
     char *file_path;
     Music music;
+    Lyrics_Document lyrics;
+    Scene_Switch_Timeline scene_switches;
+    Event_Timeline semantic_events;
 } Track;
 
 typedef struct {
@@ -125,6 +134,20 @@ typedef struct {
     size_t count;
     size_t capacity;
 } Tracks;
+
+typedef enum {
+    ASSIST_MODE_LYRICS,
+    ASSIST_MODE_SECTIONS,
+    ASSIST_MODE_MIMO,
+    ASSIST_MODE_ALL,
+} Assist_Mode;
+
+typedef enum {
+    ASSIST_JOB_IDLE,
+    ASSIST_JOB_RUNNING,
+    ASSIST_JOB_SUCCEEDED,
+    ASSIST_JOB_FAILED,
+} Assist_Job_State;
 
 typedef struct {
     float lifetime;
@@ -213,6 +236,30 @@ typedef struct {
     size_t ascii_rows;
     Event_Timeline event_timeline;
     uint64_t next_event_id;
+    Event_Timeline scene_events;
+    uint64_t scene_events_user_revision;
+    uint64_t scene_events_semantic_revision;
+    int scene_events_track;
+
+    // Lyrics content/sync editor. The canonical document lives with each
+    // track; these fields are only the current UI draft.
+    bool lyrics_editor_open;
+    bool lyric_text_active;
+    bool lyric_draft_new;
+    uint64_t selected_lyric_id;
+    double lyric_draft_start;
+    double lyric_draft_end;
+    char lyric_draft_text[LYRICS_TEXT_CAPACITY];
+
+    // Optional analysis helpers are child processes, never realtime work.
+    bool assist_panel_open;
+    Assist_Mode assist_mode;
+    Assist_Job_State assist_job_state;
+    Nob_Proc assist_process;
+    size_t assist_track_index;
+    char assist_output_dir[PLUG_RELOAD_PATH_CAPACITY];
+    char assist_bridge_path[PLUG_RELOAD_PATH_CAPACITY];
+    char assist_log_path[PLUG_RELOAD_PATH_CAPACITY];
 
     uint64_t active_button_id;
 
@@ -248,6 +295,25 @@ static void analyzer_configure(uint32_t sample_rate, uint32_t channels)
 static bool fft_settled(void)
 {
     return audio_analyzer_settled(&p->analyzer, 1e-3f);
+}
+
+static RenderTexture2D load_offline_render_target(void)
+{
+    const char *supersampling = getenv("MUSIALIZER_RENDER_SUPERSAMPLE");
+    bool enabled = supersampling == NULL || strcmp(supersampling, "0") != 0;
+    if (enabled) {
+        RenderTexture2D target = LoadRenderTexture(
+            RENDER_WIDTH*RENDER_SUPERSAMPLE_FACTOR,
+            RENDER_HEIGHT*RENDER_SUPERSAMPLE_FACTOR);
+        if (IsRenderTextureValid(target) && rlFramebufferComplete(target.id)) return target;
+
+        TraceLog(LOG_WARNING,
+                 "Could not create supersampled render target; falling back to output resolution");
+        if (target.id != 0) UnloadRenderTexture(target);
+    } else {
+        TraceLog(LOG_INFO, "Offline render supersampling disabled by environment");
+    }
+    return LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT);
 }
 
 static void fft_clean(void)
@@ -337,6 +403,7 @@ static void start_preview_track(Track *track)
     analyzer_configure(track->music.stream.sampleRate, 2);
     p->scene_frame_index = 0;
     p->scene_clock_initialized = false;
+    scene_switch_reset(&track->scene_switches);
     PlayMusicStream(track->music);
 }
 
@@ -371,11 +438,21 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     }
 
     AttachAudioStreamProcessor(music.stream, callback);
+    Lyrics_Document lyrics;
+    if (lyrics_document_init(&lyrics, GetMusicTimeLength(music)) != LYRICS_OK) {
+        DetachAudioStreamProcessor(music.stream, callback);
+        free(owned_path);
+        UnloadMusicStream(music);
+        return false;
+    }
     size_t new_index = p->tracks.count;
     nob_da_append(&p->tracks, (CLITERAL(Track) {
         .file_path = owned_path,
         .music = music,
+        .lyrics = lyrics,
+        .scene_switches = {.active_index = SIZE_MAX},
     }));
+    event_timeline_init(&p->tracks.items[new_index].semantic_events);
 
     if (current_track() == NULL) {
         p->current_track = (int)new_index;
@@ -466,6 +543,18 @@ static const char *scene_stable_name(Scene_Id id)
     return "spectrum";
 }
 
+static void apply_auto_scene_switch(Track *track, double time_seconds)
+{
+    if (track == NULL) return;
+    uint32_t scene_index = 0;
+    if (scene_switch_update(&track->scene_switches, time_seconds, &scene_index) !=
+        SCENE_SWITCH_OK) return;
+    Scene_Id scene = (Scene_Id)scene_index;
+    if (scene < COUNT_SCENES && p->scene.id != scene) {
+        scene_instance_select(&p->scene, scene, p->scene.seed);
+    }
+}
+
 MUSIALIZER_PLUG bool plug_record_event(Event_Record event)
 {
     if (event_timeline_record(&p->event_timeline, &event) != EVENT_TIMELINE_OK) {
@@ -475,6 +564,37 @@ MUSIALIZER_PLUG bool plug_record_event(Event_Record event)
         p->next_event_id = event.id + 1;
     }
     return true;
+}
+
+static Event_Timeline_View combined_scene_events(void)
+{
+    Track *track = current_track();
+    uint64_t semantic_revision = track != NULL ? track->semantic_events.revision : 0;
+    if (p->scene_events_user_revision == p->event_timeline.revision &&
+        p->scene_events_semantic_revision == semantic_revision &&
+        p->scene_events_track == p->current_track) {
+        return event_timeline_view(&p->scene_events);
+    }
+    event_timeline_init(&p->scene_events);
+    Event_Timeline_View authored = event_timeline_view(&p->event_timeline);
+    for (size_t i = 0; i < authored.count; ++i) {
+        (void)event_timeline_record(&p->scene_events, &authored.events[i]);
+    }
+    if (track != NULL) {
+        Event_Timeline_View semantic = event_timeline_view(&track->semantic_events);
+        for (size_t i = 0; i < semantic.count; ++i) {
+            Event_Timeline_Result result = event_timeline_record(
+                &p->scene_events, &semantic.events[i]);
+            if (result != EVENT_TIMELINE_OK) {
+                TraceLog(LOG_WARNING, "EVENTS: could not combine semantic cue: %s",
+                         event_timeline_result_string(result));
+            }
+        }
+    }
+    p->scene_events_user_revision = p->event_timeline.revision;
+    p->scene_events_semantic_revision = semantic_revision;
+    p->scene_events_track = p->current_track;
+    return event_timeline_view(&p->scene_events);
 }
 
 static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seconds, float delta_seconds)
@@ -496,7 +616,7 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         .time_seconds = time_seconds,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
-        .events = event_timeline_view(&p->event_timeline),
+        .events = combined_scene_events(),
         .audio = {
             .bands = spectrum.smooth,
             .trails = spectrum.smear,
@@ -692,6 +812,10 @@ typedef enum {
 } Button_State;
 
 static int button_with_id(uint64_t id, Rectangle boundary);
+static void popup_tray_push(Popup_Tray *pt);
+static bool start_assist_job(Assist_Mode mode, Track *track);
+static void poll_assist_job(void);
+static void cancel_assist_job(void);
 
 static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
 {
@@ -719,6 +843,133 @@ static Color event_type_color(uint32_t type)
     }
 }
 
+static void lyric_editor_clear_draft(void)
+{
+    p->selected_lyric_id = 0;
+    p->lyric_draft_new = false;
+    p->lyric_text_active = false;
+    p->lyric_draft_start = 0.0;
+    p->lyric_draft_end = 0.0;
+    p->lyric_draft_text[0] = '\0';
+}
+
+static void lyric_editor_select(Track *track, uint64_t id)
+{
+    const Lyric_Cue *cue = lyrics_find(&track->lyrics, id);
+    if (cue == NULL) return;
+    p->selected_lyric_id = cue->id;
+    p->lyric_draft_new = false;
+    p->lyric_draft_start = cue->start_seconds;
+    p->lyric_draft_end = cue->end_seconds;
+    snprintf(p->lyric_draft_text, sizeof(p->lyric_draft_text), "%s", cue->text);
+}
+
+static void lyric_editor_begin_new(Track *track)
+{
+    double duration = track->lyrics.duration_seconds;
+    double start = GetMusicTimePlayed(track->music);
+    if (start + 0.05 > duration) start = fmax(0.0, duration - 2.0);
+    p->selected_lyric_id = 0;
+    p->lyric_draft_new = true;
+    p->lyric_draft_start = start;
+    p->lyric_draft_end = fmin(duration, start + 2.0);
+    p->lyric_draft_text[0] = '\0';
+    p->lyric_text_active = true;
+}
+
+static bool lyric_editor_apply(Track *track)
+{
+    Lyrics_Result result;
+    if (p->lyric_draft_new) {
+        Lyric_Cue cue = {
+            .start_seconds = p->lyric_draft_start,
+            .end_seconds = p->lyric_draft_end,
+        };
+        snprintf(cue.text, sizeof(cue.text), "%s", p->lyric_draft_text);
+        uint64_t id = 0;
+        result = lyrics_insert(&track->lyrics, &cue, &id);
+        if (result == LYRICS_OK) lyric_editor_select(track, id);
+    } else {
+        result = lyrics_update(&track->lyrics, p->selected_lyric_id,
+                                p->lyric_draft_start, p->lyric_draft_end,
+                                p->lyric_draft_text);
+        if (result == LYRICS_OK) {
+            lyric_editor_select(track, p->selected_lyric_id);
+        }
+    }
+    if (result != LYRICS_OK) {
+        TraceLog(LOG_WARNING, "LYRICS: could not apply edit: %s",
+                 lyrics_result_string(result));
+        popup_tray_push(&p->pt);
+        return false;
+    }
+    p->lyric_text_active = false;
+    return true;
+}
+
+static void lyric_text_backspace(char *text)
+{
+    size_t length = strlen(text);
+    if (length == 0) return;
+    length -= 1;
+    while (length > 0 && (((unsigned char)text[length] & 0xC0u) == 0x80u)) {
+        length -= 1;
+    }
+    text[length] = '\0';
+}
+
+static void lyric_text_input_update(void)
+{
+    if (!p->lyric_text_active) return;
+    if (IsKeyPressed(KEY_BACKSPACE)) lyric_text_backspace(p->lyric_draft_text);
+    if (IsKeyPressed(KEY_ESCAPE)) p->lyric_text_active = false;
+    for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
+        if (codepoint < 0x20 || codepoint == 0x7F) continue;
+        int encoded_size = 0;
+        const char *encoded = CodepointToUTF8(codepoint, &encoded_size);
+        size_t length = strlen(p->lyric_draft_text);
+        if (encoded != NULL && encoded_size > 0 &&
+            length + (size_t)encoded_size < sizeof(p->lyric_draft_text)) {
+            memcpy(p->lyric_draft_text + length, encoded, (size_t)encoded_size);
+            p->lyric_draft_text[length + (size_t)encoded_size] = '\0';
+        }
+    }
+}
+
+static void format_timestamp(double seconds, char *output, size_t capacity)
+{
+    if (seconds < 0.0) seconds = 0.0;
+    unsigned minutes = (unsigned)(seconds/60.0);
+    double within_minute = seconds - (double)minutes*60.0;
+    snprintf(output, capacity, "%02u:%06.3f", minutes, within_minute);
+}
+
+static void lyric_time_row(Rectangle boundary, const char *label, double *value,
+                           double other, bool is_start, double playhead,
+                           double duration, uint64_t id_base)
+{
+    const float gap = 4.0f;
+    DrawTextEx(GetFontDefault(), label, (Vector2){boundary.x, boundary.y + 8.0f},
+               16.0f, 1.0f, ColorAlpha(WHITE, 0.68f));
+    char timestamp[32];
+    format_timestamp(*value, timestamp, sizeof(timestamp));
+    DrawTextEx(GetFontDefault(), timestamp, (Vector2){boundary.x + 58.0f, boundary.y + 7.0f},
+               18.0f, 1.0f, WHITE);
+    Rectangle minus = {boundary.x + 154.0f, boundary.y, 42.0f, boundary.height};
+    Rectangle plus = {minus.x + minus.width + gap, boundary.y, 42.0f, boundary.height};
+    Rectangle set = {plus.x + plus.width + gap, boundary.y, 78.0f, boundary.height};
+    if (text_button(id_base, minus, "-0.1", false) & BS_CLICKED) *value -= 0.1;
+    if (text_button(id_base + 1, plus, "+0.1", false) & BS_CLICKED) *value += 0.1;
+    if (text_button(id_base + 2, set, "Set here", false) & BS_CLICKED) *value = playhead;
+    if (is_start) {
+        if (*value < 0.0) *value = 0.0;
+        if (*value > other - 0.001) *value = other - 0.001;
+    } else {
+        if (*value < other + 0.001) *value = other + 0.001;
+        if (*value > duration) *value = duration;
+    }
+}
+
 static void record_timeline_event(Track *track, uint32_t type)
 {
     if (track == NULL || p->next_event_id == UINT64_MAX) {
@@ -741,6 +992,341 @@ static void record_timeline_event(Track *track, uint32_t type)
     }
 }
 
+static void draw_lyric_lane(Rectangle lane, Track *track, float track_length)
+{
+    DrawRectangleRec(lane, ColorBrightness(COLOR_TIMELINE_BACKGROUND, 0.16f));
+    DrawLineEx((Vector2){lane.x, lane.y}, (Vector2){lane.x + lane.width, lane.y},
+               1.0f, ColorAlpha(WHITE, 0.16f));
+    const Color lyric_color = (Color){242, 190, 66, 255};
+    for (size_t i = 0; i < track->scene_switches.count; ++i) {
+        const Scene_Switch_Cue *cue = &track->scene_switches.cues[i];
+        float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
+        DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
+                   1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
+        if (lane.height >= 28.0f && i + 1 < track->scene_switches.count) {
+            DrawTextEx(GetFontDefault(), scene_stable_name((Scene_Id)cue->scene_index),
+                       (Vector2){x + 3.0f, lane.y + 7.0f}, 12.0f, 1.0f,
+                       ColorAlpha(WHITE, 0.45f));
+        }
+    }
+    for (size_t i = 0; i < track->lyrics.count; ++i) {
+        const Lyric_Cue *cue = &track->lyrics.cues[i];
+        float left = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
+        float right = lane.x + (float)(cue->end_seconds/track_length)*lane.width;
+        if (right - left < 3.0f) right = left + 3.0f;
+        Rectangle block = {left, lane.y + 3.0f, right - left, lane.height - 6.0f};
+        bool selected = cue->id == p->selected_lyric_id;
+        Color fill = ColorAlpha(lyric_color, selected ? 0.82f : 0.38f);
+        if (CheckCollisionPointRec(GetMousePosition(), block)) fill = ColorAlpha(lyric_color, 0.68f);
+        DrawRectangleRec(block, fill);
+        DrawRectangleLinesEx(block, 1.0f, lyric_color);
+        if (CheckCollisionPointRec(GetMousePosition(), block) &&
+            IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            lyric_editor_select(track, cue->id);
+            p->lyrics_editor_open = true;
+        }
+    }
+}
+
+static bool export_lyrics_document(const Lyrics_Document *document)
+{
+    const char *filters[] = {"*.lyrics.tsv"};
+    char *path = tinyfd_saveFileDialog("Export timed lyrics", "lyrics.lyrics.tsv",
+                                       NOB_ARRAY_LEN(filters), filters,
+                                       "Musializer timed lyrics");
+    if (path == NULL) return true;
+    size_t required = 0;
+    Lyrics_Result measured = lyrics_bridge_export(document, NULL, 0, &required);
+    if (measured != LYRICS_ERROR_BUFFER_TOO_SMALL || required == 0 || required > INT_MAX) {
+        return false;
+    }
+    char *output = malloc(required);
+    if (output == NULL) return false;
+    Lyrics_Result exported = lyrics_bridge_export(document, output, required, &required);
+    bool saved = exported == LYRICS_OK &&
+                 SaveFileData(path, output, (int)(required - 1));
+    free(output);
+    return saved;
+}
+
+// 1 imported, 0 cancelled, -1 failed.
+static int import_lyrics_document(Lyrics_Document *document)
+{
+    const char *filters[] = {"*.lyrics.tsv", "*.tsv"};
+    char *path = tinyfd_openFileDialog("Import timed lyrics", "./",
+                                       NOB_ARRAY_LEN(filters), filters,
+                                       "Musializer timed lyrics", 0);
+    if (path == NULL) return 0;
+    int file_size = GetFileLength(path);
+    if (file_size <= 0 || (size_t)file_size > LYRICS_BRIDGE_MAX_BYTES) return -1;
+    int input_size = 0;
+    unsigned char *input = LoadFileData(path, &input_size);
+    if (input == NULL || input_size <= 0) {
+        if (input != NULL) UnloadFileData(input);
+        return -1;
+    }
+    Lyrics_Document *candidate = malloc(sizeof(*candidate));
+    if (candidate == NULL) {
+        UnloadFileData(input);
+        return -1;
+    }
+    lyrics_document_init(candidate, document->duration_seconds);
+    Lyrics_Result imported = lyrics_bridge_import(
+        candidate, (const char *)input, (size_t)input_size);
+    UnloadFileData(input);
+    bool matches = imported == LYRICS_OK &&
+                   fabs(candidate->duration_seconds - document->duration_seconds) <= 0.25;
+    bool replaced = matches &&
+                    lyrics_document_replace(document, candidate) == LYRICS_OK;
+    free(candidate);
+    return replaced ? 1 : -1;
+}
+
+static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead)
+{
+    const Color signal = (Color){242, 190, 66, 255};
+    const float padding = 8.0f;
+    const float gap = 8.0f;
+    DrawRectangleRec(boundary, (Color){11, 12, 10, 255});
+    DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(signal, 0.55f));
+
+    Rectangle list = {
+        boundary.x + padding, boundary.y + padding,
+        boundary.width*0.48f - padding - gap*0.5f,
+        boundary.height - padding*2.0f,
+    };
+    Rectangle form = {
+        list.x + list.width + gap, list.y,
+        boundary.x + boundary.width - padding - (list.x + list.width + gap),
+        list.height,
+    };
+
+    DrawTextEx(GetFontDefault(), "LYRIC CUES", (Vector2){list.x, list.y},
+               18.0f, 1.0f, signal);
+    char cue_count[48];
+    snprintf(cue_count, sizeof(cue_count), "%zu / %u", track->lyrics.count,
+             (unsigned)LYRICS_CUE_CAPACITY);
+    Vector2 count_size = MeasureTextEx(GetFontDefault(), cue_count, 15.0f, 1.0f);
+    DrawTextEx(GetFontDefault(), cue_count,
+               (Vector2){list.x + list.width - count_size.x, list.y + 2.0f},
+               15.0f, 1.0f, ColorAlpha(WHITE, 0.55f));
+
+    const float row_height = 28.0f;
+    size_t visible = list.height > 36.0f ? (size_t)((list.height - 32.0f)/row_height) : 0;
+    size_t focus = 0;
+    for (size_t i = 0; i < track->lyrics.count; ++i) {
+        const Lyric_Cue *cue = &track->lyrics.cues[i];
+        if (cue->id == p->selected_lyric_id ||
+            (p->selected_lyric_id == 0 && cue->start_seconds <= playhead && playhead < cue->end_seconds)) {
+            focus = i;
+            break;
+        }
+    }
+    size_t first = focus > visible/2 ? focus - visible/2 : 0;
+    if (first + visible > track->lyrics.count) {
+        first = track->lyrics.count > visible ? track->lyrics.count - visible : 0;
+    }
+    if (track->lyrics.count == 0) {
+        DrawTextEx(GetFontDefault(), "No lyric cues. Add one at the playhead.",
+                   (Vector2){list.x, list.y + 38.0f}, 16.0f, 1.0f,
+                   ColorAlpha(WHITE, 0.55f));
+    }
+    for (size_t row = 0; row < visible && first + row < track->lyrics.count; ++row) {
+        const Lyric_Cue *cue = &track->lyrics.cues[first + row];
+        Rectangle row_boundary = {
+            list.x, list.y + 28.0f + row*row_height, list.width, row_height - 2.0f,
+        };
+        bool selected = cue->id == p->selected_lyric_id;
+        bool current = cue->start_seconds <= playhead && playhead < cue->end_seconds;
+        int state = button_with_id(UINT64_C(0x4C59524943000000) + cue->id, row_boundary);
+        Color background = selected ? ColorAlpha(signal, 0.35f) : (Color){20, 21, 19, 255};
+        if (state & BS_HOVEROVER) background = (Color){36, 34, 24, 255};
+        DrawRectangleRec(row_boundary, background);
+        if (current) DrawRectangle((int)row_boundary.x, (int)row_boundary.y, 3,
+                                   (int)row_boundary.height, signal);
+        char time[24];
+        format_timestamp(cue->start_seconds, time, sizeof(time));
+        DrawTextEx(GetFontDefault(), time,
+                   (Vector2){row_boundary.x + 8.0f, row_boundary.y + 5.0f},
+                   15.0f, 1.0f, ColorAlpha(WHITE, 0.68f));
+        BeginScissorMode((int)(row_boundary.x + 90.0f), (int)row_boundary.y,
+                         (int)(row_boundary.width - 94.0f), (int)row_boundary.height);
+        DrawTextEx(GetFontDefault(), cue->text,
+                   (Vector2){row_boundary.x + 94.0f, row_boundary.y + 5.0f},
+                   15.0f, 1.0f, WHITE);
+        EndScissorMode();
+        if (state & BS_CLICKED) lyric_editor_select(track, cue->id);
+    }
+
+    DrawTextEx(GetFontDefault(), p->lyric_draft_new ? "NEW CUE" : "SELECTED CUE",
+               (Vector2){form.x, form.y}, 18.0f, 1.0f, signal);
+    Rectangle add = {form.x + form.width - 92.0f, form.y - 3.0f, 92.0f, 27.0f};
+    Rectangle import_button = {add.x - 77.0f, add.y, 71.0f, add.height};
+    Rectangle export_button = {import_button.x - 77.0f, add.y, 71.0f, add.height};
+    if (text_button(UINT64_C(0x4C59524943494D50), import_button,
+                    "Import", false) & BS_CLICKED) {
+        int imported = import_lyrics_document(&track->lyrics);
+        if (imported < 0) popup_tray_push(&p->pt);
+        if (imported > 0) lyric_editor_clear_draft();
+    }
+    if (text_button(UINT64_C(0x4C59524943455850), export_button,
+                    "Export", false) & BS_CLICKED) {
+        if (!export_lyrics_document(&track->lyrics)) popup_tray_push(&p->pt);
+    }
+    if (text_button(UINT64_C(0x4C59524943414444), add, "Add cue", false) & BS_CLICKED) {
+        lyric_editor_begin_new(track);
+    }
+
+    bool has_draft = p->lyric_draft_new || p->selected_lyric_id != 0;
+    if (!has_draft) {
+        DrawTextEx(GetFontDefault(), "Select a cue or add one at the current playhead.",
+                   (Vector2){form.x, form.y + 42.0f}, 16.0f, 1.0f,
+                   ColorAlpha(WHITE, 0.55f));
+        return;
+    }
+
+    Rectangle start_row = {form.x, form.y + 30.0f, form.width, 30.0f};
+    Rectangle end_row = {form.x, form.y + 64.0f, form.width, 30.0f};
+    lyric_time_row(start_row, "START", &p->lyric_draft_start, p->lyric_draft_end,
+                   true, playhead, track->lyrics.duration_seconds,
+                   UINT64_C(0x4C59525300000000));
+    lyric_time_row(end_row, "END", &p->lyric_draft_end, p->lyric_draft_start,
+                   false, playhead, track->lyrics.duration_seconds,
+                   UINT64_C(0x4C59524500000000));
+
+    Rectangle text_field = {form.x, form.y + 101.0f, form.width, 37.0f};
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        p->lyric_text_active = CheckCollisionPointRec(GetMousePosition(), text_field);
+    }
+    DrawRectangleRec(text_field, (Color){0, 0, 0, 255});
+    DrawRectangleLinesEx(text_field, p->lyric_text_active ? 2.0f : 1.0f,
+                         p->lyric_text_active ? signal : ColorAlpha(WHITE, 0.28f));
+    const char *display_text = p->lyric_draft_text[0] != '\0' ?
+                               p->lyric_draft_text : "Type lyric content";
+    Color text_color = p->lyric_draft_text[0] != '\0' ? WHITE : ColorAlpha(WHITE, 0.38f);
+    BeginScissorMode((int)text_field.x + 7, (int)text_field.y,
+                     (int)text_field.width - 14, (int)text_field.height);
+    DrawTextEx(GetFontDefault(), display_text,
+               (Vector2){text_field.x + 8.0f, text_field.y + 9.0f},
+               17.0f, 1.0f, text_color);
+    if (p->lyric_text_active && ((int)(GetTime()*2.0) & 1) == 0) {
+        Vector2 measured = MeasureTextEx(GetFontDefault(), p->lyric_draft_text, 17.0f, 1.0f);
+        DrawLineEx((Vector2){text_field.x + 9.0f + measured.x, text_field.y + 8.0f},
+                   (Vector2){text_field.x + 9.0f + measured.x, text_field.y + 29.0f},
+                   1.0f, signal);
+    }
+    EndScissorMode();
+    lyric_text_input_update();
+
+    Rectangle apply = {form.x, form.y + 146.0f, 92.0f, 30.0f};
+    if (text_button(UINT64_C(0x4C59524943415050), apply, "Apply", false) & BS_CLICKED) {
+        lyric_editor_apply(track);
+    }
+    Rectangle delete_button = {apply.x + apply.width + gap, apply.y, 92.0f, apply.height};
+    if (!p->lyric_draft_new &&
+        (text_button(UINT64_C(0x4C5952494344454C), delete_button, "Delete", false) & BS_CLICKED)) {
+        if (lyrics_delete(&track->lyrics, p->selected_lyric_id) == LYRICS_OK) {
+            lyric_editor_clear_draft();
+        }
+    }
+    DrawTextEx(GetFontDefault(), "Ctrl+Enter applies the edit",
+               (Vector2){form.x + 202.0f, apply.y + 7.0f}, 14.0f, 1.0f,
+               ColorAlpha(WHITE, 0.42f));
+    if (p->lyric_text_active && IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_ENTER)) {
+        lyric_editor_apply(track);
+    }
+}
+
+static void draw_assist_panel(Rectangle boundary, Track *track)
+{
+    const Color signal = (Color){242, 190, 66, 255};
+    const float padding = 10.0f;
+    const float gap = 8.0f;
+    DrawRectangleRec(boundary, (Color){11, 12, 10, 255});
+    DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(signal, 0.55f));
+    DrawTextEx(GetFontDefault(), "ASSISTED ANALYSIS",
+               (Vector2){boundary.x + padding, boundary.y + padding},
+               19.0f, 1.0f, signal);
+    DrawTextEx(GetFontDefault(),
+               "Jobs run outside playback. Results remain editable suggestions with separate provenance.",
+               (Vector2){boundary.x + padding, boundary.y + 38.0f},
+               16.0f, 1.0f, ColorAlpha(WHITE, 0.62f));
+
+    const char *labels[] = {"Timed lyrics", "Scene changes", "MiMo feelings", "Full assist"};
+    const Assist_Mode modes[] = {
+        ASSIST_MODE_LYRICS, ASSIST_MODE_SECTIONS, ASSIST_MODE_MIMO, ASSIST_MODE_ALL,
+    };
+    float button_width = (boundary.width - padding*2.0f - gap*3.0f)/4.0f;
+    bool helpers_available = FileExists("./tools/external_analysis.py");
+    for (size_t i = 0; i < NOB_ARRAY_LEN(labels); ++i) {
+        Rectangle button_boundary = {
+            boundary.x + padding + i*(button_width + gap),
+            boundary.y + 68.0f,
+            button_width,
+            38.0f,
+        };
+        bool selected = p->assist_job_state == ASSIST_JOB_RUNNING && p->assist_mode == modes[i];
+        int state = text_button(UINT64_C(0x4153534953540000) + i,
+                                button_boundary, labels[i], selected);
+        DrawRectangleLinesEx(button_boundary, 1.0f, ColorAlpha(signal, 0.55f));
+        if ((state & BS_CLICKED) && helpers_available &&
+            p->assist_job_state != ASSIST_JOB_RUNNING) {
+            if (!start_assist_job(modes[i], track)) popup_tray_push(&p->pt);
+        }
+    }
+
+    const char *status = helpers_available ? "Ready" : "Assist helpers unavailable in this build";
+    Color status_color = ColorAlpha(WHITE, 0.62f);
+    if (p->assist_job_state == ASSIST_JOB_RUNNING) {
+        status = "Running analysis... playback remains available";
+        status_color = signal;
+    } else if (p->assist_job_state == ASSIST_JOB_SUCCEEDED) {
+        status = "Analysis complete and validated";
+        status_color = (Color){0, 230, 118, 255};
+    } else if (p->assist_job_state == ASSIST_JOB_FAILED) {
+        status = "Analysis failed; inspect the job log";
+        status_color = (Color){255, 59, 48, 255};
+    }
+    DrawTextEx(GetFontDefault(), "STATUS", (Vector2){boundary.x + padding, boundary.y + 126.0f},
+               15.0f, 1.0f, ColorAlpha(WHITE, 0.42f));
+    DrawTextEx(GetFontDefault(), status,
+               (Vector2){boundary.x + padding + 72.0f, boundary.y + 124.0f},
+               17.0f, 1.0f, status_color);
+
+    if (track->scene_switches.count > 0) {
+        char auto_label[96];
+        snprintf(auto_label, sizeof(auto_label), "Auto scenes: %s (%zu)",
+                 track->scene_switches.enabled ? "On" : "Off",
+                 track->scene_switches.count);
+        Rectangle toggle = {
+            boundary.x + boundary.width - padding - 190.0f,
+            boundary.y + 116.0f,
+            190.0f,
+            32.0f,
+        };
+        if (text_button(UINT64_C(0x4155544F5343454E), toggle, auto_label,
+                        track->scene_switches.enabled) & BS_CLICKED) {
+            track->scene_switches.enabled = !track->scene_switches.enabled;
+            scene_switch_reset(&track->scene_switches);
+        }
+        DrawRectangleLinesEx(toggle, 1.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.62f));
+    }
+
+    if (p->assist_log_path[0] != '\0') {
+        DrawTextEx(GetFontDefault(), p->assist_log_path,
+                   (Vector2){boundary.x + padding, boundary.y + 154.0f},
+                   14.0f, 1.0f, ColorAlpha(WHITE, 0.42f));
+    }
+    DrawTextEx(GetFontDefault(),
+               "Timed lyrics: local Whisper, then evidence-only Codex review.  Scene changes: measured audio sections.",
+               (Vector2){boundary.x + padding, boundary.y + boundary.height - 42.0f},
+               14.0f, 1.0f, ColorAlpha(WHITE, 0.48f));
+    DrawTextEx(GetFontDefault(),
+               "MiMo: subjective feeling cues via OpenRouter; never treated as measured audio or authoritative lyrics.",
+               (Vector2){boundary.x + padding, boundary.y + boundary.height - 22.0f},
+               14.0f, 1.0f, ColorAlpha(WHITE, 0.48f));
+}
+
 static void timeline(Rectangle timeline_boundary, Track *track)
 {
     DrawRectangleRec(timeline_boundary, COLOR_TIMELINE_BACKGROUND);
@@ -755,20 +1341,39 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     Rectangle controls = {
         timeline_boundary.x + margin,
         timeline_boundary.y + margin,
-        event_button_width*5.0f + margin*4.0f,
+        event_button_width*6.0f + margin*5.0f,
         controls_height,
     };
-    const char *labels[4] = {"+ Lyric", "+ Feel", "+ Cue", "+ Custom"};
-    const uint32_t types[4] = {
-        EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC, EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
+    const char *labels[5] = {"Lyrics", "Assist", "+ Feel", "+ Cue", "+ Custom"};
+    const uint32_t types[5] = {
+        EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
+        EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
     };
     bool over_controls = CheckCollisionPointRec(GetMousePosition(), controls);
     float control_x = controls.x;
-    for (size_t i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < 5; ++i) {
         Rectangle boundary = {control_x, controls.y, event_button_width, controls.height};
-        int state = text_button(UINT64_C(0x45564E5400000000) + i, boundary, labels[i], false);
-        DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(event_type_color(types[i]), 0.8f));
-        if (state & BS_CLICKED) record_timeline_event(track, types[i]);
+        int state = text_button(UINT64_C(0x45564E5400000000) + i, boundary, labels[i],
+                                (i == 0 && p->lyrics_editor_open) ||
+                                (i == 1 && p->assist_panel_open));
+        DrawRectangleLinesEx(boundary, 1.0f,
+                             ColorAlpha(i < 2 ? (Color){242, 190, 66, 255}
+                                               : event_type_color(types[i]), 0.8f));
+        if (state & BS_CLICKED) {
+            if (i == 0) {
+                p->lyrics_editor_open = !p->lyrics_editor_open;
+                if (p->lyrics_editor_open) p->assist_panel_open = false;
+                if (!p->lyrics_editor_open) p->lyric_text_active = false;
+            } else if (i == 1) {
+                p->assist_panel_open = !p->assist_panel_open;
+                if (p->assist_panel_open) {
+                    p->lyrics_editor_open = false;
+                    p->lyric_text_active = false;
+                }
+            } else {
+                record_timeline_event(track, types[i]);
+            }
+        }
         control_x += event_button_width + margin;
     }
     Rectangle clear_boundary = {control_x, controls.y, event_button_width, controls.height};
@@ -777,18 +1382,47 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         p->next_event_id = 1;
     }
 
-    Event_Timeline_View events = event_timeline_view(&p->event_timeline);
+    const float lane_top = timeline_boundary.y + controls_height + margin*2.0f;
+    const bool expanded_panel = p->lyrics_editor_open || p->assist_panel_open;
+    const float lane_height = expanded_panel ? 30.0f :
+                              timeline_boundary.height - controls_height - margin*2.0f;
+    Rectangle lyric_lane = {
+        timeline_boundary.x, lane_top, timeline_boundary.width, fmaxf(18.0f, lane_height),
+    };
+
+    Event_Timeline_View events = combined_scene_events();
     for (size_t i = 0; i < events.count; ++i) {
         const Event_Record *event = &events.events[i];
         float t = (float)(event->timestamp_seconds/len);
         if (t < 0.0f || t > 1.0f) continue;
         float marker_x = timeline_boundary.x + t*timeline_boundary.width;
         Color color = event_type_color(event->type);
-        DrawLineEx((Vector2){marker_x, timeline_boundary.y + controls_height + margin*2.0f},
+        DrawLineEx((Vector2){marker_x, lane_top},
                    (Vector2){marker_x, timeline_boundary.y + timeline_boundary.height},
                    3.0f, ColorAlpha(color, 0.75f));
-        DrawCircleV((Vector2){marker_x, timeline_boundary.y + controls_height + margin*2.0f},
+        DrawCircleV((Vector2){marker_x, lane_top},
                     5.0f, color);
+    }
+
+    draw_lyric_lane(lyric_lane, track, len);
+    if (p->lyrics_editor_open) {
+        Rectangle editor = {
+            timeline_boundary.x + margin,
+            lyric_lane.y + lyric_lane.height + margin,
+            timeline_boundary.width - margin*2.0f,
+            timeline_boundary.y + timeline_boundary.height -
+                (lyric_lane.y + lyric_lane.height + margin) - margin,
+        };
+        if (editor.height > 80.0f) draw_lyrics_editor(editor, track, played);
+    } else if (p->assist_panel_open) {
+        Rectangle panel = {
+            timeline_boundary.x + margin,
+            lyric_lane.y + lyric_lane.height + margin,
+            timeline_boundary.width - margin*2.0f,
+            timeline_boundary.y + timeline_boundary.height -
+                (lyric_lane.y + lyric_lane.height + margin) - margin,
+        };
+        if (panel.height > 80.0f) draw_assist_panel(panel, track);
     }
 
     float x = timeline_boundary.x + played/len*timeline_boundary.width;
@@ -803,7 +1437,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     DrawLineEx(startPos, endPos, 10, COLOR_TIMELINE_CURSOR);
 
     Vector2 mouse = GetMousePosition();
-    if (CheckCollisionPointRec(mouse, timeline_boundary) && !over_controls) {
+    bool over_editor = expanded_panel && mouse.y > lyric_lane.y + lyric_lane.height;
+    if (CheckCollisionPointRec(mouse, timeline_boundary) && !over_controls && !over_editor) {
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             float t = (mouse.x - timeline_boundary.x)/timeline_boundary.width;
             SeekMusicStream(track->music, t*len);
@@ -844,6 +1479,309 @@ static uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
         hash = hash*33 + bytes[i];
     }
     return hash;
+}
+
+static const char *assist_mode_argument(Assist_Mode mode)
+{
+    switch (mode) {
+    case ASSIST_MODE_LYRICS: return "lyrics";
+    case ASSIST_MODE_SECTIONS: return "sections";
+    case ASSIST_MODE_MIMO: return "mimo";
+    case ASSIST_MODE_ALL: return "all";
+    }
+    return "sections";
+}
+
+static bool start_assist_job(Assist_Mode mode, Track *track)
+{
+    if (track == NULL || p->assist_job_state == ASSIST_JOB_RUNNING) return false;
+    size_t track_index = (size_t)(track - p->tracks.items);
+    if (track_index >= p->tracks.count) return false;
+
+    uint64_t path_hash = djb2(DJB2_INIT, track->file_path, strlen(track->file_path));
+    path_hash = djb2(path_hash, &track->lyrics.duration_seconds,
+                     sizeof(track->lyrics.duration_seconds));
+    if (!nob_mkdir_if_not_exists("./build/analysis")) return false;
+    snprintf(p->assist_output_dir, sizeof(p->assist_output_dir),
+             "./build/analysis/%016llx", (unsigned long long)path_hash);
+    if (!nob_mkdir_if_not_exists(p->assist_output_dir)) return false;
+    snprintf(p->assist_bridge_path, sizeof(p->assist_bridge_path),
+             "./build/analysis/%016llx/analysis.bridge.tsv",
+             (unsigned long long)path_hash);
+    snprintf(p->assist_log_path, sizeof(p->assist_log_path),
+             "./build/analysis/%016llx/assist.log",
+             (unsigned long long)path_hash);
+    remove(p->assist_bridge_path);
+    remove(p->assist_log_path);
+
+    char duration_text[64];
+    snprintf(duration_text, sizeof(duration_text), "%.9f", track->lyrics.duration_seconds);
+    Nob_Cmd command = {0};
+    Nob_Procs processes = {0};
+#ifdef _WIN32
+    nob_cmd_append(&command, "py", "-3");
+#else
+    nob_cmd_append(&command, "python3");
+#endif
+    nob_cmd_append(&command,
+        "./tools/external_analysis.py", "assist",
+        track->file_path, p->assist_output_dir,
+        "--duration", duration_text,
+        "--mode", assist_mode_argument(mode),
+        "--bridge", p->assist_bridge_path,
+        "--timeout", "2400", "--new-process-group");
+    if (mode == ASSIST_MODE_MIMO || mode == ASSIST_MODE_ALL) {
+        nob_cmd_append(&command, "--zdr");
+    }
+    bool started = nob_cmd_run(&command, .async = &processes, .max_procs = 1,
+                               .stderr_path = p->assist_log_path);
+    nob_cmd_free(command);
+    if (!started || processes.count != 1) {
+        nob_da_free(processes);
+        p->assist_process = NOB_INVALID_PROC;
+        p->assist_job_state = ASSIST_JOB_FAILED;
+        return false;
+    }
+    p->assist_process = processes.items[0];
+    nob_da_free(processes);
+    p->assist_mode = mode;
+    p->assist_track_index = track_index;
+    p->assist_job_state = ASSIST_JOB_RUNNING;
+    TraceLog(LOG_INFO, "ASSIST: started %s analysis for %s",
+             assist_mode_argument(mode), track->file_path);
+    return true;
+}
+
+static Scene_Id scene_id_from_analysis(Analysis_Scene scene)
+{
+    switch (scene) {
+    case ANALYSIS_SCENE_SPECTRUM: return SCENE_SPECTRUM;
+    case ANALYSIS_SCENE_PULSE: return SCENE_PULSE_FIELD;
+    case ANALYSIS_SCENE_ORBITAL: return SCENE_ORBITAL_LATTICE;
+    case ANALYSIS_SCENE_ASCII: return SCENE_ASCII_FIELD;
+    case ANALYSIS_SCENE_ATLAS: return SCENE_SONG_ATLAS;
+    case ANALYSIS_SCENE_TERRARIUM: return SCENE_SPECTRAL_TERRARIUM;
+    case ANALYSIS_SCENE_CONSTELLATION: return SCENE_CONSTELLATION;
+    case ANALYSIS_SCENE_COUNT: break;
+    }
+    return SCENE_SPECTRUM;
+}
+
+static bool import_analysis_bridge_for_track(const char *path, size_t track_index,
+                                             Assist_Mode mode)
+{
+    if (path == NULL || track_index >= p->tracks.count) return false;
+    int file_size = GetFileLength(path);
+    if (file_size <= 0 || (size_t)file_size > ANALYSIS_BRIDGE_INPUT_MAX_BYTES) return false;
+    int input_size = 0;
+    unsigned char *input = LoadFileData(path, &input_size);
+    if (input == NULL || input_size <= 0) {
+        if (input != NULL) UnloadFileData(input);
+        return false;
+    }
+    Analysis_Bridge *bridge = malloc(sizeof(*bridge));
+    if (bridge == NULL) {
+        UnloadFileData(input);
+        return false;
+    }
+    analysis_bridge_init(bridge);
+    Track *track = &p->tracks.items[track_index];
+    char expected_audio_sha256[SHA256_HEX_SIZE];
+    if (!sha256_file_hex(track->file_path, expected_audio_sha256)) {
+        UnloadFileData(input);
+        free(bridge);
+        return false;
+    }
+    Analysis_Bridge_Result parsed = analysis_bridge_parse(
+        bridge, (const char *)input, (size_t)input_size,
+        expected_audio_sha256, 0);
+    UnloadFileData(input);
+    if (parsed != ANALYSIS_BRIDGE_OK) {
+        TraceLog(LOG_WARNING, "ASSIST: rejected bridge: %s",
+                 analysis_bridge_result_string(parsed));
+        free(bridge);
+        return false;
+    }
+    // MP3 container duration and raylib's decoded frame count may differ by a
+    // small encoder-padding tail. SHA-256 establishes identity; accept only a
+    // narrow timing discrepancy and use measured duration for imported lanes.
+    double bridge_duration = (double)bridge->duration_ms/1000.0;
+    if (fabs(bridge_duration - track->lyrics.duration_seconds) > 0.25) {
+        TraceLog(LOG_WARNING, "ASSIST: bridge duration does not match the active track");
+        free(bridge);
+        return false;
+    }
+
+    Scene_Switch_Timeline scene_candidate = track->scene_switches;
+    Event_Timeline semantic_candidate;
+    event_timeline_init(&semantic_candidate);
+    if (bridge->sections_present) {
+        Scene_Switch_Cue cues[SCENE_SWITCH_CAPACITY];
+        for (size_t i = 0; i < bridge->section_count; ++i) {
+            const Analysis_Section *source = &bridge->sections[i];
+            cues[i] = (Scene_Switch_Cue) {
+                .id = source->id,
+                .start_seconds = (double)source->start_ms/1000.0,
+                .end_seconds = (double)source->end_ms/1000.0,
+                .scene_index = (uint32_t)scene_id_from_analysis(source->recommended_scene),
+                .strength = (float)source->transition_strength_milli/1000.0f,
+            };
+        }
+        Scene_Switch_Result replaced = scene_switch_replace(
+            &scene_candidate, cues, bridge->section_count,
+            bridge_duration, COUNT_SCENES);
+        if (replaced != SCENE_SWITCH_OK) {
+            TraceLog(LOG_WARNING, "ASSIST: rejected scene switches: %s",
+                     scene_switch_result_string(replaced));
+            free(bridge);
+            return false;
+        }
+    }
+    if (bridge->semantic_cues_present) {
+        for (size_t i = 0; i < bridge->semantic_cue_count; ++i) {
+            const Analysis_Semantic_Cue *cue = &bridge->semantic_cues[i];
+            uint64_t event_id = cue->id ^ UINT64_C(0x4D494D4F00000000);
+            if (event_id == 0) event_id = 1;
+            Event_Record event = {
+                .timestamp_seconds = (double)cue->start_ms/1000.0,
+                .id = event_id,
+                .type = EVENT_TYPE_SEMANTIC,
+                .value_count = 4,
+                .values = {
+                    (float)cue->energy_milli/1000.0f,
+                    (float)cue->tension_milli/1000.0f,
+                    (float)cue->valence_milli/1000.0f,
+                    (float)cue->confidence_milli/1000.0f,
+                },
+            };
+            Event_Timeline_Result result = event_timeline_record(&semantic_candidate, &event);
+            if (result != EVENT_TIMELINE_OK) {
+                TraceLog(LOG_WARNING, "ASSIST: semantic cue import stopped: %s",
+                         event_timeline_result_string(result));
+                free(bridge);
+                return false;
+            }
+        }
+    }
+    if (bridge->lyrics_present &&
+        (mode == ASSIST_MODE_LYRICS || mode == ASSIST_MODE_ALL)) {
+        if (lyrics_document_replace(&track->lyrics, &bridge->lyrics) != LYRICS_OK) {
+            free(bridge);
+            return false;
+        }
+        if (track_index == (size_t)p->current_track) lyric_editor_clear_draft();
+    }
+    if (bridge->sections_present) track->scene_switches = scene_candidate;
+    if (bridge->semantic_cues_present || bridge->semantic_notes_present) {
+        if (event_timeline_replace(&track->semantic_events, &semantic_candidate) !=
+            EVENT_TIMELINE_OK) {
+            free(bridge);
+            return false;
+        }
+    }
+    TraceLog(LOG_INFO, "ASSIST: imported %zu lyrics, %zu scene sections, %zu semantic cues",
+             bridge->lyrics.count, bridge->section_count, bridge->semantic_cue_count);
+    free(bridge);
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_load_analysis_bridge(const char *file_path)
+{
+    if (p == NULL || p->current_track < 0) return false;
+    return import_analysis_bridge_for_track(file_path, (size_t)p->current_track,
+                                            ASSIST_MODE_ALL);
+}
+
+MUSIALIZER_PLUG bool plug_set_auto_scenes(bool enabled)
+{
+    Track *track = current_track();
+    if (track == NULL || (enabled && track->scene_switches.count == 0)) return false;
+    track->scene_switches.enabled = enabled;
+    scene_switch_reset(&track->scene_switches);
+    return true;
+}
+
+static void poll_assist_job(void)
+{
+    if (p->assist_job_state != ASSIST_JOB_RUNNING ||
+        p->assist_process == NOB_INVALID_PROC) return;
+    Nob_Proc process = p->assist_process;
+    int status = nob__proc_wait_async(process, 0);
+    if (status == 0) return;
+    p->assist_process = NOB_INVALID_PROC;
+    if (status < 0) {
+#ifdef _WIN32
+        // nob's nonzero-exit polling path reports failure without closing the
+        // process handle; ownership remains ours on that branch.
+        CloseHandle(process);
+#endif
+        p->assist_job_state = ASSIST_JOB_FAILED;
+        TraceLog(LOG_WARNING, "ASSIST: analysis failed; see %s", p->assist_log_path);
+        popup_tray_push(&p->pt);
+        return;
+    }
+    TraceLog(LOG_INFO, "ASSIST: analysis completed; importing %s",
+             p->assist_bridge_path);
+    p->assist_job_state = import_analysis_bridge_for_track(
+                              p->assist_bridge_path, p->assist_track_index,
+                              p->assist_mode) ?
+                          ASSIST_JOB_SUCCEEDED : ASSIST_JOB_FAILED;
+    if (p->assist_job_state == ASSIST_JOB_FAILED) popup_tray_push(&p->pt);
+}
+
+static void cancel_assist_job(void)
+{
+    if (p == NULL || p->assist_job_state != ASSIST_JOB_RUNNING ||
+        p->assist_process == NOB_INVALID_PROC) return;
+#ifdef _WIN32
+    DWORD process_id = GetProcessId(p->assist_process);
+    if (process_id != 0) {
+        char process_id_text[32];
+        snprintf(process_id_text, sizeof(process_id_text), "%lu",
+                 (unsigned long)process_id);
+        Nob_Cmd terminate = {0};
+        nob_cmd_append(&terminate, "taskkill", "/PID", process_id_text, "/T", "/F");
+        (void)nob_cmd_run(&terminate);
+        nob_cmd_free(terminate);
+    }
+    if (WaitForSingleObject(p->assist_process, 2000) == WAIT_TIMEOUT) {
+        TerminateProcess(p->assist_process, 1);
+        WaitForSingleObject(p->assist_process, 2000);
+    }
+    CloseHandle(p->assist_process);
+#else
+    pid_t process = p->assist_process;
+    if (kill(-process, SIGTERM) < 0 && errno == ESRCH) kill(process, SIGTERM);
+    bool finished = false;
+    for (unsigned attempt = 0; attempt < 200; ++attempt) {
+        pid_t waited = waitpid(process, NULL, WNOHANG);
+        if (waited == process || (waited < 0 && errno == ECHILD)) {
+            finished = true;
+            break;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 10*1000*1000};
+        nanosleep(&pause, NULL);
+    }
+    if (!finished) {
+        if (kill(-process, SIGKILL) < 0 && errno == ESRCH) kill(process, SIGKILL);
+        for (unsigned attempt = 0; attempt < 200; ++attempt) {
+            pid_t waited = waitpid(process, NULL, WNOHANG);
+            if (waited == process || (waited < 0 && errno == ECHILD)) {
+                finished = true;
+                break;
+            }
+            if (waited < 0 && errno != EINTR) break;
+            struct timespec pause = {.tv_sec = 0, .tv_nsec = 10*1000*1000};
+            nanosleep(&pause, NULL);
+        }
+        if (!finished) {
+            TraceLog(LOG_WARNING, "ASSIST: killed worker could not be reaped promptly");
+        }
+    }
+#endif
+    p->assist_process = NOB_INVALID_PROC;
+    p->assist_job_state = ASSIST_JOB_FAILED;
 }
 
 static int button_with_location(const char *file, int line, Rectangle boundary)
@@ -950,14 +1888,13 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             if (state & BS_CLICKED) {
                 Track *track = current_track();
                 if (track) StopMusicStream(track->music);
+                lyric_editor_clear_draft();
                 start_preview_track(&p->tracks.items[i]);
                 p->current_track = i;
             }
         } else {
             color = COLOR_TRACK_BUTTON_SELECTED;
         }
-        // TODO: enable MSAA so the rounded rectangles look better
-        // That triggers an old raylib bug with circles tho, so we will have to look into that
         DrawRectangleRounded(item_boundary, 0.2, 20, color);
 
         const char *text = GetFileName(p->tracks.items[i].file_path);
@@ -1065,7 +2002,7 @@ static void scene_browser(Rectangle boundary)
     DrawTextEx(p->font, "SCENES", (Vector2){boundary.x + padding, boundary.y + 5.0f},
                header_font, 0.0f, ColorAlpha(WHITE, 0.78f));
     char status[48];
-    snprintf(status, sizeof(status), "%zu events", p->event_timeline.count);
+    snprintf(status, sizeof(status), "%zu events", combined_scene_events().count);
     Vector2 status_size = MeasureTextEx(p->font, status, 14.0f, 0.0f);
     DrawTextEx(p->font, status,
                (Vector2){boundary.x + boundary.width - status_size.x - padding,
@@ -1533,9 +2470,11 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
     analyzer_configure(p->wave.sampleRate, p->wave.channels);
     p->scene_frame_index = 0;
     p->scene_clock_initialized = false;
+    scene_switch_reset(&track->scene_switches);
     // TODO: set the rendering output path based on the input path
     // Basically output into the same folder
-    p->ffmpeg = ffmpeg_start_rendering(output_path, p->screen.texture.width, p->screen.texture.height, RENDER_FPS, track->file_path);
+    p->ffmpeg = ffmpeg_start_rendering(output_path, RENDER_WIDTH, RENDER_HEIGHT,
+                                       RENDER_FPS, track->file_path);
     p->render_failed = p->ffmpeg == NULL;
     SetTargetFPS(0);
     p->rendering = true;
@@ -1722,6 +2661,8 @@ static void preview_screen(void)
     int w = GetScreenWidth();
     int h = GetScreenHeight();
 
+    poll_assist_job();
+
     if (IsFileDropped()) {
         FilePathList droppedFiles = LoadDroppedFiles();
         // TODO: loading files synchronously like that actually blocks the UI thread
@@ -1749,22 +2690,23 @@ static void preview_screen(void)
     if (track) { // The music is loaded and ready
         UpdateMusicStream(track->music);
 
-        if (IsKeyPressed(KEY_TOGGLE_PLAY)) {
+        if (!p->lyric_text_active && IsKeyPressed(KEY_TOGGLE_PLAY)) {
             toggle_track_playing(track);
         }
 
-        if (IsKeyPressed(KEY_RENDER)) {
+        if (!p->lyric_text_active && IsKeyPressed(KEY_RENDER)) {
             start_rendering_track(track);
         }
 
-        if (IsKeyPressed(KEY_FULLSCREEN)) {
+        if (!p->lyric_text_active && IsKeyPressed(KEY_FULLSCREEN)) {
             p->fullscreen = !p->fullscreen;
         }
 
         double scene_time = GetMusicTimePlayed(track->music);
         float scene_dt = scene_clock_delta(scene_time);
         AudioSpectrumView spectrum = fft_analyze(scene_dt);
-        update_scene_shortcuts();
+        if (!p->lyric_text_active) update_scene_shortcuts();
+        apply_auto_scene_switch(track, scene_time);
 
         float toolbar_height = HUD_BUTTON_SIZE;
         if (p->fullscreen) {
@@ -1810,7 +2752,11 @@ static void preview_screen(void)
             popup_tray(&p->pt, preview_boundary);
         } else {
             float tracks_panel_width = 320.0f;
-            float timeline_height = 150.0f;
+            float timeline_height = (p->lyrics_editor_open || p->assist_panel_open) ?
+                                    330.0f : 150.0f;
+            if (timeline_height > h - toolbar_height - 180.0f) {
+                timeline_height = fmaxf(150.0f, h - toolbar_height - 180.0f);
+            }
             Rectangle preview_boundary = {
                 .x = tracks_panel_width,
                 .y = 0,
@@ -2083,6 +3029,7 @@ static void rendering_screen(void)
                 spectrum = audio_analyzer_spectrum(&p->analyzer);
             }
             double scene_time = (double)p->scene_frame_index/RENDER_FPS;
+            apply_auto_scene_switch(track, scene_time);
 
             BeginTextureMode(p->screen);
             ClearBackground(COLOR_BACKGROUND);
@@ -2092,6 +3039,12 @@ static void rendering_screen(void)
             EndTextureMode();
 
             Image image = LoadImageFromTexture(p->screen.texture);
+            if (image.width != RENDER_WIDTH || image.height != RENDER_HEIGHT) {
+                // The vendored stb_image_resize2 selects STBIR_FILTER_MITCHELL
+                // for downscaling. This stays deterministic for a given frame
+                // and avoids temporal-AA history/state.
+                ImageResize(&image, RENDER_WIDTH, RENDER_HEIGHT);
+            }
             if (!ffmpeg_send_frame_flipped(p->ffmpeg, image.data, image.width, image.height)) {
                 // NOTE: we don't check the result of ffmpeg_end_rendering here because we
                 // don't care at this point: writing a frame failed, so something went completely
@@ -2155,6 +3108,9 @@ static void unload_assets(void)
 
 static void release_reload_sensitive_resources(void)
 {
+    // A helper may still be executing code/files from this checkout. Stop it
+    // before unloading the plug that owns its process handle.
+    cancel_assist_job();
 #ifdef MUSIALIZER_MICROPHONE
     // miniaudio retains ma_callback, so the device must be stopped before the
     // old shared object is unmapped.
@@ -2325,12 +3281,16 @@ MUSIALIZER_PLUG void plug_init(void)
     p->state_size = sizeof(*p);
     NOB_ASSERT(sample_ring_init(&p->sample_ring, p->sample_ring_storage, SAMPLE_RING_CAPACITY));
     event_timeline_init(&p->event_timeline);
+    event_timeline_init(&p->scene_events);
+    p->scene_events_track = -1;
     p->next_event_id = 1;
+    p->assist_process = NOB_INVALID_PROC;
+    p->assist_job_state = ASSIST_JOB_IDLE;
     analyzer_configure(48000, 2);
     NOB_ASSERT(scene_instance_init(&p->scene, SCENE_SPECTRUM, UINT64_C(0x4D555349414C495A)));
 
     load_assets();
-    p->screen = LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT);
+    p->screen = load_offline_render_target();
     p->current_track = -1;
 
     // TODO: restore master volume between sessions
@@ -2451,7 +3411,7 @@ MUSIALIZER_PLUG void plug_post_reload(void *pp)
     free(handoff);
 
     load_assets();
-    p->screen = LoadRenderTexture(RENDER_WIDTH, RENDER_HEIGHT);
+    p->screen = load_offline_render_target();
     if (!scene_instance_rebind(&p->scene)) {
         TraceLog(LOG_WARNING, "HOTRELOAD: scene state is incompatible; recreating selection");
         if (!scene_instance_init(&p->scene, selected_scene_id, selected_scene_seed)) {
@@ -2464,6 +3424,7 @@ MUSIALIZER_PLUG void plug_post_reload(void *pp)
 MUSIALIZER_PLUG void plug_shutdown(void)
 {
     if (p == NULL) return;
+    cancel_assist_job();
 #ifdef MUSIALIZER_MICROPHONE
     if (p->microphone_working) {
         ma_device_uninit(&p->microphone);

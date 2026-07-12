@@ -76,8 +76,12 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/audio_analyzer.c",
         "./src/sample_ring.c",
         "./src/ascii_art.c",
+        "./src/analysis_bridge.c",
         "./src/event_timeline.c",
+        "./src/lyrics.c",
         "./src/project.c",
+        "./src/sha256.c",
+        "./src/scene_switch.c",
         "./src/scene.c",
         "./src/scene_spectrum.c",
         "./src/scene_pulse_field.c",
@@ -106,7 +110,11 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/audio_analyzer.c",
         "./src/sample_ring.c",
         "./src/ascii_art.c",
+        "./src/analysis_bridge.c",
         "./src/event_timeline.c",
+        "./src/lyrics.c",
+        "./src/sha256.c",
+        "./src/scene_switch.c",
         "./src/project.c");
 }
 

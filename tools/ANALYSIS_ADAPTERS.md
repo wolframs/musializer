@@ -1,8 +1,11 @@
 # Optional analysis adapters
 
-These Python 3 helpers run outside Musializer's C renderer. They never load a
-`.env` file. Remote analysis reads `OPENROUTER_API_KEY` exclusively from the
-process environment, and only when a request is actually submitted.
+These Python 3 helpers run outside Musializer's C renderer. Remote analysis
+reads `OPENROUTER_API_KEY` from the process environment. The explicit
+`external_analysis.py assist --mode mimo|all` desktop workflow may instead read
+that one named value from the repository's ignored `.env`; it parses the file
+as data and never sources it as shell code. No other dotenv values are copied
+to child processes.
 
 ## Whisper timing import
 
@@ -19,6 +22,125 @@ into words using whisper.cpp's leading-space boundaries. Supplied corrected
 caption arrays replace guessed segment text but do not erase independently
 timed word evidence. Timestamps and confidences are clamped; empty intervals
 outside the audio duration are discarded.
+
+## One-shot external analysis orchestration
+
+`external_analysis.py` is the noninteractive entry point intended for both the
+desktop UI and terminal use. One `assist` invocation corresponds to one UI
+action and always writes `scene-plan.json`, `assist-manifest.json`, and the
+validated `analysis.bridge.tsv` when it succeeds:
+
+The current UI integration is available from a source checkout (including the
+per-user Linux launcher). Minimal binary distributions that omit `tools/`,
+`prompts/`, or `schemas/` report the helpers as unavailable instead of showing
+controls that cannot run; relocatable analysis packaging remains distribution
+work.
+
+```console
+python3 tools/external_analysis.py assist track.mp3 analysis/ \
+  --duration 213.7 --mode lyrics
+python3 tools/external_analysis.py assist track.mp3 analysis/ \
+  --duration 213.7 --mode sections
+python3 tools/external_analysis.py assist track.mp3 analysis/ \
+  --duration 213.7 --mode mimo --zdr
+python3 tools/external_analysis.py assist track.mp3 analysis/ \
+  --duration 213.7 --mode all --bridge analysis/track.bridge.tsv
+```
+
+Modes have deliberately narrow authority:
+
+- `lyrics` runs/reuses measured analysis, configured GPU whisper.cpp, and an
+  evidence-preserving Codex review.
+- `sections` is entirely local and uses whatever valid lyric or semantic caches
+  already exist.
+- `mimo` runs/reuses measured analysis and the existing MiMo/OpenRouter helper.
+  This explicit command is the authorization boundary for the remote request.
+- `all` performs both lyric and MiMo work, then plans sections.
+
+All stages are hash-checked and cache-aware. Whisper is configured with
+`MUSIALIZER_WHISPER_BIN` and `MUSIALIZER_WHISPER_MODEL` or the corresponding
+flags. On this workstation the helper also detects the prior setup at
+`/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli` and
+`ggml-medium.en.bin`. Whisper receives a temporary FFmpeg-decoded 16 kHz mono
+WAV, requests full JSON plus model-aligned token timing, leaves GPU/flash
+attention enabled by the configured whisper.cpp build, and defaults to a
+one-hour timeout. The umbrella timeout is at least ten minutes and defaults to
+40 minutes so MiMo's bounded retries can finish.
+
+`--dry-run` performs no child process or network call and emits a credential-
+free action description. Child processes are argv arrays without a shell.
+Private lyric/audio content is passed by file or stdin, not argv; captured child
+output is never copied into error logs. Local FFmpeg, Whisper, measured-analysis,
+and Codex children receive an environment with credential-like variables
+removed. The OpenRouter helper receives only `OPENROUTER_API_KEY`, inherited
+from the environment or parsed as the one permitted key from the ignored
+repository `.env`; it is never written to an argument, request dump, cache key,
+or manifest.
+
+The lower-level commands remain available for diagnosis and custom workflows:
+
+```console
+python3 tools/external_analysis.py whisper track.mp3 lyrics.json \
+  --duration 213.7 --whisper-bin /path/to/whisper-cli \
+  --model /path/to/ggml-medium.en.bin
+python3 tools/external_analysis.py clean-lyrics lyrics.json lyrics.review.json
+python3 tools/external_analysis.py plan measured.json scene-plan.json \
+  --lyrics lyrics.review.json --semantic semantic.cache.json \
+  --bridge analysis.bridge.tsv
+```
+
+Codex runs ephemerally in a read-only sandbox with a ten-minute default timeout,
+structured output, and the repository-owned
+`prompts/lyrics_cleanup_system.md`. Every reviewed line must cite Whisper line
+indices and stay within their timing envelope. The review is a separate
+`lyric_review` lane; it never overwrites Whisper evidence and is rejected if it
+adds uncited lines.
+
+The deterministic section planner combines measured section boundaries,
+measured feature changes, lyric gaps, and (when supplied) subjective semantic
+changes. Each recommendation records lane-specific reasons. MiMo remains a
+creative signal and never becomes measured timing or authoritative lyrics.
+
+### Importing an existing MiMo chat export
+
+The user's earlier OpenRouter Chat export can be reduced to a safe subjective
+notes lane without copying its embedded input audio or reasoning trace:
+
+```console
+python3 tools/external_analysis.py import-mimo openrouter-chat.json track.mp3 \
+  semantic-notes.json --duration 213.7
+```
+
+Only assistant `output_text` is retained. Because free-form legacy output has no
+validated timestamps or numeric scores, it stays `semantic_interpretation_notes`;
+the planner may use its words as subjective scene hints but does not fabricate
+energy, confidence, or segment timing.
+
+### C-safe bridge format
+
+Canonical and provenance-rich artifacts remain JSON. The bridge is a derived,
+ASCII-only TSV so the C application can parse it with fixed bounds before a JSON
+parser is introduced. It is regenerated from canonical inputs and is never an
+evidence source.
+
+The exact v1 grammar is one record per LF-terminated line, with no quoting:
+
+```text
+MUSIALIZER_BRIDGE<TAB>1
+AUDIO<TAB>audio_sha256<TAB>duration_ms
+LYRIC<TAB>uint64_id<TAB>start_ms<TAB>end_ms<TAB>confidence_milli_or_-1<TAB>none|uncertain<TAB>text_utf8_base64
+SECTION<TAB>uint64_id<TAB>start_ms<TAB>end_ms<TAB>scene_name<TAB>strength_milli<TAB>reasons_json_utf8_base64
+SEMANTIC<TAB>uint64_id<TAB>start_ms<TAB>end_ms<TAB>energy_milli<TAB>tension_milli<TAB>valence_milli<TAB>confidence_milli<TAB>summary_utf8_base64
+SEMANTIC_NOTE<TAB>uint64_id<TAB>text_utf8_base64
+```
+
+Times are rounded integer milliseconds. Unit values are integer thousandths;
+valence retains its signed `[-1000,1000]` range. IDs are stable nonzero 64-bit
+values derived from record identity. Text and JSON use RFC 4648 base64, so tabs,
+newlines, and arbitrary UTF-8 never alter the record shape. Consumers must
+reject an unknown header/version, wrong field count, invalid integer/base64,
+out-of-order or out-of-range timing, unknown scenes, oversized decoded fields,
+and duplicate IDs before replacing the last valid bridge.
 
 ## MiMo semantic interpretation
 
