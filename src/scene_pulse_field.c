@@ -15,12 +15,15 @@ static void pulse_field_init(void *state, uint64_t seed)
 static void pulse_field_update(void *state, const Scene_Frame *frame)
 {
     Pulse_Field_State *pulse = state;
-    pulse->rotation = fmodf(pulse->rotation + frame->delta_seconds*(12.0f + frame->audio.spectral_flux*90.0f), 360.0f);
+    float interpretation = frame->semantic.available ?
+                           frame->semantic.tension*frame->semantic.confidence : 0.0f;
+    pulse->rotation = fmodf(pulse->rotation + frame->delta_seconds*
+                           (12.0f + frame->audio.spectral_flux*90.0f +
+                            interpretation*28.0f), 360.0f);
 }
 
 static void pulse_field_draw(const void *state, const Scene_Frame *frame, const Scene_Renderer *renderer, Rectangle boundary)
 {
-    (void) renderer;
     const Pulse_Field_State *pulse = state;
 
     Vector2 center = {
@@ -32,6 +35,8 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
     if (count == 0 || frame->audio.bands == NULL) return;
 
     size_t rings = count < 24 ? count : 24;
+    float semantic_hue = frame->semantic.available ?
+                         frame->semantic.valence*60.0f*frame->semantic.confidence : 0.0f;
     for (size_t i = rings; i > 0; --i) {
         size_t band_index = (i - 1)*count/rings;
         float amplitude = frame->audio.bands[band_index];
@@ -40,8 +45,10 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
         float radius = extent*((float)i/rings) + wobble;
         float start_angle = pulse->rotation + (float)i*7.5f;
         float sweep = 220.0f + amplitude*140.0f;
-        float thickness = 1.0f + amplitude*8.0f;
-        Color color = ColorFromHSV(fmodf((float)i/rings*280.0f + pulse->rotation, 360.0f), 0.72f, 0.95f);
+        float thickness = (1.0f + amplitude*8.0f)*renderer->pixel_scale;
+        Color color = ColorFromHSV(fmodf((float)i/rings*280.0f + pulse->rotation +
+                                        semantic_hue + 360.0f, 360.0f),
+                                   0.72f, 0.95f);
         DrawRing(center, radius - thickness*0.5f, radius + thickness*0.5f, start_angle, start_angle + sweep, 96, ColorAlpha(color, 0.25f + amplitude*0.75f));
     }
 }

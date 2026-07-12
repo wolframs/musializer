@@ -120,3 +120,28 @@ TEST(ascii_art_conversion_is_byte_reproducible)
     REQUIRE_TRUE(ascii_art_convert_rgba8(pixels, 8, 6, 4, 3, second, 12));
     EXPECT_TRUE(memcmp(first, second, sizeof(first)) == 0);
 }
+
+TEST(ascii_art_grid_clear_is_explicit_bounded_and_atomic)
+{
+    AsciiCell cells[4];
+    memset(cells, 0xa5, sizeof(cells));
+    size_t width = 2;
+    size_t height = 2;
+    EXPECT_TRUE(ascii_art_grid_is_populated(width, height));
+    REQUIRE_TRUE(ascii_art_grid_clear(cells, 4, &width, &height));
+    EXPECT_EQ_SIZE(width, 0);
+    EXPECT_EQ_SIZE(height, 0);
+    AsciiCell zero[4] = {0};
+    EXPECT_TRUE(memcmp(cells, zero, sizeof(cells)) == 0);
+    EXPECT_FALSE(ascii_art_grid_is_populated(width, height));
+
+    memset(cells, 0x3c, sizeof(cells));
+    AsciiCell before[4];
+    memcpy(before, cells, sizeof(cells));
+    width = 3;
+    height = 2;
+    EXPECT_FALSE(ascii_art_grid_clear(cells, 4, &width, &height));
+    EXPECT_EQ_SIZE(width, 3);
+    EXPECT_EQ_SIZE(height, 2);
+    EXPECT_TRUE(memcmp(cells, before, sizeof(cells)) == 0);
+}

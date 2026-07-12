@@ -24,3 +24,6 @@ nob.old
 nob.exe
 nob.exe.old
 nob.obj
+musializer-*/
+musializer-*.tar.gz
+musializer-*.zip

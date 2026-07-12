@@ -4,7 +4,11 @@ static void append_linux_profile_flags(Cmd *cmd, bool link)
 {
     switch (build_profile) {
     case BUILD_PROFILE_RELEASE:
-        cmd_append(cmd, "-O3", "-march=native", "-ffast-math", "-flto=auto");
+        // Project parsing, analysis, and event contracts deliberately reject
+        // NaN/Inf. Fast-math's finite-only assumptions compile those safety
+        // checks away, so release optimization must preserve IEEE semantics.
+        cmd_append(cmd, "-O3", "-flto=auto");
+        if (!build_for_distribution) cmd_append(cmd, "-march=native");
         break;
     case BUILD_PROFILE_SANITIZE:
         cmd_append(cmd, "-O1", "-g3", "-fno-omit-frame-pointer", "-fno-sanitize-recover=all",
@@ -20,6 +24,9 @@ static void append_linux_profile_flags(Cmd *cmd, bool link)
 
 static const char *linux_raylib_build_path(void)
 {
+    if (build_for_distribution) {
+        return temp_sprintf("./build/raylib/%s-dist", MUSIALIZER_TARGET_NAME);
+    }
     if (build_profile == BUILD_PROFILE_RELEASE) {
         return temp_sprintf("./build/raylib/%s", MUSIALIZER_TARGET_NAME);
     }
@@ -164,11 +171,13 @@ bool build_dist()
     } else {
     if (!mkdir_if_not_exists("./musializer-linux-x86_64/")) return false;
     if (!copy_file("./build/musializer", "./musializer-linux-x86_64/musializer")) return false;
-    if (!copy_directory_recursively("./resources/", "./musializer-linux-x86_64/resources/")) return false;
-    // TODO: should we pack ffmpeg with Linux build?
-    // There are some static executables for Linux
+    if (!copy_distribution_support("./musializer-linux-x86_64")) return false;
     Cmd cmd = {0};
-    cmd_append(&cmd, "tar", "fvcz", "./musializer-linux-x86_64.tar.gz", "./musializer-linux-x86_64");
+    cmd_append(&cmd, "chmod", "-R", "u=rwX,go=rX", "./musializer-linux-x86_64");
+    if (!cmd_run(&cmd)) return false;
+    cmd_append(&cmd, "tar", "-czf", "./musializer-linux-x86_64.tar.gz",
+               "./musializer-linux-x86_64/musializer");
+    append_distribution_support_paths(&cmd, "./musializer-linux-x86_64");
     bool ok = cmd_run(&cmd);
     cmd_free(cmd);
     if (!ok) return false;

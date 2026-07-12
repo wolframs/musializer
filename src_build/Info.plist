@@ -3,7 +3,7 @@
 <plist version="1.0">
     <dict>
         <key>CFBundleExecutable</key>
-        <string>musializer</string>
+        <string>Musializer</string>
         <key>CFBundleIdentifier</key>
         <string>com.tsoding.musializer</string>
         <key>CFBundleName</key>

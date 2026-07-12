@@ -9,6 +9,8 @@
 
 #include "ascii_art.h"
 #include "event_timeline.h"
+#include "lyrics.h"
+#include "semantic_lane.h"
 
 typedef enum {
     SCENE_SPECTRUM,
@@ -37,6 +39,8 @@ typedef struct {
     float delta_seconds;
     uint64_t frame_index;
     Scene_Audio_Frame audio;
+    Semantic_Frame semantic;
+    const Lyric_Cue *lyric;
     Event_Timeline_View events;
 } Scene_Frame;
 
@@ -48,6 +52,9 @@ typedef struct {
     const AsciiCell *ascii_cells;
     size_t ascii_columns;
     size_t ascii_rows;
+    // Physical target pixels per logical output pixel. Fixed-pixel scene
+    // details use this so supersampling changes sampling, not composition.
+    float pixel_scale;
 } Scene_Renderer;
 
 typedef struct {

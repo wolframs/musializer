@@ -195,11 +195,14 @@ bool build_dist()
     } else {
     if (!nob_mkdir_if_not_exists("./musializer-openbsd-x86_64/")) return false;
     if (!nob_copy_file("./build/musializer", "./musializer-openbsd-x86_64/musializer")) return false;
-    if (!nob_copy_directory_recursively("./resources/", "./musializer-openbsd-x86_64/resources/")) return false;
-    // TODO: should we pack ffmpeg with Linux build?
-    // There are some static executables for Linux
+    if (!copy_distribution_support("./musializer-openbsd-x86_64")) return false;
     Nob_Cmd cmd = {0};
-    nob_cmd_append(&cmd, "tar", "fvcz", "./musializer-openbsd-x86_64.tar.gz", "./musializer-openbsd-x86_64");
+    nob_cmd_append(&cmd, "chmod", "-R", "u=rwX,go=rX", "./musializer-openbsd-x86_64");
+    if (!nob_cmd_run_sync(cmd)) return false;
+    cmd.count = 0;
+    nob_cmd_append(&cmd, "tar", "-czf", "./musializer-openbsd-x86_64.tar.gz",
+                   "./musializer-openbsd-x86_64/musializer");
+    append_distribution_support_paths(&cmd, "./musializer-openbsd-x86_64");
     bool ok = nob_cmd_run_sync(cmd);
     nob_cmd_free(cmd);
     if (!ok) return false;

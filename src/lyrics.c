@@ -339,6 +339,50 @@ Lyrics_Result lyrics_document_replace(Lyrics_Document *destination,
     return LYRICS_OK;
 }
 
+Lyrics_Result lyrics_document_normalize_duration(
+    Lyrics_Document *destination,
+    const Lyrics_Document *source,
+    double duration_seconds)
+{
+    if (destination == NULL || source == NULL) return LYRICS_ERROR_NULL;
+    if (!isfinite(duration_seconds) || duration_seconds <= 0.0) {
+        return LYRICS_ERROR_DURATION;
+    }
+    Lyrics_Validation valid = lyrics_document_validate(source);
+    if (valid.result != LYRICS_OK) return valid.result;
+    for (size_t i = 0; i < source->count; ++i) {
+        if (source->cues[i].start_seconds >= duration_seconds) {
+            return LYRICS_ERROR_DURATION;
+        }
+    }
+
+    uint64_t revision = destination->revision + 1;
+    if (revision == 0) revision = 1;
+    if (destination != source) memcpy(destination, source, sizeof(*destination));
+    destination->duration_seconds = duration_seconds;
+    for (size_t i = 0; i < destination->count; ++i) {
+        if (destination->cues[i].end_seconds > duration_seconds) {
+            destination->cues[i].end_seconds = duration_seconds;
+        }
+    }
+    destination->revision = revision;
+    return LYRICS_OK;
+}
+
+const Lyric_Cue *lyrics_at_time(const Lyrics_Document *document,
+                                double time_seconds)
+{
+    if (document == NULL || !isfinite(time_seconds) || time_seconds < 0.0 ||
+        lyrics_document_validate(document).result != LYRICS_OK) return NULL;
+    const Lyric_Cue *active = NULL;
+    for (size_t i = 0; i < document->count; ++i) {
+        const Lyric_Cue *cue = &document->cues[i];
+        if (cue->start_seconds > time_seconds) break;
+        if (time_seconds < cue->end_seconds) active = cue;
+    }
+    return active;
+}
+
 static size_t decimal_digits(uint64_t value)
 {
     size_t digits = 1;

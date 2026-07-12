@@ -222,7 +222,9 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
     float energy = atlas_clamp01(frame->audio.rms*1.8f);
     float flux = atlas_clamp01(frame->audio.spectral_flux*5.0f);
     float seed_phase = atlas_hash_unit(atlas->seed, 7)*2.0f*PI;
-    float hue = fmodf(205.0f + atlas_hash_unit(atlas->seed, 2)*100.0f, 360.0f);
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
+    float hue = fmodf(205.0f + atlas_hash_unit(atlas->seed, 2)*100.0f +
+                      frame->semantic.valence*70.0f*semantic_weight, 360.0f);
     Color background = ColorFromHSV(hue, 0.65f, 0.045f + energy*0.035f);
     DrawRectangleRec(boundary, background);
 

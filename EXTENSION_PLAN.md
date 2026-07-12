@@ -8,31 +8,33 @@
 ## Current status
 
 - **Last updated:** 2026-07-12, Europe/Berlin.
-- **Active milestone:** M2 project persistence and authored analysis lanes.
-- **Next vertical slice:** project JSON I/O for lyrics, analysis references,
-  scene-switch opt-in state, and UI-authored events; then measured-cache Atlas
-  prefill. The standalone lyrics bridge remains an interim editing format.
+- **Active milestone:** M3 render-product hardening and reusable visual layers.
+- **Next vertical slice:** a layered render graph with reusable post-processing,
+  followed by bounded asynchronous readback/encoding and a semantic-lane
+  inspector. The `.musi` v1 workspace, lyric editor, assistance staging, and
+  configurable transactional MP4 export are implemented.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
 - **Remotes:** `origin` is the private Forgejo repository,
   `github` is `wolframs/musializer`, and public project provenance lives at
   `upstream` (`tsoding/musializer`). Normal pushes default to private
   Forgejo; do not push feature work to `upstream` unintentionally.
-- **Build status:** the stock Linux build completed successfully on this
-  machine. Generated artifacts are ignored under `build/`.
+- **Build status:** Linux release, debug, sanitizer, hot-reload, distribution,
+  launcher, doctor, and real FFmpeg render checks pass on this machine.
+  Generated artifacts remain ignored under `build/`.
 - **Tracked planning/security changes:** `.gitignore`, `.env.example`, and this
   document. The real `.env` is intentionally untracked.
 
 ### Desktop launcher
 
-The Linux development checkout ships an idempotent, per-user XDG launcher
-installer at `tools/install-linux-launcher.sh`. It builds the release profile,
-registers Musializer in KDE/GNOME application menus, installs the project icon,
-accepts supported audio files, and launches with the repository as its working
-directory. The runtime wrapper logs desktop-started sessions and surfaces
-startup failures through `kdialog` or `zenity`. This is intentionally a
-checkout-backed launcher; a relocatable packaged application remains future
-distribution work.
+The Linux source checkout and unpacked portable distribution ship an
+idempotent, per-user XDG launcher installer at
+`tools/install-linux-launcher.sh`. A checkout builds the release profile; an
+archive uses its packaged executable without build tooling. Both register
+Musializer plus `.musi` projects in KDE/GNOME, install the icon, and launch from
+the containing directory. The runtime wrapper logs desktop-started sessions and
+surfaces startup failures through `kdialog` or `zenity`. This remains directory
+backed rather than a native relocatable distro package.
 
 ### M2 editing and assisted-analysis slice (implemented 2026-07-12)
 
@@ -55,14 +57,25 @@ distribution work.
   never measured audio facts. Keep raw response, normalized sidecar, provider,
   model, prompt version, and source audio hash available for provenance.
 
-Implementation checkpoint: preview uses 4x MSAA; offline export uses a
-deterministic 2x spatial resolve with a validated 1x fallback. The UI now owns
-cancellable external-analysis jobs, strict bridge import, an opt-in automatic
-scene-switch timeline, and a bounded lyric content/timing editor with explicit
-import/export. Pure C tests cover lyric editing, bridge parsing, and seek-safe
-scene switching; Python tests cover orchestration, credential isolation,
-timeouts, Codex evidence bounds, cache reuse, and provenance separation. Full
-project JSON persistence is still the next durability milestone.
+Implementation checkpoint: preview uses 4x MSAA; offline export offers
+720p-2160p, 24/30/60 fps, and three quality intents with a deterministic 2x
+spatial resolve and validated 1x fallback. Fixed-pixel scene/caption details
+scale with the supersample target, so quality changes sampling rather than
+composition. The UI owns cancellable
+external-analysis jobs with explicit privacy confirmation and Apply/Discard
+staging, an opt-in automatic scene-switch timeline, and a bounded lyric
+content/timing editor. `.musi` v1 atomically persists lyrics, embedded semantic
+events, manual events, scene suggestions, per-track seed, and output settings;
+provenance references are not required to reconstruct evaluated lanes. The
+first-run workspace, project actions, export configuration/progress, structured
+notices, and dependency doctor form the current product shell.
+
+Product hardening now stages Raylib's decoded Wave as the exact PCM input to
+FFmpeg, caps output at the deterministic video-frame boundary, and verifies
+H.264 High/yuv420p/BT.709 plus AAC in real renders. Multilingual timed captions
+use a curated bundled atlas and bounded three-line wrapping. Safe descendant
+audio references serialize project-relative, Linux installs a `.musi` MIME
+association, and populated ASCII grids require explicit Clear before save.
 
 ## Non-negotiable invariants
 
@@ -84,7 +97,9 @@ project JSON persistence is still the next durability milestone.
    relevant, and user corrections.
 7. **External failures degrade gracefully.** Missing FFmpeg, rejected audio,
    failed model calls, malformed cached JSON, and shader failures produce
-   actionable errors without corrupting the project or wedging the UI.
+   actionable errors without corrupting the project and have bounded recovery.
+   Synchronous encoder back-pressure can still pause repaint/input; that known
+   limitation stays visible until asynchronous readback/writing lands.
 8. **The legacy visualizer is the parity oracle.** Refactors land behind tests
    and visual checks before its behavior is intentionally changed.
 
@@ -123,11 +138,14 @@ referenced explicitly by the project format.
 | D-001 | Evolve the program into a deterministic scene engine rather than adding modes directly to `plug.c`. | Accepted | Prevents UI, analysis, rendering, and export from becoming inseparable. |
 | D-002 | Preserve the current spectrum renderer as the first registered scene. | Accepted | Provides an observable parity target during extraction. |
 | D-003 | Use a bounded, serializable scene recipe; do not generate or execute arbitrary C from an AI response. | Accepted | Keeps projects inspectable, safe, and reproducible. |
-| D-004 | Run Whisper and MiMo as offline adapters that produce cached sidecars. | Accepted | Avoids Python/CUDA/network coupling in the C renderer. |
+| D-004 | Run Whisper and MiMo as out-of-process adapters that produce cached sidecars. | Accepted | Avoids Python/CUDA/network coupling in the C renderer. |
 | D-005 | Treat supplied/corrected lyrics as authoritative over transcription guesses. | Accepted | Singing transcription is useful evidence, not ground truth. |
 | D-006 | Treat MiMo as a creative interpreter, not a timing or lyric authority. | Accepted | The example was perceptive but also hallucinated content and structure. |
 | D-007 | Import generated images as assets; keep generation providers and credentials external. | Accepted | Rendering remains deterministic and provider-agnostic. |
 | D-008 | Implement the Whole-Song Atlas before the Terrarium and Constellation Mode. | Accepted | It exercises caching, 3D meshes, cameras, timeline navigation, and export with fewer new failure domains. |
+| D-009 | Stage every assisted-analysis result and require Apply or Discard. | Accepted | Model output must remain inspectable and cannot overwrite authored work merely because a worker completed. |
+| D-010 | Publish project and video output transactionally. | Accepted | Cancellation, encoder failure, or a concurrent save must preserve the last complete artifact. |
+| D-011 | Embed evaluated semantic events in `.musi`; retain sidecars only as provenance. | Accepted | A moved project or later analysis job must not lose the visual meaning already accepted by the user. |
 
 ## Validation baseline
 
@@ -139,8 +157,9 @@ Current machine:
 - FFmpeg 8.0.1.
 - Stock `nob` bootstrap and full application build: **passed**.
 - Release, debug, sanitizer, and runtime hot-reload builds: **passed**.
-- Headless C tests: **56/56 passed** under debug, release, and ASan+UBSan.
-- Offline Python adapter tests: **29/29 passed**; HTTP remains mocked and the
+- Headless C tests: **119/119 passed** in the latest integrated debug and
+  ASan+UBSan runs; a final release matrix is repeated at each checkpoint.
+- Offline Python/product tests: **40/40 passed**; HTTP remains mocked and the
   measured lane is entirely local.
 - Live demo-track smoke test: window, RTX 3090 OpenGL context, shaders,
   PulseAudio, MP3 loading/playback, analyzer, and legacy scene all initialized
@@ -152,12 +171,13 @@ Current machine:
   `detect_leaks=0` because this environment also runs under ptrace constraints.
 - Link check: application resolved only the expected system C/math loader
   dependencies because raylib was linked statically.
-- Non-blocking build warnings exist in `nob_stage2.c`, vendored raylib text
-  code, and vendored `nob.h`; record new warnings separately rather than
-  silently expanding this baseline.
+- The local stage-2 empty-format warning is fixed. Remaining release warnings,
+  if emitted, originate in vendored raylib/`nob.h`; record new first-party
+  warnings separately rather than silently expanding this baseline.
 
-Optional tools currently absent: Clang, ImageMagick, Xvfb, and Valgrind. None
-blocks core development; GCC sanitizers should be the first memory-safety tool.
+Optional tools currently absent: Clang, ImageMagick, and Valgrind. Xvfb is
+installed and drives real window/render smoke tests. None of the absent tools
+blocks core development; GCC sanitizers remain the first memory-safety tool.
 
 ## Direction
 
@@ -175,10 +195,15 @@ target while the engine is extracted around it.
 - A C-only `nob` build which compiles vendored raylib 5.5.
 - File playback and experimental microphone input through raylib/miniaudio.
 - A hand-written 8192-sample FFT with logarithmic bands, smoothing, and smear.
-- One 2D bar/circle visualizer using raylib and a small fragment shader.
-- A hot-reloadable `libplug` mode.
-- Fixed 1600x900, 30 FPS offline rendering through an FFmpeg child process.
-- A compact immediate-mode UI for tracks, timeline, playback, and rendering.
+- Seven registered deterministic 2D/3D scenes sharing one preview/export path.
+- A versioned, resource-safe hot-reloadable `libplug` mode.
+- Configurable 720p-2160p, 24/30/60 fps H.264/AAC export with three quality
+  intents, decoded-sample-derived frame scheduling, progress/ETA/cancellation,
+  and transactional publication.
+- A Swiss record-label-style workspace for projects, tracks, scene selection,
+  timeline/event editing, staged assistance, lyric synchronization, and export.
+- Atomic `.musi` v1 persistence plus a capability-aware product doctor and
+  source/archive-backed Linux launcher.
 
 The main constraint is architectural: audio capture, analysis, UI, scene
 drawing, application state, and offline export currently meet in
@@ -264,7 +289,7 @@ the project for deterministic video export.
 
 ### Semantic soundtrack analysis with MiMo-V2.5
 
-Use Xiaomi MiMo-V2.5 through OpenRouter as an optional offline interpreter of
+Use Xiaomi MiMo-V2.5 through OpenRouter as an optional networked interpreter of
 the music's felt character. It should produce a global creative brief and a
 timestamped emotional/visual arc: mood, tension, energy, perceived motion,
 texture, imagery, palette suggestions, narrative turns, and candidate scene
@@ -386,8 +411,8 @@ next section.
 - [x] Ignore `.env`, restrict it to mode `0600`, and provide a secret-free
   `.env.example`.
 - [x] Create local branch `feature/scene-engine-foundation`.
-- [ ] Configure a feature-fork remote before any push; `origin` remains public
-  upstream.
+- [x] Configure private Forgejo `origin`, public GitHub fork `github`, and keep
+  the provenance remote named `upstream`.
 - [x] Add explicit `debug`, `sanitize`, `hotreload`, and release-equivalent
   build configurations without changing the default release behavior.
 - [x] Add a non-copyrighted synthetic audio fixture generator: silence, sine,
@@ -437,7 +462,7 @@ M1 acceptance gate:
 - Adding a scene requires a scene implementation plus registry entry, not new
   branches in preview/export orchestration.
 
-### M2 - Projects, authored cues, and analysis adapters (in progress)
+### M2 - Projects, authored cues, and analysis adapters (core slice complete)
 
 - [x] Specify the versioned `.musi` project and sidecar schemas before choosing
   a parser implementation.
@@ -470,7 +495,8 @@ M2 acceptance gate:
   and fixed-step scene simulation. Orbital Lattice and Song Atlas prove the
   shared 3D viewport/camera path; reusable resource and fixed-step layers remain.
 - [ ] Add layered render targets and OpenGL 3.3-compatible post/feedback passes.
-- [ ] Make export resolution, FPS, range, and quality project/render settings.
+- [x] Make export resolution, FPS, and quality durable project/render settings.
+- [ ] Add an explicit bounded render range to the project and export UI.
 - [ ] Add bounded asynchronous GPU readback/FFmpeg writing. Complete-write,
   cancellation, child cleanup, and error propagation are hardened; readback and
   encoding are still synchronous.
@@ -493,10 +519,11 @@ M3 acceptance gate:
 - [ ] Spectral Terrarium. A bounded fixed-step ecosystem prototype now works;
   saved parameters, reusable instancing, and failure tests remain before
   graduation.
-- [ ] Constellation Mode with recordable/replayable external events. A bounded
-  1,024-event canonical timeline, seek/replay cursor, CLI/UI recorder, colored
-  timeline markers, and 3D scene work in preview/export; project serialization
-  and live transport adapters remain before graduation.
+- [ ] Constellation Mode with recordable/replayable external events. Independent
+  1,024-event manual and semantic lanes now persist and merge into a lossless,
+  lane-qualified 2,048-event frame view; seek/replay, CLI/UI recording, colored
+  markers, and the 3D scene work in preview/export. Live transport adapters and
+  broader scene parameters remain before graduation.
 
 Each prototype graduates only after it has a deterministic seed, saveable
 parameters, bounded resource use, offline export support, and at least one
@@ -548,9 +575,10 @@ failure-path test.
 - Verified real RTX/OpenGL exports for the 3D and ASCII scenes. A 12-second
   untracked demo excerpt produced 282 measured frames and a conservative pulse
   estimate; no source audio or rendered media entered the repository.
-- Known export behavior retained for parity: video continues through the FFT
-  smear settlement tail, so a two-second audio fixture currently yields about
-  4.50 seconds of video while the muxed audio remains two seconds.
+- Historical parity behavior at this checkpoint let video continue through the
+  FFT smear tail (a two-second fixture yielded about 4.50 seconds). This was
+  superseded on 2026-07-12 by decoded-sample-derived frame scheduling and a
+  matched deterministic A/V boundary.
 
 ### 2026-07-10 - Adversarial foundation audit
 
@@ -621,6 +649,56 @@ failure-path test.
 - Validation: 56/56 C tests in debug/release/ASan+UBSan, 29/29 Python adapter
   tests, release/sanitize/hotreload builds, real demo section planning, and a
   validated 1600x900/30 fps bridge-driven render across one hot reload.
+
+### 2026-07-12 - Product workspace, durable projects, and solid export
+
+- Reframed the UI as a near-white Swiss record-label workspace with one Klein
+  blue accent, hairline scene grid, deliberate first-run screen, persistent
+  project actions, a large timecode/timeline spine, and structured notices.
+- Added explicit Apply/Discard staging, truthful local/network labels, privacy
+  confirmation, cancellation, elapsed state, and lane-specific authority for
+  Whisper/Codex, measured sections, and MiMo assistance. A completed worker no
+  longer mutates authored data automatically.
+- Added a shared timed-lyric caption layer to preview/export and a separate
+  sampled semantic frame. MiMo valence/tension now steers every built-in
+  scene's palette/motion while measured audio values remain unmodified.
+- Added `.musi` v1 JSON I/O with strict parsing/validation and atomic durable
+  writes. Projects restore lyrics, embedded semantic cues, manual cues, scene
+  suggestions/opt-in, per-track deterministic seed, base scene, audio identity,
+  provenance references, and output intent. Dirty lyric drafts block context
+  replacement until Apply or Discard.
+- Made manual and semantic event lanes independently bounded and merged them
+  into a deterministic 2,048-event frame view with lane-qualified display IDs;
+  full lanes and colliding source IDs no longer silently lose semantic cues.
+- Added the Export workspace and CLI settings for 720p/1080p/1440p/2160p,
+  24/30/60 fps, and Balanced/High/Master. Offline frame scheduling is computed
+  from the decoded sample count and publishes at the enclosing frame boundary;
+  FFmpeg consumes the same staged PCM used by analysis. H.264/AAC output carries
+  High-profile BT.709/yuv420p/fast-start metadata, A/V/container duration
+  matched within the MP4 time base, bounded finalization, ETA/cancel feedback,
+  and transactional
+  publication.
+- Added multilingual caption shaping for accented Latin, Greek, and Cyrillic,
+  bounded three-line UTF-8 wrapping with visible ellipsis, and supersample-aware
+  fixed-pixel composition. A real mixed-script High-quality render verified the
+  caption and bundled atlas.
+- Made project audio references destination-aware: verified descendants are
+  normalized relative to `.musi`, with canonical absolute fallback. Populated
+  ASCII grids now block save regardless of the selected scene until **Clear
+  image** explicitly discards them. The Linux installer registers `.musi` with
+  shared MIME info and packages its desktop integration assets.
+- Added a capability-aware product doctor, hardened portable distribution
+  allowlists, launcher preflight/escaping tests, cross-target recipe checks,
+  and a documented product-readiness matrix. No credential is packaged.
+- Added a real conditional product smoke that synthesizes an awkward-duration
+  MP3, runs the application under Xvfb, saves a portable project, renders MP4,
+  probes exact frame count/codecs/color/A-V time bases, checks source identity,
+  and rejects leftover transaction files.
+- Remaining release work is explicit: render ranges, asynchronous GPU readback
+  and FFmpeg writing/finalization, chunked PCM decode for very long media, a
+  reusable render graph/post stack, native non-Linux CI/signing/packaging, and
+  a semantic inspector. These are product roadmap items rather than hidden
+  correctness debts in the current single-scene MP4 workflow.
 
 ## Milestones
 

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-musializer-project">
+    <comment>Musializer project</comment>
+    <glob pattern="*.musi"/>
+    <icon name="io.github.tsoding.musializer"/>
+  </mime-type>
+</mime-info>

@@ -12,4 +12,4 @@ StartupNotify=true
 StartupWMClass=Musializer
 Categories=AudioVideo;AudioVideoEditing;
 Keywords=music;audio;visualizer;visualization;render;video;
-MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-wav;audio/x-mod;audio/x-xm;
+MimeType=application/x-musializer-project;audio/mpeg;audio/flac;audio/ogg;audio/x-wav;audio/x-mod;audio/x-xm;

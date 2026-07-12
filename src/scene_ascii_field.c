@@ -76,9 +76,11 @@ static Font ascii_font(const Scene_Renderer *renderer)
 static void ascii_draw_empty(const Scene_Renderer *renderer, Rectangle boundary)
 {
     Font font = ascii_font(renderer);
+    float pixel_scale = renderer->pixel_scale > 0.0f ? renderer->pixel_scale : 1.0f;
     const char *title = "ASCII FIELD // AWAITING IMAGE";
     const char *hint = "drop an image to give the signal a face";
-    float title_size = fminf(22.0f, fmaxf(10.0f, boundary.width/26.0f));
+    float title_size = fminf(22.0f*pixel_scale,
+                             fmaxf(10.0f*pixel_scale, boundary.width/26.0f));
     float hint_size = title_size*0.62f;
     Vector2 title_measure = MeasureTextEx(font, title, title_size, 1.0f);
     Vector2 hint_measure = MeasureTextEx(font, hint, hint_size, 0.5f);
@@ -89,7 +91,7 @@ static void ascii_draw_empty(const Scene_Renderer *renderer, Rectangle boundary)
 
     DrawLineEx((Vector2){ center_x - title_measure.x*0.58f, center_y - title_size },
                (Vector2){ center_x + title_measure.x*0.58f, center_y - title_size },
-               1.0f, (Color){ 73, 117, 128, 120 });
+               1.0f*pixel_scale, (Color){ 73, 117, 128, 120 });
     DrawTextEx(font, title,
                (Vector2){ center_x - title_measure.x*0.5f, center_y - title_size*0.68f },
                title_size, 1.0f, title_color);
@@ -132,7 +134,9 @@ static void ascii_field_draw(const void *state,
     float time = isfinite(frame->time_seconds)
         ? (float)fmod(frame->time_seconds, 4096.0) : 0.0f;
     float seed_phase = ascii_seed_phase(field->seed);
-    float hue = fmodf(196.0f + seed_phase*9.5f + time*(1.0f + flux*5.0f), 360.0f);
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
+    float hue = fmodf(196.0f + seed_phase*9.5f + time*(1.0f + flux*5.0f) +
+                      frame->semantic.valence*65.0f*semantic_weight, 360.0f);
     if (hue < 0.0f) hue += 360.0f;
     Color background = ColorFromHSV(hue, 0.52f, 0.035f + energy*0.025f);
     DrawRectangleRec(boundary, background);

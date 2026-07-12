@@ -1,6 +1,7 @@
 #include "ascii_art.h"
 
 #include <limits.h>
+#include <string.h>
 
 /* Dark to light. Kept deliberately renderer/font agnostic. */
 static const char tone_ramp[] = " .:-=+*#%@";
@@ -214,5 +215,28 @@ bool ascii_art_convert_rgba8(const uint8_t *pixels,
         }
         source_y = next_y;
     }
+    return true;
+}
+
+bool ascii_art_grid_is_populated(size_t grid_width, size_t grid_height)
+{
+    return grid_width > 0 && grid_height > 0;
+}
+
+bool ascii_art_grid_clear(AsciiCell *cells,
+                          size_t cell_capacity,
+                          size_t *grid_width,
+                          size_t *grid_height)
+{
+    if (cells == NULL || grid_width == NULL || grid_height == NULL ||
+        !ascii_art_grid_is_populated(*grid_width, *grid_height) ||
+        *grid_width > SIZE_MAX/ *grid_height) {
+        return false;
+    }
+    size_t count = *grid_width* *grid_height;
+    if (count > cell_capacity) return false;
+    memset(cells, 0, count*sizeof(*cells));
+    *grid_width = 0;
+    *grid_height = 0;
     return true;
 }

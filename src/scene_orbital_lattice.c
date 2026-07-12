@@ -97,10 +97,14 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     float flux = orbital_clamp01(frame->audio.spectral_flux*5.0f);
     float pulse = orbital_clamp01(lattice->onset_pulse);
     float seed_phase = orbital_hash_unit(lattice->seed, 0, 0)*2.0f*PI;
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue_base = fmodf(205.0f + orbital_hash_unit(lattice->seed, 1, 0)*110.0f
-                           + time*(3.0f + flux*9.0f), 360.0f);
+                           + time*(3.0f + flux*9.0f)
+                           + frame->semantic.valence*70.0f*semantic_weight, 360.0f);
 
-    Color background = ColorFromHSV(hue_base, 0.62f, 0.075f + energy*0.035f);
+    Color background = ColorFromHSV(hue_base,
+                                    0.62f + frame->semantic.tension*0.2f*semantic_weight,
+                                    0.075f + energy*0.035f);
     DrawRectangleRec(boundary, background);
 
     int saved_framebuffer_width = rlGetFramebufferWidth();

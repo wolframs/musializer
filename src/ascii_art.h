@@ -46,4 +46,17 @@ bool ascii_art_convert_rgba8(const uint8_t *pixels,
                              AsciiCell *output,
                              size_t output_count);
 
+/* A grid is populated only when both dimensions are non-zero. */
+bool ascii_art_grid_is_populated(size_t grid_width, size_t grid_height);
+
+/*
+ * Explicitly discards an imported grid. Invalid dimensions leave all inputs
+ * untouched. On success the previously populated cells are zeroed and both
+ * dimensions become zero.
+ */
+bool ascii_art_grid_clear(AsciiCell *cells,
+                          size_t cell_capacity,
+                          size_t *grid_width,
+                          size_t *grid_height);
+
 #endif

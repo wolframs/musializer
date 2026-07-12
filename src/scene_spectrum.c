@@ -14,13 +14,15 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
     const float *bands = frame->audio.bands;
     const float *trails = frame->audio.trails;
     float cell_width = boundary.width/bands_count;
-    float saturation = 0.75f;
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
+    float semantic_hue = frame->semantic.valence*55.0f*semantic_weight;
+    float saturation = 0.75f + frame->semantic.tension*0.2f*semantic_weight;
     float value = 1.0f;
 
     for (size_t i = 0; i < bands_count; ++i) {
         float t = bands[i];
         float hue = (float)i/bands_count;
-        Color color = ColorFromHSV(hue*360, saturation, value);
+        Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 startPos = {
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*t,
@@ -42,7 +44,7 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
         float start = trails[i];
         float end = bands[i];
         float hue = (float)i/bands_count;
-        Color color = ColorFromHSV(hue*360, saturation, value);
+        Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 startPos = {
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*start,
@@ -81,7 +83,7 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
     for (size_t i = 0; i < bands_count; ++i) {
         float t = bands[i];
         float hue = (float)i/bands_count;
-        Color color = ColorFromHSV(hue*360, saturation, value);
+        Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 center = {
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*t,

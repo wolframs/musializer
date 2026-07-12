@@ -3,6 +3,7 @@
   "$id": "https://musializer.local/schemas/project-v1.schema.json",
   "title": "Musializer project v1",
   "description": "Canonical .musi project contract. Arrays are serialized in evaluation order. Cue ordering and non-overlap constraints described below are additionally enforced by the C validator.",
+  "$comment": "For the bounded C codec, every string maxLength is also the maximum UTF-8 byte count and U+0000 is forbidden. JSON Schema maxLength alone counts Unicode code points, so producers must honor this stricter portable representation rule.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -38,7 +39,20 @@
       "type": "array",
       "maxItems": 8,
       "items": {"$ref": "#/$defs/analysis_lane"},
-      "description": "At most one reference of each kind is allowed. Each audio_sha256 must equal audio.sha256."
+      "description": "Optional provenance references for reproducibility and re-analysis. At most one reference of each kind is allowed. Each audio_sha256 must equal audio.sha256. Referenced artifacts are not required to reopen evaluated project data."
+    },
+    "lyrics": {"$ref": "#/$defs/lyrics"},
+    "scene_switches": {"$ref": "#/$defs/scene_switches"},
+    "semantic_events": {
+      "type": "array", "maxItems": 1024,
+      "items": {"$ref": "#/$defs/semantic_event"},
+      "default": [],
+      "description": "Embedded model-derived energy, tension, valence, and confidence values. Canonical writers emit this field. Readers treat its absence in early v1 files as an empty lane."
+    },
+    "manual_events": {
+      "type": "array", "maxItems": 1024,
+      "items": {"$ref": "#/$defs/manual_event"},
+      "description": "User-authored events only. Model-derived semantic events remain in semantic_events and must not be promoted into this authored lane."
     }
   },
   "$defs": {
@@ -93,15 +107,20 @@
       "additionalProperties": false,
       "required": ["width", "height", "fps_numerator", "fps_denominator", "start_seconds", "end_seconds", "format"],
       "properties": {
-        "width": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 1600},
-        "height": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 900},
-        "fps_numerator": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 30},
+        "width": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 1920},
+        "height": {"type": "integer", "minimum": 16, "maximum": 16384, "default": 1080},
+        "fps_numerator": {"type": "integer", "minimum": 1, "maximum": 240240, "default": 30},
         "fps_denominator": {"type": "integer", "minimum": 1, "maximum": 1001, "default": 1},
         "start_seconds": {"type": "number", "minimum": 0, "default": 0},
         "end_seconds": {"type": "number", "exclusiveMinimum": 0},
-        "format": {"enum": ["mp4_h264", "mkv_h264", "webm_vp9", "mov_prores", "png_sequence"], "default": "mp4_h264"}
+        "format": {"enum": ["mp4_h264", "mkv_h264", "webm_vp9", "mov_prores", "png_sequence"], "default": "mp4_h264"},
+        "quality": {
+          "enum": ["balanced", "high", "master"],
+          "default": "high",
+          "description": "Durable export-quality intent. Supersampling and encoder details are derived and are not serialized separately."
+        }
       },
-      "description": "end_seconds must be greater than start_seconds and no greater than audio.duration_seconds. FPS is the exact rational fps_numerator/fps_denominator."
+      "description": "end_seconds must be greater than start_seconds and no greater than audio.duration_seconds. FPS is the exact rational fps_numerator/fps_denominator and must not exceed 240. The current editor supports integer FPS only and rejects other valid v1 rationals without rewriting them."
     },
     "mapping": {
       "type": "object",
@@ -173,6 +192,76 @@
         "model": {"type": "string", "maxLength": 128, "default": ""},
         "provider": {"type": "string", "maxLength": 128, "default": ""},
         "prompt_version": {"type": "string", "maxLength": 64, "default": ""}
+      }
+    },
+    "lyric_cue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "start_seconds", "end_seconds", "text"],
+      "properties": {
+        "id": {"$ref": "#/$defs/positive_uint64"},
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "text": {"type": "string", "minLength": 1, "maxLength": 511}
+      }
+    },
+    "lyrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["next_id", "cues"],
+      "properties": {
+        "next_id": {"$ref": "#/$defs/uint64"},
+        "cues": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/lyric_cue"}}
+      },
+      "description": "Authoritative editable lyric content and timing. Cues are sorted by (start_seconds,end_seconds,id); overlaps are allowed."
+    },
+    "scene_switch_cue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "start_seconds", "end_seconds", "scene_name", "strength"],
+      "properties": {
+        "id": {"$ref": "#/$defs/positive_uint64"},
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "scene_name": {"$ref": "#/$defs/stable_name"},
+        "strength": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "scene_switches": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "cues"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "cues": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/scene_switch_cue"}}
+      },
+      "description": "Suggested scene sequence. Nonempty cues form contiguous full-duration coverage; enabled is the durable user opt-in."
+    },
+    "manual_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timestamp_seconds", "id", "type", "values"],
+      "properties": {
+        "timestamp_seconds": {"type": "number", "minimum": 0},
+        "id": {"$ref": "#/$defs/positive_uint64"},
+        "type": {"enum": ["lyric", "semantic", "cue", "custom"]},
+        "values": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "number"}}
+      }
+    },
+    "semantic_event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timestamp_seconds", "id", "type", "values"],
+      "properties": {
+        "timestamp_seconds": {"type": "number", "minimum": 0},
+        "id": {"$ref": "#/$defs/positive_uint64"},
+        "type": {"const": "semantic"},
+        "values": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {"type": "number", "minimum": 0, "maximum": 1, "description": "energy"},
+            {"type": "number", "minimum": 0, "maximum": 1, "description": "tension"},
+            {"type": "number", "minimum": -1, "maximum": 1, "description": "valence"},
+            {"type": "number", "minimum": 0, "maximum": 1, "description": "confidence"}
+          ],
+          "items": false
+        }
       }
     },
     "analysis_lane": {

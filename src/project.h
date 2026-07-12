@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "event_timeline.h"
+#include "lyrics.h"
+#include "scene_switch.h"
 
 #define MUSI_PROJECT_SCHEMA_VERSION 1u
 #define MUSI_PROJECT_MAX_SCENES 32u
@@ -34,6 +37,13 @@ typedef enum Musi_Output_Format {
     MUSI_OUTPUT_PNG_SEQUENCE = 4,
     MUSI_OUTPUT_FORMAT_COUNT
 } Musi_Output_Format;
+
+typedef enum Musi_Output_Quality {
+    MUSI_OUTPUT_QUALITY_BALANCED = 0,
+    MUSI_OUTPUT_QUALITY_HIGH = 1,
+    MUSI_OUTPUT_QUALITY_MASTER = 2,
+    MUSI_OUTPUT_QUALITY_COUNT
+} Musi_Output_Quality;
 
 typedef enum Musi_Blend_Mode {
     MUSI_BLEND_NORMAL = 0,
@@ -94,6 +104,8 @@ typedef struct Musi_Output_Settings {
     double start_seconds;
     double end_seconds;
     Musi_Output_Format format;
+    // Supersampling and encoder details are derived from this durable intent.
+    Musi_Output_Quality quality;
 } Musi_Output_Settings;
 
 typedef struct Musi_Parameter_Mapping {
@@ -148,6 +160,20 @@ typedef struct Musi_Analysis_Lane_Reference {
     Musi_Analysis_Provenance provenance;
 } Musi_Analysis_Lane_Reference;
 
+typedef struct Musi_Scene_Switch_Suggestion {
+    uint64_t id;
+    double start_seconds;
+    double end_seconds;
+    char scene_name[MUSI_PROJECT_TYPE_CAPACITY];
+    float strength;
+} Musi_Scene_Switch_Suggestion;
+
+typedef struct Musi_Scene_Switch_Suggestions {
+    bool enabled;
+    size_t count;
+    Musi_Scene_Switch_Suggestion cues[SCENE_SWITCH_CAPACITY];
+} Musi_Scene_Switch_Suggestions;
+
 typedef struct Musi_Project {
     uint32_t schema_version;
     Musi_Project_Metadata metadata;
@@ -160,6 +186,15 @@ typedef struct Musi_Project {
     Musi_Parameter_Cue cues[MUSI_PROJECT_MAX_CUES];
     size_t analysis_lane_count;
     Musi_Analysis_Lane_Reference analysis_lanes[MUSI_PROJECT_MAX_ANALYSIS_LANES];
+    Lyrics_Document lyrics;
+    Musi_Scene_Switch_Suggestions scene_switches;
+    // Validated model-derived semantic values are embedded project data. The
+    // analysis_lanes entries above are provenance metadata, not dependencies
+    // required to reconstruct this evaluated lane.
+    Event_Timeline semantic_events;
+    // This lane contains user-authored events only. Semantic model output stays
+    // separate and must not be copied here as if manually authored.
+    Event_Timeline manual_events;
 } Musi_Project;
 
 typedef enum Musi_Project_Error {
@@ -176,7 +211,11 @@ typedef enum Musi_Project_Error {
     MUSI_PROJECT_ERROR_CUE_ORDER,
     MUSI_PROJECT_ERROR_CUE_OVERLAP,
     MUSI_PROJECT_ERROR_ANALYSIS_LANE,
-    MUSI_PROJECT_ERROR_DUPLICATE_ID
+    MUSI_PROJECT_ERROR_DUPLICATE_ID,
+    MUSI_PROJECT_ERROR_LYRICS,
+    MUSI_PROJECT_ERROR_SCENE_SWITCH,
+    MUSI_PROJECT_ERROR_MANUAL_EVENT,
+    MUSI_PROJECT_ERROR_SEMANTIC_EVENT
 } Musi_Project_Error;
 
 typedef struct Musi_Project_Validation {
@@ -185,9 +224,33 @@ typedef struct Musi_Project_Validation {
     size_t subindex;
 } Musi_Project_Validation;
 
+typedef enum Musi_Project_Editor_Support {
+    MUSI_PROJECT_EDITOR_SUPPORTED = 0,
+    MUSI_PROJECT_EDITOR_ERROR_NULL,
+    MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE,
+    MUSI_PROJECT_EDITOR_ERROR_OUTPUT_RANGE,
+    MUSI_PROJECT_EDITOR_ERROR_OUTPUT_FORMAT,
+    MUSI_PROJECT_EDITOR_ERROR_SCENE_COUNT,
+    MUSI_PROJECT_EDITOR_ERROR_PARAMETER_CUES,
+    MUSI_PROJECT_EDITOR_ERROR_SCENE_LAYOUT,
+    MUSI_PROJECT_EDITOR_ERROR_SCENE_MAPPINGS,
+} Musi_Project_Editor_Support;
+
 void musi_project_init(Musi_Project *project);
 Musi_Project_Validation musi_project_validate(const Musi_Project *project);
 const char *musi_project_error_string(Musi_Project_Error error);
+
+// The schema is intentionally broader than today's single-scene MP4 editor.
+// This check prevents open/edit/autosave from silently normalizing valid fields
+// that the current UI cannot represent yet.
+Musi_Project_Editor_Support musi_project_editor_support(
+    const Musi_Project *project);
+const char *musi_project_editor_support_string(Musi_Project_Editor_Support support);
+bool musi_project_audio_metadata_matches(const Musi_Project *project,
+                                         double decoded_duration_seconds,
+                                         uint32_t decoded_sample_rate,
+                                         uint16_t decoded_channels,
+                                         double duration_tolerance_seconds);
 
 double musi_interpolate(double from_value, double to_value, double amount,
                         Musi_Interpolation interpolation);
@@ -202,6 +265,7 @@ bool musi_project_parameter_at(const Musi_Project *project,
 
 const char *musi_asset_mode_name(Musi_Asset_Mode value);
 const char *musi_output_format_name(Musi_Output_Format value);
+const char *musi_output_quality_name(Musi_Output_Quality value);
 const char *musi_blend_mode_name(Musi_Blend_Mode value);
 const char *musi_analysis_source_name(Musi_Analysis_Source value);
 const char *musi_interpolation_name(Musi_Interpolation value);

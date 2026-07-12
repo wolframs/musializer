@@ -1,4 +1,5 @@
 #include "scene.h"
+#include "scene_event_merge.h"
 
 #include <math.h>
 #include <string.h>
@@ -88,7 +89,7 @@ static float constellation_event_strength(const Scene_Frame *frame, size_t node,
 {
     if (frame->events.events == NULL || frame->events.count == 0) return 0.0f;
     size_t count = frame->events.count;
-    if (count > EVENT_TIMELINE_CAPACITY) count = EVENT_TIMELINE_CAPACITY;
+    if (count > SCENE_EVENT_MERGE_CAPACITY) count = SCENE_EVENT_MERGE_CAPACITY;
     float result = 0.0f;
     for (size_t i = 0; i < count; ++i) {
         const Event_Record *event = &frame->events.events[i];
@@ -132,8 +133,10 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
     if (boundary.width <= 1.0f || boundary.height <= 1.0f) return;
 
     float time = (float)frame->time_seconds;
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float base_hue = fmodf(201.0f + constellation_unit(constellation->seed, 9)*95.0f
-                         + time*1.8f, 360.0f);
+                         + time*1.8f + frame->semantic.valence*70.0f*semantic_weight,
+                           360.0f);
     Color background = ColorFromHSV(base_hue, 0.72f,
                                     0.035f + constellation->energy*0.035f);
     DrawRectangleRec(boundary, background);

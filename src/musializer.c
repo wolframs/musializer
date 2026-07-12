@@ -56,8 +56,75 @@ static bool parse_command_line_event(const char *spec, Event_Record *event)
     return true; // The plug owns canonical validation and insertion.
 }
 
+static bool parse_positive_u32(const char *text, uint32_t *value)
+{
+    if (text == NULL || value == NULL || text[0] == '\0') return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || parsed == 0 ||
+        parsed > UINT32_MAX) return false;
+    *value = (uint32_t)parsed;
+    return true;
+}
+
+static bool parse_resolution(const char *text, uint32_t *width, uint32_t *height)
+{
+    if (text == NULL || width == NULL || height == NULL) return false;
+    const char *separator = strchr(text, 'x');
+    if (separator == NULL || separator == text || separator[1] == '\0' ||
+        strchr(separator + 1, 'x') != NULL) return false;
+    char width_text[16];
+    size_t width_length = (size_t)(separator - text);
+    if (width_length >= sizeof(width_text)) return false;
+    memcpy(width_text, text, width_length);
+    width_text[width_length] = '\0';
+    return parse_positive_u32(width_text, width) &&
+           parse_positive_u32(separator + 1, height);
+}
+
+static void print_command_line_help(FILE *stream, const char *program)
+{
+    fprintf(stream,
+        "Musializer 2026.07 - deterministic music visualization workspace\n"
+        "\n"
+        "Usage: %s [options] [audio-file | project.musi]\n"
+        "\n"
+        "Workspace:\n"
+        "  --project FILE          Open a .musi project\n"
+        "  --save-project FILE     Atomically save the current workspace\n"
+        "  --scene NAME            spectrum, pulse, orbital, ascii, atlas,\n"
+        "                          terrarium, or constellation\n"
+        "  --ascii-image FILE      Import an image and select ASCII Field\n"
+        "  --event SPEC            Add type:seconds:id:value to the manual lane\n"
+        "  --analysis-bridge FILE  Import a verified analysis bridge\n"
+        "  --auto-scenes           Enable imported scene suggestions\n"
+        "\n"
+        "Export:\n"
+        "  --render FILE           Render MP4 and exit\n"
+        "  --resolution WIDTHxHEIGHT\n"
+        "  --fps N\n"
+        "  --quality NAME          balanced, high, or master\n"
+        "\n"
+        "Diagnostics:\n"
+        "  --reload-once           Exercise one hot-reload handoff\n"
+        "  -h, --help              Show this help without opening a window\n"
+        "  --version               Show the version\n",
+        program != NULL && program[0] != '\0' ? program : "musializer");
+}
+
 int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_command_line_help(stdout, argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "--version") == 0) {
+            puts("musializer 2026.07");
+            return 0;
+        }
+    }
 #ifndef _WIN32
     // NOTE: This is needed because if the pipe between Musializer and FFmpeg breaks
     // Musializer will receive SIGPIPE on trying to write into it. While such behavior
@@ -80,6 +147,7 @@ int main(int argc, char **argv)
         TraceLog(LOG_ERROR, "Could not initialize the rendering window");
         return 1;
     }
+    SetWindowMinSize(960, 640);
     {
         const char *file_path = "./resources/logo/logo-256.png";
         size_t data_size;
@@ -99,10 +167,15 @@ int main(int argc, char **argv)
 
     plug_init();
     const char *render_output = NULL;
+    const char *project_output = NULL;
     const char *analysis_bridge = NULL;
     bool command_line_error = false;
     bool reload_once = false;
     bool auto_scenes = false;
+    uint32_t render_width = 0;
+    uint32_t render_height = 0;
+    uint32_t render_fps = 0;
+    const char *render_quality = NULL;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
@@ -140,6 +213,46 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--resolution") == 0) {
+            if (i + 1 >= argc ||
+                !parse_resolution(argv[++i], &render_width, &render_height)) {
+                TraceLog(LOG_WARNING, "Invalid resolution; expected WIDTHxHEIGHT");
+                command_line_error = true;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--fps") == 0) {
+            if (i + 1 >= argc || !parse_positive_u32(argv[++i], &render_fps)) {
+                TraceLog(LOG_WARNING, "Invalid render frame rate");
+                command_line_error = true;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--quality") == 0) {
+            if (i + 1 >= argc) {
+                TraceLog(LOG_WARNING, "Missing render quality");
+                command_line_error = true;
+            } else {
+                render_quality = argv[++i];
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--project") == 0) {
+            if (i + 1 >= argc || !plug_load_project(argv[++i])) {
+                TraceLog(LOG_WARNING, "Could not load command-line project");
+                command_line_error = true;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--save-project") == 0) {
+            if (i + 1 >= argc) {
+                TraceLog(LOG_WARNING, "Missing project output path");
+                command_line_error = true;
+            } else {
+                project_output = argv[++i];
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--analysis-bridge") == 0) {
             if (i + 1 >= argc) {
                 TraceLog(LOG_WARNING, "Missing command-line analysis bridge path");
@@ -157,10 +270,19 @@ int main(int argc, char **argv)
             reload_once = true;
             continue;
         }
-        if (!plug_load_track(argv[i])) {
+        if (IsFileExtension(argv[i], ".musi") ?
+            !plug_load_project(argv[i]) : !plug_load_track(argv[i])) {
             TraceLog(LOG_WARNING, "Could not load command-line track: %s", argv[i]);
             command_line_error = true;
         }
+    }
+
+    if (!command_line_error &&
+        (render_width != 0 || render_fps != 0 || render_quality != NULL) &&
+        !plug_configure_render(render_width, render_height, render_fps, render_quality)) {
+        TraceLog(LOG_WARNING,
+                 "Invalid render configuration; quality is balanced, high, or master");
+        command_line_error = true;
     }
 
     if (analysis_bridge != NULL &&
@@ -173,8 +295,14 @@ int main(int argc, char **argv)
         TraceLog(LOG_WARNING, "Could not enable automatic scene switching");
         command_line_error = true;
     }
+    if (project_output != NULL &&
+        (command_line_error || !plug_save_project(project_output))) {
+        TraceLog(LOG_WARNING, "Could not save command-line project: %s", project_output);
+        command_line_error = true;
+    }
 
     bool exit_after_render = false;
+    bool exit_after_save = project_output != NULL && render_output == NULL;
     int exit_status = command_line_error ? 1 : 0;
     if (reload_once && exit_status == 0) {
         void *state = plug_pre_reload();
@@ -191,7 +319,8 @@ int main(int argc, char **argv)
             exit_status = 1;
         }
     }
-    while (exit_status == 0 && !WindowShouldClose()) {
+    while (exit_status == 0 && !exit_after_save) {
+        if (WindowShouldClose() && plug_confirm_close()) break;
         if (IsKeyPressed(KEY_H)) {
             void *state = plug_pre_reload();
             if (!reload_libplug()) return 1;

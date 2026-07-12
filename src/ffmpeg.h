@@ -4,9 +4,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "render_export.h"
+
 typedef struct FFMPEG FFMPEG;
 
-FFMPEG *ffmpeg_start_rendering(const char *output_path, size_t width, size_t height, size_t fps, const char *sound_file_path);
+FFMPEG *ffmpeg_start_rendering(const char *output_path,
+                               const Render_Export_Config *config,
+                               const char *sound_file_path,
+                               uint64_t total_frames,
+                               uint64_t job_nonce);
 bool ffmpeg_send_frame_flipped(FFMPEG *ffmpeg, void *data, size_t width, size_t height);
 // Always consumes ffmpeg. Intentional termination during cancellation is not an error.
 bool ffmpeg_end_rendering(FFMPEG *ffmpeg, bool cancel);

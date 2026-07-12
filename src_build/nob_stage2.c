@@ -29,6 +29,8 @@ typedef enum {
 // optimized build. Named profiles are invocation-local; they do not rewrite
 // build/config.h.
 static Build_Profile build_profile = BUILD_PROFILE_RELEASE;
+// Distribution builds must never reuse workstation-specific release objects.
+static bool build_for_distribution = false;
 
 static const char *build_profile_name(Build_Profile profile)
 {
@@ -77,9 +79,17 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/sample_ring.c",
         "./src/ascii_art.c",
         "./src/analysis_bridge.c",
+        "./src/analysis_candidate.c",
+        "./src/editor_draft.c",
         "./src/event_timeline.c",
+        "./src/scene_event_merge.c",
+        "./src/semantic_lane.c",
         "./src/lyrics.c",
+        "./src/caption_layout.c",
+        "./src/ui_notice.c",
         "./src/project.c",
+        "./src/project_io.c",
+        "./src/render_export.c",
         "./src/sha256.c",
         "./src/scene_switch.c",
         "./src/scene.c",
@@ -111,11 +121,78 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/sample_ring.c",
         "./src/ascii_art.c",
         "./src/analysis_bridge.c",
+        "./src/analysis_candidate.c",
+        "./src/editor_draft.c",
         "./src/event_timeline.c",
+        "./src/scene_event_merge.c",
+        "./src/semantic_lane.c",
         "./src/lyrics.c",
+        "./src/caption_layout.c",
+        "./src/ui_notice.c",
+        "./src/render_export.c",
         "./src/sha256.c",
         "./src/scene_switch.c",
-        "./src/project.c");
+        "./src/project.c",
+        "./src/project_io.c");
+}
+
+static const char *distribution_support_files[] = {
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.txt",
+    ".env.example",
+    "packaging/PRODUCT_READINESS.md",
+    "packaging/linux/io.github.tsoding.musializer.desktop.in",
+    "packaging/linux/io.github.tsoding.musializer.xml",
+    "tools/install-linux-launcher.sh",
+    "tools/musializer-launcher",
+    "resources/logo/logo-256.png",
+    "tools/ANALYSIS_ADAPTERS.md",
+    "tools/MEASURED_ANALYSIS.md",
+    "tools/analysis_io.py",
+    "tools/analyze_audio.py",
+    "tools/external_analysis.py",
+    "tools/import_whisper.py",
+    "tools/mimo_openrouter.py",
+    "tools/musializer_doctor.py",
+    "prompts/lyrics_cleanup_system.md",
+    "schemas/analysis-cache-v1.schema.json",
+    "schemas/analysis-provenance-v1.schema.json",
+    "schemas/codex-lyric-review-output-v1.schema.json",
+    "schemas/lyric-review-v1.schema.json",
+    "schemas/lyric-timing-v1.schema.json",
+    "schemas/measured-analysis-v1.schema.json",
+    "schemas/project-v1.schema.json",
+    "schemas/scene-plan-v1.schema.json",
+    "schemas/semantic-notes-v1.schema.json",
+    "schemas/semantic-score-v1.schema.json",
+};
+
+static bool copy_distribution_support(const char *root)
+{
+    const char *directories[] = {
+        "packaging", "packaging/linux", "tools", "prompts", "schemas",
+        "resources", "resources/logo"
+    };
+    for (size_t i = 0; i < NOB_ARRAY_LEN(directories); ++i) {
+        if (!nob_mkdir_if_not_exists(
+                nob_temp_sprintf("%s/%s", root, directories[i]))) return false;
+    }
+    for (size_t i = 0; i < NOB_ARRAY_LEN(distribution_support_files); ++i) {
+        const char *relative = distribution_support_files[i];
+        if (!nob_copy_file(relative, nob_temp_sprintf("%s/%s", root, relative))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void append_distribution_support_paths(Nob_Cmd *cmd, const char *root)
+{
+    for (size_t i = 0; i < NOB_ARRAY_LEN(distribution_support_files); ++i) {
+        nob_cmd_append(cmd,
+            nob_temp_sprintf("%s/%s", root, distribution_support_files[i]));
+    }
 }
 
 // @backcomp
@@ -264,7 +341,7 @@ bool generate_resource_bundle(void)
         for (size_t col = 0; col < row_size && i < bundle.count; ++col, ++i) {
             fprintf(out, "0x%02X, ", (unsigned char)bundle.items[i]);
         }
-        genf(out, "");
+        fputc('\n', out);
     }
     genf(out, "};");
     genf(out, "#endif // BUNDLE_H_");
@@ -327,6 +404,24 @@ int main(int argc, char **argv)
         nob_log(NOB_INFO, "Test profile: %s", build_profile_name(build_profile));
         if (!build_and_run_tests(build_profile)) return 1;
     } else if (strcmp(subcommand, "dist") == 0) {
+        if (argc > 0) {
+            nob_log(NOB_ERROR, "Unexpected argument `%s`", argv[0]);
+            return 1;
+        }
+        if (build_uses_hotreload()) {
+            nob_log(NOB_ERROR, "Distribution builds do not support hot reload");
+            return 1;
+        }
+#ifdef MUSIALIZER_UNBUNDLE
+        nob_log(NOB_ERROR, "Distribution builds require bundled resources");
+        return 1;
+#endif
+        build_profile = BUILD_PROFILE_RELEASE;
+        build_for_distribution = true;
+        nob_log(NOB_INFO, "Building portable release artifacts for distribution");
+        if (!build_raylib()) return 1;
+        if (!generate_resource_bundle()) return 1;
+        if (!build_musializer()) return 1;
         if (!build_dist()) return 1;
     } else if (strcmp(subcommand, "config") == 0) {
         nob_log(NOB_ERROR, "The `config` command does not exist anymore!");
@@ -375,6 +470,7 @@ int main(int argc, char **argv)
     } else {
         nob_log(NOB_ERROR, "Unknown subcommand %s", subcommand);
         log_available_subcommands(program, NOB_ERROR);
+        return 1;
     }
     // TODO: it would be nice to check for situations like building TARGET_WIN64_MSVC on Linux and report that it's not possible.
     return 0;

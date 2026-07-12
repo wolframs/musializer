@@ -3,7 +3,7 @@
 set -u
 
 PROJECT_ROOT=@PROJECT_ROOT_SHELL@
-APP="$PROJECT_ROOT/build/musializer"
+APP="$PROJECT_ROOT/@APP_RELATIVE@"
 STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
 LOG_DIR="$STATE_HOME/musializer"
 LOG_FILE="$LOG_DIR/launcher.log"

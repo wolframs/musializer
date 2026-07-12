@@ -210,13 +210,19 @@ bool build_dist(void)
     } else {
     if (!mkdir_if_not_exists("./musializer-win64-mingw/")) return false;
     if (!copy_file("./build/musializer.exe", "./musializer-win64-mingw/musializer.exe")) return false;
-    if (!copy_directory_recursively("./resources/", "./musializer-win64-mingw/resources/")) return false;
+    if (!copy_distribution_support("./musializer-win64-mingw")) return false;
     if (!copy_file("musializer-logged.bat", "./musializer-win64-mingw/musializer-logged.bat")) return false;
     // TODO: pack ffmpeg.exe with windows build
     //if (!copy_file("ffmpeg.exe", "./musializer-win64-mingw/ffmpeg.exe")) return false;
     Cmd cmd = {0};
     const char *dist_path = "./musializer-win64-mingw.zip";
-    cmd_append(&cmd, "zip", "-r", dist_path, "./musializer-win64-mingw/");
+    int dist_exists = file_exists(dist_path);
+    if (dist_exists < 0) return false;
+    if (dist_exists > 0 && !delete_file(dist_path)) return false;
+    cmd_append(&cmd, "zip", dist_path,
+               "./musializer-win64-mingw/musializer.exe",
+               "./musializer-win64-mingw/musializer-logged.bat");
+    append_distribution_support_paths(&cmd, "./musializer-win64-mingw");
     bool ok = cmd_run(&cmd);
     cmd_free(cmd);
     if (!ok) return false;

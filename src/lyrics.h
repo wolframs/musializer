@@ -90,6 +90,18 @@ Lyric_Cue *lyrics_find_mut(Lyrics_Document *document, uint64_t id);
 Lyrics_Result lyrics_document_replace(Lyrics_Document *destination,
                                       const Lyrics_Document *source);
 
+// Copies a validated document onto an authoritative decoded-audio duration.
+// Cues crossing the tail are clamped; cues beginning at/after the new end are
+// rejected atomically.
+Lyrics_Result lyrics_document_normalize_duration(
+    Lyrics_Document *destination,
+    const Lyrics_Document *source,
+    double duration_seconds);
+
+// Returns the most recently-started active cue, or NULL outside all cues.
+const Lyric_Cue *lyrics_at_time(const Lyrics_Document *document,
+                                double time_seconds);
+
 // Derived UI bridge (not the canonical persistence format):
 // MUSIALIZER-LYRICS-BRIDGE<TAB>1<TAB>duration_ms<LF>
 // id<TAB>start_ms<TAB>end_ms<TAB>base64_utf8_text<LF>

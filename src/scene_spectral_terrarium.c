@@ -302,8 +302,10 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
     const Spectral_Terrarium_State *terrarium = state;
     if (boundary.width <= 1.0f || boundary.height <= 1.0f) return;
 
+    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue = fmodf(145.0f + terrarium_hash_unit(terrarium->seed, 1500U)*125.0f
-                    + (float)frame->time_seconds*(1.2f + terrarium->flux*2.5f), 360.0f);
+                    + (float)frame->time_seconds*(1.2f + terrarium->flux*2.5f)
+                    + frame->semantic.valence*75.0f*semantic_weight, 360.0f);
     Color background = ColorFromHSV(hue, 0.68f, 0.035f + terrarium->energy*0.035f);
     DrawRectangleRec(boundary, background);
 

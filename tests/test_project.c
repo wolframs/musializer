@@ -26,6 +26,7 @@ static Musi_Project valid_project(void)
     project.audio.duration_seconds = 180.0;
     project.audio.sample_rate = 48000;
     project.audio.channels = 2;
+    project.lyrics.duration_seconds = 180.0;
     project.output.start_seconds = 0.0;
     project.output.end_seconds = 180.0;
     project.deterministic_seed = UINT64_C(0xf00dcafe12345678);
@@ -89,10 +90,11 @@ TEST(project_defaults_and_valid_contract)
     Musi_Project_Validation result;
     musi_project_init(&project);
     EXPECT_EQ_SIZE(project.schema_version, MUSI_PROJECT_SCHEMA_VERSION);
-    EXPECT_EQ_SIZE(project.output.width, 1600);
-    EXPECT_EQ_SIZE(project.output.height, 900);
+    EXPECT_EQ_SIZE(project.output.width, 1920);
+    EXPECT_EQ_SIZE(project.output.height, 1080);
     EXPECT_EQ_SIZE(project.output.fps_numerator, 30);
     EXPECT_EQ_SIZE(project.output.fps_denominator, 1);
+    EXPECT_EQ_SIZE(project.output.quality, MUSI_OUTPUT_QUALITY_HIGH);
     EXPECT_TRUE(musi_project_validate(&project).error != MUSI_PROJECT_VALID);
 
     project = valid_project();
@@ -100,6 +102,61 @@ TEST(project_defaults_and_valid_contract)
     EXPECT_EQ_SIZE(result.error, MUSI_PROJECT_VALID);
     EXPECT_TRUE(strcmp(musi_analysis_lane_kind_name(MUSI_LANE_SEMANTIC_SCORE),
                        "semantic_score") == 0);
+
+    project.output.fps_numerator = 24000;
+    project.output.fps_denominator = 1001;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_VALID);
+    project.audio.mode = MUSI_ASSET_REFERENCED;
+    EXPECT_EQ_SIZE(musi_project_editor_support(&project),
+                   MUSI_PROJECT_EDITOR_ERROR_OUTPUT_FORMAT);
+    project.output.fps_numerator = 240241;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error,
+                   MUSI_PROJECT_ERROR_OUTPUT);
+}
+
+TEST(project_editor_subset_rejects_every_lossy_normalization)
+{
+    Musi_Project project = valid_project();
+    project.audio.mode = MUSI_ASSET_REFERENCED;
+    project.cue_count = 0;
+    project.scenes[0].mapping_count = 0;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_SUPPORTED);
+
+    project.output.start_seconds = 1.0;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_OUTPUT_RANGE);
+    project.output.start_seconds = 0.0;
+    project.scenes[0].opacity = 0.5;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_SCENE_LAYOUT);
+    project.scenes[0].opacity = 1.0;
+    project.scenes[0].mapping_count = 1;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_SCENE_MAPPINGS);
+    project.scenes[0].mapping_count = 0;
+    project.cue_count = 1;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_PARAMETER_CUES);
+    project.cue_count = 0;
+    project.audio.mode = MUSI_ASSET_IMPORTED;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE);
+}
+
+TEST(project_audio_metadata_identity_is_strict_and_tolerant_only_in_time)
+{
+    Musi_Project project = valid_project();
+    EXPECT_TRUE(musi_project_audio_metadata_matches(
+        &project, 180.0005, 48000, 2, 0.001));
+    EXPECT_FALSE(musi_project_audio_metadata_matches(
+        &project, 180.01, 48000, 2, 0.001));
+    EXPECT_FALSE(musi_project_audio_metadata_matches(
+        &project, 180.0, 44100, 2, 0.001));
+    EXPECT_FALSE(musi_project_audio_metadata_matches(
+        &project, 180.0, 48000, 1, 0.001));
+    EXPECT_FALSE(musi_project_audio_metadata_matches(
+        &project, NAN, 48000, 2, 0.001));
 }
 
 TEST(project_rejects_ranges_counts_and_non_finite_values)
@@ -110,6 +167,10 @@ TEST(project_rejects_ranges_counts_and_non_finite_values)
 
     project = valid_project();
     project.output.end_seconds = project.output.start_seconds;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_OUTPUT);
+
+    project = valid_project();
+    project.output.quality = MUSI_OUTPUT_QUALITY_COUNT;
     EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_OUTPUT);
 
     project = valid_project();
@@ -206,4 +267,81 @@ TEST(project_mapping_evaluation_checks_inputs_and_clamps)
     REQUIRE_TRUE(musi_mapping_evaluate(mapping, 2.0, &value));
     EXPECT_NEAR(value, 3.75, 0.000001);
     EXPECT_FALSE(musi_mapping_evaluate(mapping, NAN, &value));
+}
+
+TEST(project_validates_authored_workspace_lanes)
+{
+    Musi_Project project = valid_project();
+    project.lyrics.next_id = 3;
+    project.lyrics.count = 1;
+    project.lyrics.cues[0] = (Lyric_Cue){.id=2,.start_seconds=1,.end_seconds=2};
+    strcpy(project.lyrics.cues[0].text, "hello");
+    project.scene_switches.enabled = true;
+    project.scene_switches.count = 2;
+    project.scene_switches.cues[0] = (Musi_Scene_Switch_Suggestion){.id=10,.start_seconds=0,.end_seconds=90,.strength=.5f};
+    strcpy(project.scene_switches.cues[0].scene_name, "spectrum");
+    project.scene_switches.cues[1] = (Musi_Scene_Switch_Suggestion){.id=11,.start_seconds=90,.end_seconds=180,.strength=.8f};
+    strcpy(project.scene_switches.cues[1].scene_name, "atlas");
+    project.manual_events.count = 1;
+    project.manual_events.events[0] = (Event_Record){.timestamp_seconds=3,.id=20,.type=EVENT_TYPE_CUSTOM,.value_count=1,.values={1}};
+    project.semantic_events.count = 1;
+    project.semantic_events.events[0] = (Event_Record){.timestamp_seconds=4,.id=30,.type=EVENT_TYPE_SEMANTIC,.value_count=4,.values={.5f,.75f,-.25f,.9f}};
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_VALID);
+
+    project.lyrics.duration_seconds = 179;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_LYRICS);
+    project.lyrics.duration_seconds = 180;
+    project.scene_switches.cues[1].start_seconds = 91;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SCENE_SWITCH);
+    project.scene_switches.cues[1].start_seconds = 90;
+    project.manual_events.events[0].timestamp_seconds = 181;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_MANUAL_EVENT);
+}
+
+TEST(project_rejects_malformed_or_out_of_range_embedded_semantics)
+{
+    Musi_Project project = valid_project();
+    project.semantic_events.count = 1;
+    project.semantic_events.events[0] = (Event_Record){.timestamp_seconds=4,.id=30,.type=EVENT_TYPE_SEMANTIC,.value_count=4,.values={.5f,.75f,-.25f,.9f}};
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_VALID);
+
+    project.semantic_events.events[0].type = EVENT_TYPE_CUSTOM;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SEMANTIC_EVENT);
+    project.semantic_events.events[0].type = EVENT_TYPE_SEMANTIC;
+    project.semantic_events.events[0].value_count = 3;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SEMANTIC_EVENT);
+    project.semantic_events.events[0].value_count = 4;
+    project.semantic_events.events[0].values[2] = -1.01f;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SEMANTIC_EVENT);
+    project.semantic_events.events[0].values[2] = 0.0f;
+    project.semantic_events.events[0].timestamp_seconds = 181;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SEMANTIC_EVENT);
+}
+
+TEST(project_rejects_authored_workspace_counts_order_duration_and_utf8)
+{
+    Musi_Project project = valid_project();
+    project.lyrics.count = LYRICS_CUE_CAPACITY + 1;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_LYRICS);
+    project = valid_project(); project.scene_switches.count = SCENE_SWITCH_CAPACITY + 1;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SCENE_SWITCH);
+    project = valid_project(); project.manual_events.count = EVENT_TIMELINE_CAPACITY + 1;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_MANUAL_EVENT);
+    project = valid_project(); project.semantic_events.count = EVENT_TIMELINE_CAPACITY + 1;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_SEMANTIC_EVENT);
+
+    project = valid_project(); project.lyrics.next_id=3;project.lyrics.count=2;
+    project.lyrics.cues[0]=(Lyric_Cue){.id=1,.start_seconds=2,.end_seconds=3};strcpy(project.lyrics.cues[0].text,"later");
+    project.lyrics.cues[1]=(Lyric_Cue){.id=2,.start_seconds=1,.end_seconds=2};strcpy(project.lyrics.cues[1].text,"earlier");
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_LYRICS);
+    project.lyrics.cues[0].start_seconds=1;project.lyrics.cues[0].end_seconds=2;
+    project.lyrics.cues[1].start_seconds=2;project.lyrics.cues[1].end_seconds=181;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_LYRICS);
+    project.lyrics.cues[1].end_seconds=3;project.lyrics.cues[0].text[0]=(char)0xff;project.lyrics.cues[0].text[1]=0;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_LYRICS);
+
+    project = valid_project();project.manual_events.count=2;
+    project.manual_events.events[0]=(Event_Record){.timestamp_seconds=2,.id=1,.type=EVENT_TYPE_CUE,.value_count=1,.values={1}};
+    project.manual_events.events[1]=(Event_Record){.timestamp_seconds=1,.id=2,.type=EVENT_TYPE_CUE,.value_count=1,.values={1}};
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_ERROR_MANUAL_EVENT);
 }

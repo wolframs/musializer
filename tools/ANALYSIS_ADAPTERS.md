@@ -31,10 +31,18 @@ action and always writes `scene-plan.json`, `assist-manifest.json`, and the
 validated `analysis.bridge.tsv` when it succeeds:
 
 The current UI integration is available from a source checkout (including the
-per-user Linux launcher). Minimal binary distributions that omit `tools/`,
-`prompts/`, or `schemas/` report the helpers as unavailable instead of showing
-controls that cannot run; relocatable analysis packaging remains distribution
-work.
+per-user Linux launcher). Archives produced by the repository's current Linux,
+OpenBSD, and MinGW `dist` recipes include `tools/`, `prompts/`, and `schemas/`.
+Third-party or older minimal distributions that omit any of those report the
+helpers as unavailable instead of showing controls that cannot run. The Python
+interpreter and optional analysis programs/models remain external dependencies.
+
+Run `python3 tools/musializer_doctor.py` for a human-readable preflight, or add
+`--json` for automation. `--require local_lyrics` gates FFmpeg, Python/NumPy,
+Whisper, Codex, the writable cache directory, and the relevant assets;
+`--require remote_mimo` gates the local measured-analysis prerequisites plus
+OpenRouter credential presence. The doctor performs discovery only: it does not
+run a model or network request and never emits credential values.
 
 ```console
 python3 tools/external_analysis.py assist track.mp3 analysis/ \

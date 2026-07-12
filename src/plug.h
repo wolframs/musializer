@@ -21,9 +21,12 @@
 //   allocation inventory, then starts fresh and best-effort restores the
 //   selected scene, current track/time, and bounded event snapshot.
 //
-// Readers retain an explicit decoder for ABI 1. Crossing directly from a
-// legacy plug that predates any envelope still needs a one-time process
-// restart: after dlclose, no safe destructor for unknown opaque state exists.
+// The prefix through current_track_was_playing is append-only and lets readers
+// reject/release a future opaque layout even when they do not understand fields
+// appended by that ABI. Readers also retain an explicit decoder for ABI 1.
+// Crossing directly from a legacy plug that predates any envelope still needs
+// a one-time process restart: after dlclose, no safe destructor for unknown
+// opaque state exists.
 #define PLUG_RELOAD_HANDOFF_MAGIC UINT64_C(0x4D555349524C4431)
 #define PLUG_RELOAD_HANDOFF_ABI_VERSION 2u
 #define PLUG_RELOAD_PATH_CAPACITY 4096u
@@ -63,14 +66,18 @@ typedef struct {
     PLUG(plug_load_resource, void*, const char*, size_t*) \
     PLUG(plug_free_resource, void, void*) \
     PLUG(plug_load_track, bool, const char*) \
+    PLUG(plug_load_project, bool, const char*) \
+    PLUG(plug_save_project, bool, const char*) \
     PLUG(plug_load_ascii_image, bool, const char*) \
     PLUG(plug_select_scene, bool, const char*) \
     PLUG(plug_record_event, bool, Event_Record) \
     PLUG(plug_load_analysis_bridge, bool, const char*) \
     PLUG(plug_set_auto_scenes, bool, bool) \
+    PLUG(plug_configure_render, bool, uint32_t, uint32_t, uint32_t, const char*) \
     PLUG(plug_start_render, bool, const char*) \
     PLUG(plug_render_active, bool, void) \
     PLUG(plug_render_failed, bool, void) \
+    PLUG(plug_confirm_close, bool, void) \
     PLUG(plug_shutdown, void, void) \
     PLUG(plug_update, void, void)
 

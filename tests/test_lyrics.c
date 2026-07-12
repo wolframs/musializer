@@ -107,6 +107,27 @@ TEST(lyrics_overlaps_are_valid_but_merge_requires_canonical_neighbors)
     EXPECT_TRUE(lyrics_merge(&document, 1, 3, " ") == LYRICS_ERROR_NOT_ADJACENT);
 }
 
+TEST(lyrics_duration_normalization_clamps_tail_and_rejects_late_cues_atomically)
+{
+    Lyrics_Document source;
+    Lyrics_Document destination;
+    REQUIRE_TRUE(lyrics_document_init(&source, 10.0) == LYRICS_OK);
+    REQUIRE_TRUE(lyrics_document_init(&destination, 8.0) == LYRICS_OK);
+    Lyric_Cue tail = cue(1, 8.5, 10.0, "tail");
+    REQUIRE_TRUE(lyrics_insert(&source, &tail, NULL) == LYRICS_OK);
+    REQUIRE_TRUE(lyrics_document_normalize_duration(
+        &destination, &source, 9.0) == LYRICS_OK);
+    EXPECT_NEAR(destination.duration_seconds, 9.0, 0.0);
+    EXPECT_NEAR(destination.cues[0].end_seconds, 9.0, 0.0);
+    EXPECT_TRUE(lyrics_at_time(&destination, 8.75) == &destination.cues[0]);
+    EXPECT_TRUE(lyrics_at_time(&destination, 9.0) == NULL);
+
+    Lyrics_Document before = destination;
+    EXPECT_TRUE(lyrics_document_normalize_duration(
+        &destination, &source, 8.0) == LYRICS_ERROR_DURATION);
+    EXPECT_TRUE(memcmp(&destination, &before, sizeof(destination)) == 0);
+}
+
 TEST(lyrics_validation_detects_persistence_corruption)
 {
     Lyrics_Document document;
