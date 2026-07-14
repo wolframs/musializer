@@ -1,323 +1,316 @@
 # Musializer
 
-<p align=center>
-  <img src="./resources/logo/logo-256.png">
+<p align="center">
+  <img src="./resources/logo/logo-256.png" alt="Musializer logo" width="192">
 </p>
+
+Musializer is a desktop studio for turning music into reactive scenes, timed
+lyrics, and deterministic high-quality video. It is written in C with raylib,
+opens ordinary audio files directly, and keeps each song as a portable `.musi`
+project.
+
+This is an **AI-agent-developed fork**, built under human direction and review,
+of [tsoding's original playful C repository](https://github.com/tsoding/musializer).
+The fork keeps the original project's immediacy and custom C build system while
+growing it into a scene-based visualizer, editor, and offline rendering tool.
+The upstream demo below remains a lovely snapshot of where it began.
 
 > [!WARNING]
 > Musializer is under active development and the `.musi` format is currently
 > version 1. Keep backups of irreplaceable projects when moving between builds.
+> Signed binaries and a native system installer are not published yet.
 
-The project aims to make a tool for creating beautiful music visualizations and rendering high quality videos of them.
+## What it can do
 
-*Please, read [CONTRIBUTING.md](CONTRIBUTING.md) before making a PR.*
+- Play WAV, OGG, MP3, QOA, and FLAC files with live audio-reactive visuals.
+- Switch among seven built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
+  ASCII Field, Song Atlas, Spectral Terrarium, and Constellation.
+- Import an image as ASCII art, author timeline events, and edit timed lyrics in
+  the application.
+- Generate local measured section suggestions, transcribe lyrics with Whisper,
+  review those timings with headless Codex, and optionally ask Xiaomi MiMo V2.5
+  through OpenRouter for a semantic description of how the music feels.
+- Stage every assisted result for review instead of silently changing a project.
+- Auto-switch scenes from reviewed section markers.
+- Render deterministic H.264/AAC MP4 video up to 7680x4320 with anti-aliased
+  scenes, shared lyric captions, exact decoded-audio frame scheduling, and
+  transactional output publication.
+- Save lyrics, semantic/manual events, scene suggestions, seed, provenance, and
+  output intent in strict `.musi` v1 projects.
+- Work as a normal Linux desktop application, a CLI renderer, or a hot-reloaded
+  C development build.
 
-## Demo
+Tracker modules (`xm` and `mod`) work for interactive playback and preview, but
+not offline MP4 export because raylib does not expose their decoded Wave data.
 
-*Music by [@nu11](https://soundcloud.com/nu11-chiptune) from [https://soundcloud.com/nu11-chiptune/nu11-wip-works-2016-2022](https://soundcloud.com/nu11-chiptune/nu11-wip-works-2016-2022) at 20:38*
+## Quick start on Linux
 
-https://github.com/tsoding/musializer/assets/165283/8b9f9653-9b3d-4c04-9569-338fa19af071
-
-## Supported Audio Formats
-
-- wav
-- ogg
-- mp3
-- qoa
-- flac
-
-Tracker modules (`xm` and `mod`) are supported for interactive playback and
-preview, but not offline MP4 export yet: raylib can stream them as music but
-cannot expose the decoded Wave required by the deterministic export analyzer.
-
-## Download Binaries
-
-This product branch does not publish signed binaries yet. Build it from source,
-or use the Linux launcher installer below. The older upstream alpha downloads
-predate projects, assisted analysis, the scene engine, and the current export
-pipeline.
-
-## Build from Source
-
-External Dependencies:
-- [ffmpeg](https://ffmpeg.org/) executable available in `PATH` environment variable. It is called as a child process during the rendering of the videos. So if you don't plan to render any videos it's completely **optional**.
-
-We are using Custom Build System written entirely in C called `nob`. [nob.c](./nob.c) is the program that builds Musializer. For more info on this Build System see the [nob.h repo](https://github.com/tsoding/nob.h).
-
-Before using `nob` you need to bootstrap it. Just compile it with the available C compiler. On Linux it's usually `$ cc -o nob nob.c` on Windows with MSVC from within `vcvarsall.bat` it's `$ cl.exe nob.c`. You only need to boostrap it once. After the bootstrap you can just keep running the same executable over and over again. It even tries to rebuild itself if you modify [nob.c](./nob.c) (which may fail sometimes, so in that case be ready to reboostrap it).
-
-I really recommend to read [nob.c](./nob.c) and [nob.h](https://github.com/tsoding/nob.h) to get an idea of how it all actually works. The Build System is a work in progress, so if something breaks be ready to dive into it.
-
-### Linux and OpenBSD
-
-```console
-$ cc -o nob nob.c # ONLY ONCE!!!
-$ ./nob
-$ ./build/musializer
-```
-
-Development profiles and the headless test suite are available after the same
-bootstrap:
-
-```console
-$ ./nob build debug
-$ ./nob build sanitize
-$ ./nob build hotreload
-$ ./nob test
-$ ./nob test sanitize
-```
-
-The `release`, `debug`, and `hotreload` application profiles are implemented by
-the Linux, macOS, OpenBSD, MinGW-w64, and MSVC recipes. The full
-AddressSanitizer + UndefinedBehaviorSanitizer `sanitize` application profile is
-available on Linux and macOS; OpenBSD, MinGW-w64, and MSVC reject it explicitly
-instead of silently emitting a non-sanitized build. The test sanitizer likewise
-requires a host `cc` with compatible ASan and UBSan runtimes.
-
-`./nob dist` always rebuilds before packaging. On Linux it uses a separate
-portable raylib object directory and omits the workstation-only
-`-march=native` flag used by `build release`. Linux and OpenBSD produce a
-`.tar.gz`; MinGW produces a `.zip`; macOS produces `build/Musializer.app`.
-Distribution archives include the license, product documentation, `.env.example`,
-Linux desktop integration where applicable, and the Python analysis adapters
-with their prompt and schemas. FFmpeg, Python, NumPy, Whisper, and Codex remain
-external runtime dependencies where their features are used. See
-[`packaging/PRODUCT_READINESS.md`](packaging/PRODUCT_READINESS.md) for the
-current platform matrix and known packaging limits.
-
-Run the dependency-free product doctor before a demo, export, or assisted
-analysis session:
-
-```console
-$ python3 tools/musializer_doctor.py
-$ python3 tools/musializer_doctor.py --json --require export --require local_lyrics
-```
-
-It reports preview, MP4 export, local Whisper/Codex lyrics, and remote MiMo as
-separate capabilities. The check does not invoke those programs or make network
-requests, and reports only whether an OpenRouter credential is configured—not
-its value.
-
-Tracks may also be loaded from the command line. The optional scene selector is
-useful for repeatable smoke tests:
-
-```console
-$ ./build/musializer --help
-$ ./build/musializer --scene orbital path/to/track.mp3
-$ ./build/musializer --scene atlas path/to/track.mp3
-$ ./build/musializer --scene terrarium path/to/track.mp3
-$ ./build/musializer --scene constellation \
-    --event lyric:1.25:42:0.9 --event cue:2.0:43:1.0 path/to/track.mp3
-$ ./build/musializer --ascii-image path/to/image.png path/to/track.mp3
-$ ./build/musializer --scene orbital --resolution 2560x1440 --fps 60 \
-    --quality master path/to/track.wav --render output.mp4
-$ ./build/musializer path/to/track.mp3 \
-    --analysis-bridge build/analysis/track/analysis.bridge.tsv \
-    --auto-scenes --render output.mp4
-$ ./build/musializer path/to/track.mp3 --scene atlas \
-    --quality high --save-project path/to/show.musi
-$ ./build/musializer --project path/to/show.musi --render output.mp4
-```
-
-Built-in scene names are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
-`terrarium`, and `constellation`. While the app is running, <kbd>1</kbd> through
-<kbd>7</kbd> switch between them. Repeatable `--event`
-`type:seconds:id:value` arguments accept `lyric`, `semantic`, `cue`, or `custom`
-events for Constellation replay. A command-line render exits automatically
-after FFmpeg finishes, making it useful for smoke tests and scripted renders.
-Resolution accepts any validated even size up to 7680x4320; the UI presents
-720p, 1080p, 1440p, and 2160p presets at 24, 30, or 60 fps. Quality is
-`balanced`, `high`, or `master`. A positional `.musi` file is equivalent to
-`--project`; `--save-project` writes the active track project and exits when no
-render is requested.
-`--analysis-bridge` verifies the bridge's audio SHA-256 before importing lyric,
-semantic, or scene lanes; `--auto-scenes` opts into its section recommendations
-for both preview and offline rendering.
-
-Preview rendering requests 4x MSAA. Offline rendering uses a 2x spatial render
-followed by an output-resolution downsample for High and Master; Balanced uses
-native output resolution. Set `MUSIALIZER_RENDER_SUPERSAMPLE=0` to force a 1x
-render on GPUs that cannot allocate the larger target. The default is
-1920x1080, 30 fps, High. Balanced/High/Master map to H.264 High-profile CRF
-20/16/12, with BT.709 color metadata, `yuv420p`, 256 or 320 kbit/s AAC, and
-fast-start metadata. Frame scheduling is derived from the exact decoded sample
-count.
-The renderer analyzes one decoded PCM stream and stages that same stream for
-FFmpeg, avoiding compressed-audio decoder disagreement. It renders
-`ceil(decoded duration * FPS)` frames and pads only the final sub-frame audio
-tail so audio, video, and container end on the same deterministic frame
-boundary, within the MP4 muxer's time-base rounding. FFmpeg writes a temporary
-sibling and only replaces the chosen output
-after a successful, bounded finalize, so cancellation or encoder failure
-preserves an existing video.
-
-The same workflow is available in the application UI:
-
-- use **Open audio**, **Open project**, or drag-and-drop from the first-run
-  workspace; the app also exposes **Add audio**, **Save**, and **Save As**;
-- choose any built-in scene from the **Scenes** rail on the left;
-- click **Import image -> ASCII**, or drop an image, to populate and select
-  ASCII Field;
-- open **Lyrics** to add/select lyric cue blocks, edit their UTF-8 content,
-  nudge or set start/end times at the playhead, and import/export a bounded
-  `.lyrics.tsv` editing file;
-- open **Assist** to run local timed-lyrics assistance (Whisper plus an
-  evidence-only headless Codex review), measured scene-change planning,
-  MiMo feeling analysis, or the complete pipeline without blocking playback.
-  Remote modes show their privacy boundary before launch; results are staged
-  with counts, replacement impact, and a first-lyric preview, then require a
-  second confirmation. Accepted MiMo cues steer palette/tension across every
-  built-in scene without being mixed into measured audio;
-- enable **Auto scenes** after inspecting generated section markers when scene
-  recommendations should drive preview and deterministic export;
-- use **+ Feel**, **+ Cue**, and **+ Custom** on the timeline to record
-  color-coded Constellation events at the current playhead;
-- use **Clear manual** with confirmation and one-level undo to remove only
-  authored events; lyrics, semantics, and scene suggestions remain intact;
-- open **Export** to choose size, frame rate, and quality, review the estimated
-  frame count and scene plan, choose an output, and follow the exact
-  decoded frame total/elapsed/ETA once export starts. Cancellation is
-  transactional;
-- press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save an existing project. Canonical
-  edits autosave after a short idle period; an unapplied lyric draft blocks
-  context changes and autosave until it is applied or discarded. Use
-  <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for **Save As**;
-- treat each entry in **Track projects** as an independent one-song `.musi`
-  document. Named inactive projects autosave too, and quitting confirms before
-  discarding unnamed/unsaved work;
-
-Analysis artifacts and logs are cached under `build/analysis/`. Canonical JSON
-keeps measured audio, Whisper evidence, Codex review, MiMo interpretation, and
-scene recommendations separate; only a validated derived bridge enters the C
-editor. **MiMo feelings** and **Full assist** are the explicit authorization
-boundary for an OpenRouter request. They read `OPENROUTER_API_KEY` from the
-environment or the ignored repository `.env` without sourcing that file.
-
-Projects embed lyrics, semantic events, manual events, scene suggestions,
-per-track deterministic seed, and export intent. Analysis references retain
-provenance, but evaluated semantic cues do not depend on a mutable cache file
-when a project is reopened. Project writes use an exclusively created sibling,
-flush, and atomic replacement. Audio beside or below the destination project is
-stored as a verified project-relative reference; unrelated assets safely fall
-back to canonical absolute paths.
-
-The v1 schema deliberately describes more future-facing composition features
-than this editor can preserve. This build opens only the lossless editor subset:
-referenced audio, full-track integer-FPS H.264 MP4 output, one enabled opaque
-full-track Normal scene, and no parameter cues or mappings. Other schema-valid
-v1 documents are rejected with an explicit unsupported-feature error instead of
-being silently normalized on save.
-
-Timed lyric cues render as a shared caption layer in preview and MP4 export, so
-Whisper/Codex timing work has an immediate visual result in every scene. Long
-cues wrap to three centered lines with visible ellipsis when necessary, and the
-bundled caption atlas deliberately covers accented Latin, Greek, Cyrillic,
-punctuation, currency, and common interface symbols.
-
-Imported ASCII grids are isolated per open track, but the source-image asset is
-not in `.musi` v1 yet. Video export works; project save is blocked while any
-imported grid is present, preventing hidden image loss even after switching
-scenes. Use **Clear image** to discard the grid explicitly; an empty ASCII scene
-then saves and reopens deterministically.
-
-CLI arguments remain useful for repeatable automation, but are not required for
-normal project, scene, image, event, assistance, or render workflows.
-
-### Linux application launcher
-
-On Linux desktops, including KDE Plasma, install a per-user application-menu
-launcher once:
+The nicest way to use Musializer on Linux, including KDE Plasma, is to install
+the per-user launcher from a source checkout:
 
 ```console
 $ ./tools/install-linux-launcher.sh
 ```
 
-After that, open **Musializer** from the application menu like any other app.
-Audio files can also be passed through the desktop launcher or dropped onto its
-icon. The installer registers `.musi` projects with the desktop MIME database,
-so they can be opened through the file manager as well. From a source checkout
-it builds the release executable once; from an unpacked Linux distribution it
-uses the packaged executable without requiring build tooling. Ordinary launches
-never invoke the compiler. Re-run the installer after pulling source changes
-when you want a fresh release build.
+The installer bootstraps and builds the release executable when needed, then
+adds **Musializer** to the application menu and registers `.musi` projects with
+the desktop MIME database. It writes only below `~/.local` and needs no `sudo`.
+After installation, ordinary launches do not invoke the compiler.
 
-The launcher is installed entirely under `~/.local`, requires no `sudo`, and
-writes diagnostic output to
-`~/.local/state/musializer/launcher.log`. To remove it:
+You can now open audio or project files from the application menu/file manager,
+or run:
+
+```console
+$ musializer path/to/song.mp3
+$ musializer path/to/show.musi
+```
+
+The source checkout must remain where it was installed from. Re-run the
+installer after moving it or when you want the launcher to use a new release
+build. Diagnostics go to `~/.local/state/musializer/launcher.log`.
+
+Remove the integration with:
 
 ```console
 $ ./tools/install-linux-launcher.sh --uninstall
 ```
 
-Use `--no-refresh` to skip desktop-menu cache refresh commands in containers or
-automated tests.
+An unpacked Linux distribution can run the same installer without a compiler;
+it uses the executable included in the archive.
 
-For a repeatable legacy-scene export smoke, use any short WAV fixture and check
-the resulting streams:
+## Build from source
 
-```console
-$ ./build/musializer --scene spectrum fixture.wav --render /tmp/musializer-smoke.mp4
-$ ffprobe -v error -show_entries stream=codec_type,width,height,r_frame_rate \
-    -of compact /tmp/musializer-smoke.mp4
-```
+Musializer vendors raylib and uses [`nob.c`](nob.c), a custom build system
+written in C. You need a C compiler and the X11 development headers on Linux.
+FFmpeg is optional for preview but required for MP4 export.
 
-For an anti-aliasing visual smoke, repeat the render with `spectrum`, `ascii`,
-and `constellation`, extract a frame with `ffmpeg -ss 1 -i output.mp4 -frames:v
-1 frame.png`, and inspect it at 100% scale. These cover shader edges, font
-glyphs, and fine 3D geometry respectively. Repeat one render with
-`MUSIALIZER_RENDER_SUPERSAMPLE=0`; `ffprobe` should still report the selected
-output size and frame rate (1920x1080 at 30 fps by default).
-
-Optional offline analysis helpers for measured audio, Whisper timings, and
-cached MiMo interpretations are documented in
-[`tools/ANALYSIS_ADAPTERS.md`](tools/ANALYSIS_ADAPTERS.md) and
-[`tools/MEASURED_ANALYSIS.md`](tools/MEASURED_ANALYSIS.md). They are separate
-from the C renderer and never make network calls unless the MiMo helper is
-explicitly invoked without `--dry-run`.
-
-If the build fails because of missing header files, you may need to install the X11 dev packages.
-
-On Debian, Ubuntu, etc, do this:
+On Debian, Ubuntu, or Kubuntu:
 
 ```console
-$ sudo apt install libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev
+$ sudo apt install build-essential libx11-dev libxcursor-dev libxrandr-dev \
+    libxinerama-dev libxi-dev
+$ sudo apt install ffmpeg  # needed for video export and analysis workflows
 ```
 
-On other distro's, use the appropriate package manager.
-
-### Windows MSVC
-
-From within `vcvarsall.bat` do
+Bootstrap `nob` once, build, and run:
 
 ```console
-> cl.exe nob.c # ONLY ONCE!!!
-> nob.exe
-> build\musializer.exe
+$ cc -o nob nob.c
+$ ./nob build release
+$ ./build/musializer
 ```
 
-### Cross Compilation from Linux to Windows using MinGW-w64
+`./nob` with no arguments remains equivalent to `./nob build release`. The
+build driver rebuilds itself after its sources change; if that self-rebuild is
+interrupted, bootstrap it again with `cc -o nob nob.c`.
 
-Install [MinGW-w64](https://www.mingw-w64.org/) from your distro repository.
-
-Edit `./build/config.h` and set `MUSIALIZER_TARGET_WIN64_MINGW` instead of `MUSIALIZER_TARGET_LINUX`.
+Useful profiles and checks:
 
 ```console
-$ ./nob
-$ wine ./build/musializer.exe
+$ ./nob build debug
+$ ./nob build sanitize
+$ ./nob build hotreload
+$ ./nob test debug
+$ ./nob test release
+$ ./nob test sanitize
+$ python3 -m unittest discover -s tests/adapters -v
+$ ./nob dist
 ```
 
-## Hot Reloading
+Release, debug, and hot-reload recipes exist for Linux, macOS, OpenBSD,
+MinGW-w64, and MSVC. Full ASan+UBSan application builds are currently supported
+on Linux and macOS. See [product readiness](packaging/PRODUCT_READINESS.md) for
+the tested packaging boundary and cross-platform caveats.
+
+## Using the application
+
+Start with **Open audio**, **Open project**, or drag a file into the first-run
+workspace. Each entry under **Track projects** is an independent one-song
+document.
+
+The normal workflow is:
+
+1. Choose a scene from the left rail. Keys <kbd>1</kbd> through <kbd>7</kbd>
+   switch scenes directly.
+2. Open **Lyrics** to write or import lyric cues and adjust their start/end
+   times against the playhead.
+3. Open **Assist** for timed-lyric help, measured scene planning, semantic music
+   interpretation, or the complete pipeline. Results are staged with an impact
+   summary and require an explicit Apply action.
+4. Inspect the generated section markers and enable **Auto scenes** if they
+   should drive both preview and export.
+5. Add manual Constellation events with **+ Feel**, **+ Cue**, and **+ Custom**,
+   or import an image into ASCII Field.
+6. Open **Export**, choose resolution, frame rate, and quality, then select the
+   destination. Progress reports the exact frame count and ETA; cancellation
+   does not replace an existing video.
+7. Save with <kbd>Ctrl</kbd>+<kbd>S</kbd>, or use
+   <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for **Save As**.
+
+Canonical edits autosave after a short idle period. Unapplied lyric drafts,
+staged assistance, running jobs, active exports, and unsaved projects are
+guarded before context changes or quit, so partial work is not silently lost.
+
+Timed lyrics use the same caption layer in preview and export. Long cues wrap
+to three centered lines with a visible ellipsis. The bundled font atlas covers
+accented Latin, Greek, Cyrillic, punctuation, currency, and common symbols;
+CJK fallback, bidirectional text, and complex-script shaping are not yet
+implemented.
+
+### Assisted analysis and privacy
+
+Assistance is optional and capability-based:
+
+- **Measured section planning** is local and derives timing/structure from PCM.
+- **Timed lyrics** uses a configured local Whisper installation, then an
+  evidence-preserving headless Codex review.
+- **MiMo feelings** uses the local measured analysis plus MiMo V2.5 through
+  OpenRouter to produce semantic energy/tension/valence cues.
+- **Full assist** combines those stages while retaining separate provenance.
+
+Whisper evidence, Codex review, measured audio features, MiMo interpretation,
+and user-authored events remain distinct data lanes. MiMo/OpenRouter modes are
+the explicit authorization boundary for sending derived music information to a
+remote service; the UI asks before launch. Model output is validated, staged,
+and never mutates the project automatically.
+
+Set the optional credential in the process environment or in an ignored `.env`
+at the repository root:
+
+```dotenv
+OPENROUTER_API_KEY=your-key-here
+```
+
+The helper parses only that named value and never sources `.env` as shell code.
+It does not write the key into arguments, logs, manifests, or cache keys. Local
+children receive credential-like environment variables stripped out.
+
+Run the non-invasive product doctor to see which workflows are ready:
+
+```console
+$ python3 tools/musializer_doctor.py
+$ python3 tools/musializer_doctor.py --json \
+    --require export --require local_lyrics --require remote_mimo
+```
+
+The doctor checks discovery and writable locations only. It does not invoke
+FFmpeg/models, make a network request, or reveal credential values. Setup and
+lower-level adapter commands are documented in
+[Analysis adapters](tools/ANALYSIS_ADAPTERS.md) and
+[Measured analysis](tools/MEASURED_ANALYSIS.md).
+
+### Projects and imported images
+
+Projects embed the evaluated lyrics, semantic events, manual events, scene
+suggestions, deterministic seed, export settings, metadata, and analysis
+provenance. They do not require a mutable analysis cache to replay accepted
+semantic cues. Saves use a durable temporary sibling and atomic replacement.
+Audio below the saved project directory can be stored as a verified relative
+reference; unrelated assets retain a canonical absolute path.
+
+The v1 schema deliberately describes future composition features that this
+editor cannot yet preserve. This build opens only its lossless editor subset:
+referenced full-track audio, integer-frame-rate H.264 MP4 output, one enabled
+opaque full-track Normal scene, and no parameter cues or mappings. Other
+schema-valid documents are rejected with an explicit unsupported-feature error
+instead of being silently rewritten.
+
+Imported ASCII grids are currently per-track editor state but are not stored in
+`.musi` v1. Export works, but project save is blocked while a populated grid
+exists. Use **Clear image** to discard it explicitly; an empty ASCII scene then
+saves and reopens normally.
+
+## Rendering
+
+Preview requests 4x MSAA. High and Master exports render at 2x spatial
+resolution and downsample to the requested output; Balanced renders at native
+resolution. Set `MUSIALIZER_RENDER_SUPERSAMPLE=0` to force 1x on a GPU that
+cannot allocate the larger target.
+
+The default export is 1920x1080 at 30 fps, High quality. Balanced, High, and
+Master map to H.264 High-profile CRF 20/16/12 with `yuv420p`, BT.709 metadata,
+256 or 320 kbit/s AAC, and fast-start metadata. The UI offers 720p, 1080p,
+1440p, and 2160p at 24, 30, or 60 fps; validated CLI sizes can reach 7680x4320.
+
+The decoded raylib Wave is the canonical input for both frame analysis and
+FFmpeg audio. Musializer renders
+`ceil(decoded_sample_frames * FPS / sample_rate)` frames and pads only the final
+sub-frame audio tail to align stream and container endings within the MP4 time
+base. FFmpeg writes a unique sibling file; only a clean encoder exit publishes
+it over the selected destination.
+
+For very long mixes, export can currently use gigabytes because the complete
+decoded Wave and a float analysis copy are held in memory. GPU readback, FFmpeg
+pipe writes, and finalization also still occur on the UI thread, so a slow
+encoder can temporarily delay repaint/cancel input. These are known boundaries,
+not release-quality claims; see [product readiness](packaging/PRODUCT_READINESS.md).
+
+## CLI automation
+
+The complete UI workflow does not require a terminal, but the CLI is useful for
+repeatable renders and tests:
+
+```console
+$ ./build/musializer --help
+$ ./build/musializer --scene orbital path/to/song.mp3
+$ ./build/musializer --ascii-image path/to/image.png path/to/song.mp3
+$ ./build/musializer --scene constellation \
+    --event lyric:1.25:42:0.9 --event cue:2.0:43:1.0 path/to/song.mp3
+$ ./build/musializer path/to/song.mp3 \
+    --analysis-bridge build/analysis/song/analysis.bridge.tsv \
+    --auto-scenes --render output.mp4
+$ ./build/musializer path/to/song.wav --scene atlas \
+    --resolution 2560x1440 --fps 60 --quality master --render output.mp4
+$ ./build/musializer path/to/song.mp3 --scene atlas \
+    --quality high --save-project path/to/show.musi
+$ ./build/musializer --project path/to/show.musi --render output.mp4
+```
+
+Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
+`terrarium`, and `constellation`. Repeatable `--event type:seconds:id:value`
+arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
+file is equivalent to `--project`. Command-line renders exit after FFmpeg
+finishes, making them suitable for scripts and smoke tests.
+
+`--analysis-bridge` checks the bridge audio SHA-256 before importing lyric,
+semantic, or scene lanes. `--auto-scenes` opts into its section recommendations
+for both preview and export. Analysis artifacts and bounded logs live below
+ignored `build/analysis/`.
+
+## Development
+
+Hot reload keeps most application logic in `libplug`:
 
 ```console
 $ ./nob build hotreload
 $ ./build/musializer
 ```
 
-Enabling `MUSIALIZER_HOTRELOAD` in `./build/config.h` remains supported for
-existing local configurations, but the named profile is the recommended path.
+Rebuild while the application is running, focus its window, and press
+<kbd>h</kbd> to load the new plug. `--reload-once` with a track or scripted
+render performs one automated handoff smoke.
 
-Keep the app running. Rebuild with `./nob`. Hot reload by focusing on the window of the app and pressing <kbd>h</kbd>.
-For an automated one-cycle handoff smoke, pass `--reload-once` together with a
-track or scripted render.
+Coding agents should follow the checkout's local `AGENTS.md` when present. It
+records the project-format, rendering, privacy, UI-state, cross-platform, test,
+and packaging invariants that a local change must preserve. The durable roadmap
+and implementation log live in [EXTENSION_PLAN.md](EXTENSION_PLAN.md).
 
-The way it works is by putting the majority of the logic of the application into a `libplug` dynamic library and just reloading it when requested. The [rpath](https://en.wikipedia.org/wiki/Rpath) (aka hard-coded run-time search path) for that library is set to `.` and `./build/`. See [src_build/nob_linux.c](src_build/nob_linux.c) for more information on how everything is configured.
+Distribution recipes deliberately include an explicit allowlist of runtime
+support files and exclude `.env`, Python bytecode, analysis caches, and user
+media. Linux/OpenBSD produce `.tar.gz`, MinGW produces `.zip`, and macOS
+produces `build/Musializer.app`; not all artifacts currently have equal helper
+coverage. `./nob dist` always rebuilds first.
+
+## Original demo
+
+Music by [@nu11](https://soundcloud.com/nu11-chiptune), from the 20:38 mark of
+[nu11 WIP works 2016-2022](https://soundcloud.com/nu11-chiptune/nu11-wip-works-2016-2022):
+
+https://github.com/tsoding/musializer/assets/165283/8b9f9653-9b3d-4c04-9569-338fa19af071
+
+## License and lineage
+
+Musializer is released under the [MIT License](LICENSE). The original project
+and copyright belong to Alexey "tsoding" Kutepov and Musializer contributors;
+this fork retains that license and attribution. The upstream source remains at
+[github.com/tsoding/musializer](https://github.com/tsoding/musializer).

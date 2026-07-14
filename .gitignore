@@ -13,6 +13,10 @@ music/
 # Vim
 *.swp
 
+# Local coding-agent instructions
+/AGENTS.md
+/CLAUDE.md
+
 # Python analysis helpers
 __pycache__/
 *.py[cod]
