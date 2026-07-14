@@ -9,12 +9,29 @@ enum {
     // silently truncated when its timed word sequence is assembled.
     CADENCE_MAX_WORDS = (LYRICS_TEXT_CAPACITY + 1U)/2U,
     CADENCE_AMBIENT_PARTICLES = 96,
+    CADENCE_MAX_LAYOUT_ROWS = 24,
+    CADENCE_LAYOUT_ATTEMPTS = 6,
+    CADENCE_PARTICLES_PER_GLYPH = 20,
+    // Global per-frame particle ceiling so a pathological cue (hundreds of
+    // words dispersing at once) degrades to plain text instead of unbounded
+    // draw submissions.
+    CADENCE_PARTICLE_BUDGET = 1400,
+    CADENCE_INK_PROBES = 8,
+    CADENCE_INK_ALPHA_THRESHOLD = 96,
 };
 
 typedef struct Cadence_Word {
     const char *text;
     size_t bytes;
     size_t glyphs;
+    // Estimated singing window, normalized to [0,1] across the cue span.
+    float window_start;
+    float window_end;
+    // Layout slot assigned for the current frame's boundary.
+    float x;
+    float y;
+    float width;
+    size_t row;
 } Cadence_Word;
 
 typedef struct Cadence_State {
@@ -26,6 +43,12 @@ static float cadence_clamp01(float value)
     if (!isfinite(value) || value <= 0.0f) return 0.0f;
     if (value >= 1.0f) return 1.0f;
     return value;
+}
+
+static float cadence_smooth(float value)
+{
+    value = cadence_clamp01(value);
+    return value*value*(3.0f - 2.0f*value);
 }
 
 static uint64_t cadence_mix(uint64_t value)
@@ -78,6 +101,138 @@ static size_t cadence_split_words(const char *text, Cadence_Word *words,
     return count;
 }
 
+// Estimated word timing: split the line's span proportionally by glyph
+// count (+1 for the breath between words). This is a derived estimate over
+// line-level cues, never measured word timestamps.
+static void cadence_assign_windows(Cadence_Word *words, size_t count)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < count; ++i) total += words[i].glyphs + 1U;
+    if (total == 0) total = 1;
+    size_t before = 0;
+    for (size_t i = 0; i < count; ++i) {
+        size_t weight = words[i].glyphs + 1U;
+        words[i].window_start = (float)before/(float)total;
+        words[i].window_end = (float)(before + weight)/(float)total;
+        before += weight;
+    }
+}
+
+static void cadence_word_text(const Cadence_Word *word, char *text, size_t capacity)
+{
+    size_t bytes = word->bytes < capacity - 1U ? word->bytes : capacity - 1U;
+    memcpy(text, word->text, bytes);
+    text[bytes] = '\0';
+}
+
+// Wrap the whole line into centered rows so every word owns a stable slot
+// for the duration of the cue; shrink the type until the block fits.
+static float cadence_layout(Cadence_Word *words, size_t count, Font font,
+                            Rectangle boundary, float scale,
+                            float spacing_scale, float *spacing_out)
+{
+    float font_size = fmaxf(10.0f, boundary.height*0.20f*scale);
+    float max_width = boundary.width*0.84f;
+    float max_height = boundary.height*0.76f;
+    float spacing = font_size*0.03f*spacing_scale;
+    float line_advance = font_size*1.16f;
+    size_t rows = 1;
+    for (int attempt = 0; attempt < CADENCE_LAYOUT_ATTEMPTS; ++attempt) {
+        spacing = font_size*0.03f*spacing_scale;
+        line_advance = font_size*1.16f;
+        float space_width = font_size*0.34f;
+        float cursor = 0.0f;
+        rows = 1;
+        bool fits = true;
+        for (size_t i = 0; i < count; ++i) {
+            char text[LYRICS_TEXT_CAPACITY];
+            cadence_word_text(&words[i], text, sizeof(text));
+            words[i].width = MeasureTextEx(font, text, font_size, spacing).x;
+            if (words[i].width > max_width) fits = false;
+            if (cursor > 0.0f && cursor + space_width + words[i].width > max_width) {
+                rows += 1;
+                cursor = 0.0f;
+            }
+            words[i].x = cursor > 0.0f ? cursor + space_width : 0.0f;
+            words[i].row = rows - 1U;
+            cursor = words[i].x + words[i].width;
+        }
+        if (fits && rows <= CADENCE_MAX_LAYOUT_ROWS &&
+            (float)rows*line_advance <= max_height) break;
+        font_size *= 0.82f;
+    }
+    float row_extent[CADENCE_MAX_LAYOUT_ROWS] = {0};
+    for (size_t i = 0; i < count; ++i) {
+        if (words[i].row >= CADENCE_MAX_LAYOUT_ROWS) {
+            words[i].row = CADENCE_MAX_LAYOUT_ROWS - 1U;
+        }
+        float extent = words[i].x + words[i].width;
+        if (extent > row_extent[words[i].row]) row_extent[words[i].row] = extent;
+    }
+    size_t used_rows = rows < CADENCE_MAX_LAYOUT_ROWS ? rows : CADENCE_MAX_LAYOUT_ROWS;
+    float block_top = boundary.y +
+                      (boundary.height - (float)used_rows*line_advance)*0.5f;
+    for (size_t i = 0; i < count; ++i) {
+        words[i].x += boundary.x + (boundary.width - row_extent[words[i].row])*0.5f;
+        words[i].y = block_top + (float)words[i].row*line_advance;
+    }
+    *spacing_out = spacing;
+    return font_size;
+}
+
+static float cadence_glyph_alpha_at(Image image, int x, int y)
+{
+    const unsigned char *data = image.data;
+    size_t index = (size_t)y*(size_t)image.width + (size_t)x;
+    switch (image.format) {
+    case PIXELFORMAT_UNCOMPRESSED_GRAYSCALE: return (float)data[index];
+    case PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA: return (float)data[index*2U + 1U];
+    case PIXELFORMAT_UNCOMPRESSED_R8G8B8A8: return (float)data[index*4U + 3U];
+    default: return 0.0f;
+    }
+}
+
+// Deterministically sample points inside the glyph's inked pixels (fonts
+// loaded from TTF retain CPU-side glyph bitmaps) so particles condense onto
+// the letterform itself, not a bounding box. Falls back to the glyph cell
+// center when a bitmap is unavailable.
+static size_t cadence_glyph_ink(Font font, int codepoint, uint64_t seed,
+                                uint64_t salt, size_t want, Vector2 *out,
+                                size_t capacity)
+{
+    if (want > capacity) want = capacity;
+    int glyph = font.glyphs != NULL ? GetGlyphIndex(font, codepoint) : 0;
+    GlyphInfo info = font.glyphs != NULL ? font.glyphs[glyph] : (GlyphInfo){0};
+    Image image = info.image;
+    bool sampled = image.data != NULL && image.width > 0 && image.height > 0 &&
+                   (image.format == PIXELFORMAT_UNCOMPRESSED_GRAYSCALE ||
+                    image.format == PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA ||
+                    image.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    for (size_t k = 0; k < want; ++k) {
+        Vector2 point = {
+            (float)info.offsetX + (float)image.width*0.5f,
+            (float)info.offsetY + (float)image.height*0.5f,
+        };
+        if (sampled) {
+            for (size_t probe = 0; probe < CADENCE_INK_PROBES; ++probe) {
+                uint64_t probe_salt = salt + k*(CADENCE_INK_PROBES*2U) + probe*2U;
+                int x = (int)(cadence_unit(seed, probe_salt)*
+                              (float)(image.width - 1) + 0.5f);
+                int y = (int)(cadence_unit(seed, probe_salt + 1U)*
+                              (float)(image.height - 1) + 0.5f);
+                if (cadence_glyph_alpha_at(image, x, y) >
+                    (float)CADENCE_INK_ALPHA_THRESHOLD) {
+                    point = (Vector2){(float)info.offsetX + (float)x + 0.5f,
+                                      (float)info.offsetY + (float)y + 0.5f};
+                    break;
+                }
+            }
+        }
+        out[k] = point;
+    }
+    return want;
+}
+
 static void cadence_init(void *state, uint64_t seed)
 {
     Cadence_State *cadence = state;
@@ -106,6 +261,138 @@ static void cadence_draw_ambient(const Cadence_State *cadence,
         DrawCircleV(point, size, ColorAlpha(color, 0.10f + frame->audio.rms*0.16f));
     }
     EndBlendMode();
+}
+
+// Word focus envelope: 0 = loose particle cloud hovering at its slot,
+// 1 = settled legible type. Words gather slightly as their window
+// approaches, snap into formation while sung, and hold afterward.
+static float cadence_word_focus(const Cadence_Word *word, float cue_position,
+                                float focus_speed, bool onset, bool *active_out)
+{
+    *active_out = false;
+    if (cue_position >= word->window_end) return 1.0f;
+    if (cue_position < word->window_start) {
+        float lead = word->window_start - cue_position;
+        return 0.14f*cadence_clamp01(1.0f - lead/0.30f);
+    }
+    *active_out = true;
+    float span = word->window_end - word->window_start;
+    if (span < 0.0001f) span = 0.0001f;
+    float progress = (cue_position - word->window_start)/span;
+    float focus = cadence_clamp01(progress*(2.4f + focus_speed*1.8f));
+    if (onset) focus = fmaxf(focus, 0.93f);
+    return focus;
+}
+
+static void cadence_draw_word(const Cadence_State *cadence,
+                              const Scene_Frame *frame, Font font,
+                              const Cadence_Word *word, size_t word_index,
+                              float font_size, float spacing,
+                              Rectangle boundary, Color ink, float focus,
+                              bool active, float swarm, float beat_response,
+                              float glow, float pixel_scale,
+                              size_t *particle_budget)
+{
+    char text[LYRICS_TEXT_CAPACITY];
+    cadence_word_text(word, text, sizeof(text));
+    size_t bytes = strlen(text);
+
+    float ink_alpha = active ? 0.55f + focus*0.45f :
+                      focus >= 1.0f ? 0.62f :
+                      cadence_smooth((focus - 0.55f)/0.45f)*0.5f;
+    // The beat coil: the swarm tightens toward the letterform approaching
+    // the beat and relaxes just after the phase wraps.
+    float coil = 1.0f - beat_response*0.15f*sinf(frame->audio.beat_phase*PI);
+    float scatter_reach = fminf(boundary.width, boundary.height)*swarm*coil;
+    Vector2 word_center = {word->x + word->width*0.5f, word->y + font_size*0.5f};
+    float particle_alpha = (1.0f - cadence_smooth((focus - 0.60f)/0.35f))*0.88f;
+    bool wants_particles = focus < 0.985f && particle_alpha > 0.01f;
+
+    float cursor = word->x;
+    size_t offset = 0;
+    size_t glyph_index = 0;
+    while (offset < bytes) {
+        int codepoint_bytes = 0;
+        int codepoint = GetCodepointNext(text + offset, &codepoint_bytes);
+        if (codepoint_bytes <= 0 || (size_t)codepoint_bytes > bytes - offset) {
+            codepoint_bytes = 1;
+            codepoint = '?';
+        }
+        int encoded_size = 0;
+        const char *encoded = CodepointToUTF8(codepoint, &encoded_size);
+        Vector2 glyph_measure = MeasureTextEx(font, encoded, font_size, 0.0f);
+        Vector2 pen = {cursor, word->y};
+        float band = frame->audio.bands_count > 0 && frame->audio.bands != NULL ?
+            frame->audio.bands[(word_index + glyph_index)%frame->audio.bands_count] :
+            0.0f;
+        uint64_t glyph_salt = (frame->lyric->id + 1U)*UINT64_C(0x9e3779b97f4a7c15) +
+                              word_index*UINT64_C(0x2545f4914f6cdd1d) + glyph_index;
+
+        if (wants_particles && *particle_budget > 0) {
+            size_t want = word->glyphs > 0 ?
+                320U/word->glyphs : CADENCE_PARTICLES_PER_GLYPH;
+            if (want < 6U) want = 6U;
+            if (want > CADENCE_PARTICLES_PER_GLYPH) want = CADENCE_PARTICLES_PER_GLYPH;
+            if (want > *particle_budget) want = *particle_budget;
+            Vector2 ink_points[CADENCE_PARTICLES_PER_GLYPH];
+            want = cadence_glyph_ink(font, codepoint, cadence->seed,
+                                     glyph_salt*64U, want, ink_points,
+                                     CADENCE_PARTICLES_PER_GLYPH);
+            *particle_budget -= want;
+            float glyph_scale = font_size/
+                                (float)(font.baseSize > 0 ? font.baseSize : 1);
+            BeginBlendMode(BLEND_ADDITIVE);
+            for (size_t k = 0; k < want; ++k) {
+                uint64_t salt = glyph_salt*64U + 40U + k;
+                Vector2 target = {
+                    pen.x + ink_points[k].x*glyph_scale,
+                    pen.y + ink_points[k].y*glyph_scale,
+                };
+                float angle = cadence_unit(cadence->seed, salt)*2.0f*PI +
+                              frame->audio.beat_phase*0.4f;
+                float distance = (0.10f + cadence_unit(cadence->seed, salt + 1U)*
+                                  0.24f)*scatter_reach;
+                Vector2 home = {
+                    word_center.x + cosf(angle)*distance,
+                    word_center.y + sinf(angle)*distance,
+                };
+                // Stagger arrivals so the word condenses organically
+                // instead of translating as one rigid clump.
+                float arrive = cadence_smooth(
+                    focus*1.35f - cadence_unit(cadence->seed, salt + 2U)*0.35f);
+                Vector2 position = {
+                    home.x + (target.x - home.x)*arrive,
+                    home.y + (target.y - home.y)*arrive,
+                };
+                float jitter = (1.0f - arrive)*(1.5f + band*7.0f)*pixel_scale;
+                position.x += sinf((float)frame->time_seconds*2.7f +
+                                   (float)(k + glyph_index))*jitter;
+                position.y += cosf((float)frame->time_seconds*2.1f +
+                                   (float)(k + glyph_index)*1.3f)*jitter;
+                float size = (1.1f + band*2.0f)*(1.35f - 0.55f*arrive)*
+                             pixel_scale*fmaxf(glow, 0.25f);
+                DrawCircleV(position, size,
+                            ColorAlpha(ink, particle_alpha*
+                                            (0.35f + 0.65f*arrive)));
+            }
+            EndBlendMode();
+        }
+
+        if (ink_alpha > 0.01f) {
+            if (active && glow > 0.01f) {
+                BeginBlendMode(BLEND_ADDITIVE);
+                DrawTextCodepoint(font, codepoint,
+                                  (Vector2){pen.x - 1.5f*pixel_scale, pen.y},
+                                  font_size, ColorAlpha(ink, 0.16f*glow*focus));
+                EndBlendMode();
+            }
+            DrawTextCodepoint(font, codepoint, pen, font_size,
+                              ColorAlpha(ink, ink_alpha));
+        }
+        cursor += glyph_measure.x + spacing;
+        offset += (size_t)codepoint_bytes;
+        glyph_index += 1;
+    }
 }
 
 static void cadence_draw(const void *state, const Scene_Frame *frame,
@@ -149,107 +436,30 @@ static void cadence_draw(const void *state, const Scene_Frame *frame,
     size_t word_count = cadence_split_words(
         frame->lyric->text, words, CADENCE_MAX_WORDS);
     if (word_count == 0) return;
-    size_t total_weight = 0;
-    for (size_t i = 0; i < word_count; ++i) total_weight += words[i].glyphs + 1U;
-    double duration = frame->lyric->end_seconds - frame->lyric->start_seconds;
-    double cue_position = duration > 0.0 ?
-        (frame->time_seconds - frame->lyric->start_seconds)/duration : 0.0;
-    cue_position = fmin(1.0, fmax(0.0, cue_position));
-    double weighted_position = cue_position*(double)total_weight;
-    size_t word_index = word_count - 1U;
-    size_t weight_before = 0;
-    for (size_t i = 0; i < word_count; ++i) {
-        size_t weight = words[i].glyphs + 1U;
-        if (weighted_position < (double)(weight_before + weight) ||
-            i + 1U == word_count) {
-            word_index = i;
-            break;
-        }
-        weight_before += weight;
-    }
-    Cadence_Word word = words[word_index];
-    char text[LYRICS_TEXT_CAPACITY];
-    size_t bytes = word.bytes < sizeof(text) - 1U ? word.bytes : sizeof(text) - 1U;
-    memcpy(text, word.text, bytes);
-    text[bytes] = '\0';
+    cadence_assign_windows(words, word_count);
 
-    double word_span = (double)(word.glyphs + 1U);
-    float word_progress = cadence_clamp01(
-        (float)((weighted_position - (double)weight_before)/word_span));
-    float attack = cadence_clamp01(word_progress*(3.2f + focus_speed*2.0f));
-    float release = cadence_clamp01((1.0f - word_progress)*(3.8f + focus_speed));
-    float focus = attack*release;
-    if (frame->audio.onset) focus = fmaxf(focus, 0.92f);
-    float anticipation = 1.0f - beat_response*0.12f*
-                         sinf(frame->audio.beat_phase*PI);
-    focus = cadence_clamp01(focus*anticipation);
+    double duration = frame->lyric->end_seconds - frame->lyric->start_seconds;
+    float cue_position = duration > 0.0 ?
+        (float)fmin(1.0, fmax(0.0,
+            (frame->time_seconds - frame->lyric->start_seconds)/duration)) : 1.0f;
+    // The whole line loosens back into particles over the cue's final beats.
+    float hold = cadence_smooth((1.0f - cue_position)*9.0f);
 
     Font font = renderer->font.texture.id != 0 ? renderer->font : GetFontDefault();
-    float font_size = boundary.height*0.27f*scale;
-    float spacing = font_size*0.035f*spacing_scale;
-    Vector2 measurement = MeasureTextEx(font, text, font_size, spacing);
-    float maximum_width = boundary.width*0.78f;
-    if (measurement.x > maximum_width && measurement.x > 0.0f) {
-        font_size *= maximum_width/measurement.x;
-        spacing = font_size*0.035f*spacing_scale;
-        measurement = MeasureTextEx(font, text, font_size, spacing);
-    }
-    float origin_x = boundary.x + (boundary.width - measurement.x)*0.5f;
-    float baseline_y = boundary.y + (boundary.height - font_size)*0.49f;
+    float spacing = 0.0f;
+    float font_size = cadence_layout(words, word_count, font, boundary, scale,
+                                     spacing_scale, &spacing);
 
-    float cursor = origin_x;
-    size_t offset = 0;
-    size_t glyph_index = 0;
-    while (offset < bytes) {
-        int codepoint_bytes = 0;
-        int codepoint = GetCodepointNext(text + offset, &codepoint_bytes);
-        if (codepoint_bytes <= 0 || (size_t)codepoint_bytes > bytes - offset) {
-            codepoint_bytes = 1;
-            codepoint = '?';
-        }
-        int encoded_size = 0;
-        const char *encoded = CodepointToUTF8(codepoint, &encoded_size);
-        Vector2 glyph_measure = MeasureTextEx(font, encoded, font_size, 0.0f);
-        Vector2 target = {cursor, baseline_y};
-        uint64_t salt = frame->lyric->id*UINT64_C(0x9e3779b97f4a7c15) + glyph_index;
-        float angle = cadence_unit(cadence->seed, salt)*2.0f*PI +
-                      frame->audio.beat_phase*0.35f;
-        float distance = (0.14f + cadence_unit(cadence->seed, salt + 1U)*0.25f)*
-                         fminf(boundary.width, boundary.height)*swarm;
-        Vector2 scattered = {
-            boundary.x + boundary.width*0.5f + cosf(angle)*distance,
-            boundary.y + boundary.height*0.5f + sinf(angle)*distance,
-        };
-        Vector2 position = {
-            scattered.x + (target.x - scattered.x)*focus,
-            scattered.y + (target.y - scattered.y)*focus,
-        };
-        float band = frame->audio.bands_count > 0 && frame->audio.bands != NULL ?
-            frame->audio.bands[glyph_index%frame->audio.bands_count] : 0.0f;
-        float jitter = (1.0f - focus)*(2.0f + band*8.0f)*pixel_scale*swarm;
-        position.x += sinf((float)frame->time_seconds*2.7f + (float)glyph_index)*jitter;
-        position.y += cosf((float)frame->time_seconds*2.1f + (float)glyph_index)*jitter;
-
-        BeginBlendMode(BLEND_ADDITIVE);
-        for (int particle = 1; particle <= 3; ++particle) {
-            float t = (float)particle/4.0f;
-            Vector2 point = {
-                scattered.x + (position.x - scattered.x)*t,
-                scattered.y + (position.y - scattered.y)*t,
-            };
-            DrawCircleV(point, (0.8f + band*1.8f)*pixel_scale*glow,
-                        ColorAlpha(ink, (1.0f - focus)*0.18f));
-        }
-        DrawTextCodepoint(font, codepoint,
-                          (Vector2){position.x - 1.5f*pixel_scale,
-                                    position.y},
-                          font_size, ColorAlpha(ink, 0.16f*glow));
-        EndBlendMode();
-        DrawTextCodepoint(font, codepoint, position, font_size,
-                          ColorAlpha(ink, 0.38f + focus*0.62f));
-        cursor += glyph_measure.x + spacing;
-        offset += (size_t)codepoint_bytes;
-        glyph_index += 1;
+    size_t particle_budget = CADENCE_PARTICLE_BUDGET;
+    for (size_t i = 0; i < word_count; ++i) {
+        bool active = false;
+        float focus = cadence_word_focus(&words[i], cue_position, focus_speed,
+                                         frame->audio.onset, &active);
+        focus *= hold;
+        cadence_draw_word(cadence, frame, font, &words[i], i, font_size,
+                          spacing, boundary, ink, focus, active && hold > 0.5f,
+                          swarm, beat_response, glow, pixel_scale,
+                          &particle_budget);
     }
 }
 
