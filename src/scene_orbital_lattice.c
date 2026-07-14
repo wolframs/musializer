@@ -105,9 +105,13 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_NODES);
     float link_scale = scene_settings_get(
         renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_LINKS);
+    float tilt = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_TILT);
+    float hue_shift = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_HUE);
     float seed_phase = orbital_hash_unit(lattice->seed, 0, 0)*2.0f*PI;
-    float hue_base = fmodf((float)lattice->hue_degrees +
-                           lattice->semantic_valence*55.0f + 360.0f, 360.0f);
+    float hue_base = fmodf((float)lattice->hue_degrees + hue_shift +
+                           lattice->semantic_valence*55.0f + 720.0f, 360.0f);
 
     Color background = ColorFromHSV(hue_base,
                                     0.58f + lattice->semantic_tension*0.16f,
@@ -147,12 +151,17 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     rlSetFramebufferWidth(viewport_width);
     rlSetFramebufferHeight(viewport_height);
 
+    // Tilt swings the camera off the tunnel axis so the ring stack reads as
+    // receding 3D geometry; zero restores the original head-on framing.
     float camera_orbit = (float)lattice->camera_phase;
-    float camera_radius = 0.42f + mids*0.16f;
+    float camera_radius = 0.42f + mids*0.16f + tilt*(2.5f + mids*0.5f);
+    float camera_lift = sinf(camera_orbit + seed_phase*0.37f)*
+                        (0.24f + treble*0.09f) +
+                        tilt*(1.15f + sinf(camera_orbit*0.7f)*0.45f);
     Camera3D camera = {
         .position = {
             cosf(camera_orbit)*camera_radius,
-            sinf(camera_orbit + seed_phase*0.37f)*(0.24f + treble*0.09f),
+            camera_lift,
             10.9f - bass*0.28f - pulse*0.12f,
         },
         .target = { 0.0f, 0.0f, -8.5f*depth_scale },
@@ -213,8 +222,12 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
 
             float fog = (1.0f - depth_t*0.78f)*ring_motion.visibility;
             float hue = fmodf(hue_base + node_t*105.0f + (float)ring*5.0f, 360.0f);
+            // Directional key light from the upper left so cubes shade around
+            // the ring instead of rendering as one flat tone.
+            float shade = 0.74f + 0.26f*cosf(angle - 2.35f);
             Color color = ColorFromHSV(hue, 0.64f + amplitude*0.28f,
-                                       orbital_clamp01(fog*(0.56f + amplitude*0.44f)));
+                                       orbital_clamp01(fog*shade*
+                                                       (0.60f + amplitude*0.44f)));
             color = ColorAlpha(color, ring_motion.visibility);
             float size = (0.10f + amplitude*0.23f + energy*0.06f + pulse*0.04f)*
                          node_scale;
@@ -244,11 +257,11 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
 
             if (node == 0) first = position;
             if (node > 0 && link_scale > 0.001f) {
-                Color edge = ColorAlpha(color, fog*(0.10f + energy*0.13f));
-                edge = ColorAlpha(edge, fminf(1.0f, link_scale));
+                Color edge = ColorAlpha(color, fog*(0.22f + energy*0.20f)*
+                                               fminf(1.0f, link_scale));
                 orbital_draw_swaying_link(
                     previous, position,
-                    (0.006f + energy*0.006f)*link_scale,
+                    (0.0085f + energy*0.007f)*link_scale,
                     (0.025f + flux*0.11f)*sinf(angle + breathe_phase),
                     angle + seed_phase, edge);
             }
@@ -256,11 +269,11 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
         }
         if (link_scale > 0.001f) {
             orbital_draw_swaying_link(
-                previous, first, (0.006f + energy*0.006f)*link_scale,
+                previous, first, (0.0085f + energy*0.007f)*link_scale,
                 (0.025f + flux*0.11f)*sinf(twist + breathe_phase), twist,
                 ColorAlpha(RAYWHITE,
                            fminf(1.0f, link_scale)*
-                           (1.0f - depth_t)*ring_motion.visibility*0.13f));
+                           (1.0f - depth_t)*ring_motion.visibility*0.24f));
         }
     }
     EndMode3D();

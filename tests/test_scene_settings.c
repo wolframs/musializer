@@ -9,12 +9,13 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
     Scene_Settings settings;
     scene_settings_init(&settings);
     EXPECT_TRUE(scene_settings_valid(&settings));
-    EXPECT_EQ_SIZE(scene_settings_count(0), 7);
-    EXPECT_EQ_SIZE(scene_settings_count(1), 5);
-    EXPECT_EQ_SIZE(scene_settings_count(2), 5);
+    EXPECT_EQ_SIZE(scene_settings_count(0), 8);
+    EXPECT_EQ_SIZE(scene_settings_count(1), 8);
+    EXPECT_EQ_SIZE(scene_settings_count(2), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(3), 6);
     EXPECT_EQ_SIZE(scene_settings_count(4), 10);
-    EXPECT_EQ_SIZE(scene_settings_count(5), 7);
-    EXPECT_EQ_SIZE(scene_settings_count(6), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(5), 8);
+    EXPECT_EQ_SIZE(scene_settings_count(6), 8);
     EXPECT_EQ_SIZE(scene_settings_count(7), 7);
     EXPECT_EQ_SIZE(scene_settings_count(8), 7);
     EXPECT_EQ_SIZE(scene_settings_count(99), 0);
@@ -67,7 +68,7 @@ TEST(scene_settings_snapshots_are_scene_specific_and_atomic)
     Scene_Settings_Snapshot snapshot;
     REQUIRE_TRUE(scene_settings_capture(&settings, 1, &snapshot));
     EXPECT_TRUE(scene_settings_snapshot_valid(1, &snapshot));
-    EXPECT_EQ_SIZE(snapshot.count, 5);
+    EXPECT_EQ_SIZE(snapshot.count, 8);
 
     REQUIRE_TRUE(scene_settings_set(&settings, 1, PULSE_SETTING_RINGS, 12.0f));
     REQUIRE_TRUE(scene_settings_apply_snapshot(&settings, 1, &snapshot));
@@ -95,6 +96,36 @@ TEST(scene_settings_legacy_atlas_snapshots_default_new_controls)
     EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_DETAIL), 1.0f, 0.0f);
     EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_HUE_MOTION),
                 0.0f, 0.0f);
+}
+
+TEST(scene_settings_prior_generation_snapshots_default_new_controls)
+{
+    // Snapshot counts saved before the tunability expansion: spectrum,
+    // terrarium, and constellation at 7, pulse and orbital at 5, ascii at 4.
+    const struct { size_t scene; size_t count; } legacy_counts[] = {
+        {0, 7}, {1, 5}, {2, 5}, {3, 4}, {5, 7}, {6, 7},
+    };
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    for (size_t at = 0; at < sizeof(legacy_counts)/sizeof(legacy_counts[0]); ++at) {
+        size_t scene = legacy_counts[at].scene;
+        size_t count = legacy_counts[at].count;
+        Scene_Settings_Snapshot legacy = { .captured = true, .count = count };
+        for (size_t index = 0; index < count; ++index) {
+            legacy.values[index] =
+                scene_settings_descriptor(scene, index)->default_value;
+        }
+        EXPECT_TRUE(scene_settings_snapshot_valid(scene, &legacy));
+        REQUIRE_TRUE(scene_settings_apply_snapshot(&settings, scene, &legacy));
+        const Scene_Setting_Descriptor *added =
+            scene_settings_descriptor(scene, count);
+        REQUIRE_TRUE(added != NULL);
+        EXPECT_NEAR(scene_settings_get(&settings, scene, count),
+                    added->default_value, 0.000001f);
+        Scene_Settings_Snapshot wrong = legacy;
+        wrong.count = count - 1U;
+        EXPECT_FALSE(scene_settings_snapshot_valid(scene, &wrong));
+    }
 }
 
 TEST(scene_settings_legacy_three_control_snapshots_default_new_controls)
@@ -169,7 +200,7 @@ TEST(scene_settings_constant_mapping_round_trip_is_atomic)
     size_t count = 999;
     REQUIRE_TRUE(scene_settings_export_mappings(
         &source, mappings, MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE, &count));
-    EXPECT_EQ_SIZE(count, 59);
+    EXPECT_EQ_SIZE(count, 69);
     EXPECT_TRUE(scene_settings_mappings_supported(mappings, count));
     REQUIRE_TRUE(scene_settings_import_mappings(&decoded, mappings, count));
     EXPECT_NEAR(scene_settings_get(&decoded, 2, 0), 0.42f, 0.000001f);

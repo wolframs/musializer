@@ -147,6 +147,8 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_HUE_SWING);
     size_t density = (size_t)lroundf(scene_settings_get(
         renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_DENSITY));
+    float web = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_WEB);
     if (density < 1U) density = 1U;
     if (density > 3U) density = 3U;
     size_t node_count = CONSTELLATION_NODE_COUNT*density/3U;
@@ -159,6 +161,21 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
     Color background = ColorFromHSV(base_hue, 0.72f,
                                     0.035f + constellation->motion.energy*0.035f);
     DrawRectangleRec(boundary, background);
+    // A soft off-center nebula gives the star field a deep sky to sit in
+    // instead of flat black.
+    Vector2 nebula_center = {
+        boundary.x + boundary.width*
+            (0.36f + constellation_unit(constellation->seed, 11)*0.28f),
+        boundary.y + boundary.height*
+            (0.34f + constellation_unit(constellation->seed, 12)*0.30f),
+    };
+    float nebula_radius = fmaxf(boundary.width, boundary.height)*0.62f;
+    DrawCircleGradient((int)nebula_center.x, (int)nebula_center.y, nebula_radius,
+                       ColorAlpha(ColorFromHSV(fmodf(base_hue + 24.0f, 360.0f),
+                                               0.66f, 0.16f +
+                                               constellation->motion.energy*0.10f),
+                                  0.55f),
+                       BLANK);
 
     int saved_width = rlGetFramebufferWidth();
     int saved_height = rlGetFramebufferHeight();
@@ -228,7 +245,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         positions[i].z *= field_scale;
     }
 
-    for (size_t i = 0; i < node_count; ++i) {
+    for (size_t i = 0; i < node_count && web > 0.001f; ++i) {
         size_t long_step = node_count > 36U ? 13U : 7U;
         size_t neighbors[2] = { (i + 1)%node_count,
                                 (i + long_step)%node_count };
@@ -237,11 +254,13 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
             float active = fmaxf(strengths[i], strengths[other]);
             Color line = ColorFromHSV(fmodf(base_hue + (float)i*1.7f, 360.0f),
                                       0.48f + active*0.35f,
-                                      0.16f + constellation->motion.energy*0.13f +
-                                      active*0.53f);
+                                      fminf(1.0f, (0.24f +
+                                      constellation->motion.energy*0.18f +
+                                      active*0.50f)*web));
             scene_draw_tube(positions[i], positions[other],
                             0.006f + active*0.012f, 5,
-                            ColorAlpha(line, 0.32f + active*0.58f));
+                            ColorAlpha(line, fminf(1.0f,
+                                       (0.40f + active*0.55f)*web)));
         }
     }
 
@@ -253,12 +272,18 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         float radius = (0.045f + band*0.075f + strengths[i]*0.16f
                      + constellation->motion.onset_pulse*0.018f)*glow_scale;
         DrawSphere(positions[i], radius, color);
-        if (strengths[i] > 0.12f && glow_scale > 0.001f) {
-            DrawSphereWires(positions[i], radius*(1.5f + strengths[i]), 5, 8,
-                            ColorAlpha(RAYWHITE, strengths[i]*0.6f));
-        }
     }
+    // Stars glow as camera-facing soft sprites rather than wireframe shells:
+    // a wide faint halo, and thin cross-flare streaks on the strongest nodes.
+    Texture2D glow_texture = { rlGetTextureIdDefault(), 1, 1, 1,
+                               PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    Rectangle glow_source = { 0.0f, 0.0f, 1.0f, 1.0f };
+    SetShaderValue(renderer->circle_shader, renderer->circle_radius_location,
+                   (float[1]){ 0.06f }, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(renderer->circle_shader, renderer->circle_power_location,
+                   (float[1]){ 2.6f }, SHADER_UNIFORM_FLOAT);
     BeginBlendMode(BLEND_ADDITIVE);
+    BeginShaderMode(renderer->circle_shader);
     for (size_t i = 0; i < node_count; ++i) {
         float band = constellation_band(frame, i);
         float flare = band*0.35f + strengths[i]*0.85f +
@@ -266,12 +291,24 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         if (flare < 0.08f || glow_scale <= 0.001f) continue;
         Color glow = constellation_event_color(
             types[i], fmodf(base_hue + (float)i*2.1f, 360.0f), 0.9f);
-        float base_radius = (0.08f + band*0.10f + strengths[i]*0.22f)*glow_scale;
-        DrawSphere(positions[i], base_radius*1.45f,
-                   ColorAlpha(glow, fminf(0.22f, flare*0.16f)));
-        DrawSphereWires(positions[i], base_radius*(2.0f + flare), 6, 8,
-                        ColorAlpha(glow, fminf(0.48f, flare*0.34f)));
+        float halo = (0.30f + band*0.34f + strengths[i]*0.75f)*glow_scale;
+        DrawBillboardRec(camera, glow_texture, glow_source, positions[i],
+                         (Vector2){halo, halo},
+                         ColorAlpha(glow, fminf(0.60f, 0.22f + flare*0.40f)));
+        if (flare > 0.45f) {
+            Vector2 streak = {halo*(2.4f + flare), halo*0.30f};
+            Color streak_color = ColorAlpha(glow, fminf(0.40f, flare*0.30f));
+            DrawBillboardPro(camera, glow_texture, glow_source, positions[i],
+                             (Vector3){0.0f, 1.0f, 0.0f}, streak,
+                             (Vector2){streak.x*0.5f, streak.y*0.5f},
+                             0.0f, streak_color);
+            DrawBillboardPro(camera, glow_texture, glow_source, positions[i],
+                             (Vector3){0.0f, 1.0f, 0.0f}, streak,
+                             (Vector2){streak.x*0.5f, streak.y*0.5f},
+                             90.0f, streak_color);
+        }
     }
+    EndShaderMode();
     EndBlendMode();
     EndMode3D();
 

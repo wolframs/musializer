@@ -18,6 +18,7 @@ static const Scene_Setting_Descriptor spectrum_settings[] = {
     SETTING("settings.spectrum.hue_swing", "Semantic hue swing", 0.00f, 120.00f, 55.00f, 0),
     SETTING("settings.spectrum.core_glow", "Core glow size", 0.00f, 3.00f, 1.00f, 2),
     SETTING("settings.spectrum.bar_taper", "Bar taper", 0.30f, 1.50f, 0.50f, 2),
+    SETTING("settings.spectrum.reflection", "Floor reflection", 0.00f, 1.00f, 0.30f, 2),
 };
 
 static const Scene_Setting_Descriptor pulse_settings[] = {
@@ -26,6 +27,9 @@ static const Scene_Setting_Descriptor pulse_settings[] = {
     SETTING("settings.pulse.motion", "Rotation speed", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.pulse.arc", "Arc length", 0.50f, 1.50f, 1.00f, 2),
     SETTING("settings.pulse.weight", "Line weight", 0.30f, 2.50f, 1.00f, 2),
+    SETTING("settings.pulse.petals", "Petal fold (0 = auto)", 0.00f, 12.00f, 0.00f, 0),
+    SETTING("settings.pulse.hue", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.pulse.glow", "Center bloom", 0.00f, 2.00f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor orbital_settings[] = {
@@ -34,6 +38,8 @@ static const Scene_Setting_Descriptor orbital_settings[] = {
     SETTING("settings.orbital.depth", "Depth spacing", 0.55f, 1.55f, 1.00f, 2),
     SETTING("settings.orbital.nodes", "Node size", 0.35f, 2.20f, 1.00f, 2),
     SETTING("settings.orbital.links", "Link weight", 0.00f, 2.20f, 1.00f, 2),
+    SETTING("settings.orbital.tilt", "Camera tilt", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.orbital.hue", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
 };
 
 static const Scene_Setting_Descriptor ascii_settings[] = {
@@ -41,6 +47,8 @@ static const Scene_Setting_Descriptor ascii_settings[] = {
     SETTING("settings.ascii.cycling", "Glyph cycling", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.ascii.scanlines", "Scanlines", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.ascii.split", "Color split", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.ascii.gain", "Brightness gain", 0.50f, 2.50f, 1.30f, 2),
+    SETTING("settings.ascii.tint", "Band hue spread", 0.00f, 1.00f, 0.45f, 2),
 };
 
 static const Scene_Setting_Descriptor atlas_settings[] = {
@@ -64,6 +72,7 @@ static const Scene_Setting_Descriptor terrarium_settings[] = {
     SETTING("settings.terrarium.creature_speed", "Creature speed", 0.20f, 2.00f, 1.00f, 2),
     SETTING("settings.terrarium.glass_opacity", "Habitat glass", 0.00f, 0.40f, 0.13f, 2),
     SETTING("settings.terrarium.density", "Population density", 0.30f, 1.00f, 1.00f, 2),
+    SETTING("settings.terrarium.creature_glow", "Creature glow", 0.00f, 2.00f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor constellation_settings[] = {
@@ -74,6 +83,7 @@ static const Scene_Setting_Descriptor constellation_settings[] = {
     SETTING("settings.constellation.event_reach", "Event spread", 1.00f, 6.00f, 2.00f, 0),
     SETTING("settings.constellation.hue_swing", "Semantic hue swing", 0.00f, 140.00f, 70.00f, 0),
     SETTING("settings.constellation.density", "Star density", 1.00f, 3.00f, 3.00f, 0),
+    SETTING("settings.constellation.web", "Web brightness", 0.00f, 2.00f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor cadence_settings[] = {
@@ -208,14 +218,29 @@ bool scene_settings_capture(const Scene_Settings *settings, size_t scene_index,
     return true;
 }
 
+// Every historical per-scene control count remains loadable; missing values
+// back-fill from descriptor defaults in scene_settings_apply_snapshot.
+static bool scene_settings_count_is_legacy(size_t scene_index, size_t count)
+{
+    switch (scene_index) {
+    case 0: return count == 3 || count == 7;  // spectrum
+    case 1: return count == 5;                // pulse
+    case 2: return count == 5;                // orbital
+    case 3: return count == 4;                // ascii
+    case 4: return count == 8;                // atlas
+    case 5: return count == 3 || count == 7;  // terrarium
+    case 6: return count == 3 || count == 7;  // constellation
+    default: return false;
+    }
+}
+
 bool scene_settings_snapshot_valid(size_t scene_index,
                                    const Scene_Settings_Snapshot *snapshot)
 {
     if (snapshot == NULL || scene_index >= SCENE_SETTINGS_SCENE_COUNT) return false;
     if (!snapshot->captured) return snapshot->count == 0;
-    bool legacy_snapshot = (scene_index == 4 && snapshot->count == 8) ||
-                           ((scene_index == 0 || scene_index == 5 || scene_index == 6) &&
-                            snapshot->count == 3);
+    bool legacy_snapshot = scene_settings_count_is_legacy(scene_index,
+                                                          snapshot->count);
     if (snapshot->count != tables[scene_index].count && !legacy_snapshot) return false;
     for (size_t index = 0; index < snapshot->count; ++index) {
         if (!value_in_range(snapshot->values[index],

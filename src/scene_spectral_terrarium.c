@@ -357,14 +357,27 @@ static Vector3 terrarium_creature_position(const Terrarium_Creature *creature,
 }
 
 static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
-                                 const Scene_Frame *frame, float hue,
+                                 const Scene_Frame *frame,
+                                 const Scene_Renderer *renderer,
+                                 Camera3D camera, float hue,
                                  float growth_scale, float particle_scale,
-                                 float glass_opacity, float density)
+                                 float glass_opacity, float density,
+                                 float creature_glow)
 {
     Color soil = ColorFromHSV(fmodf(hue + 115.0f, 360.0f), 0.55f, 0.16f + terrarium->bass*0.08f);
     DrawCylinder((Vector3) { 0.0f, -1.82f, 0.0f }, 4.15f, 3.9f, 0.22f, 48, soil);
     DrawCircle3D((Vector3) { 0.0f, -1.69f, 0.0f }, 4.0f, (Vector3) { 1, 0, 0 }, 90.0f,
                  ColorAlpha(ColorFromHSV(hue, 0.52f, 0.28f), 0.55f));
+    // Each onset rings the soil like a struck bell: the pulse decays while
+    // its ripple expands outward across the floor.
+    if (terrarium->onset_pulse > 0.03f) {
+        float ripple_radius = 0.45f + (1.0f - terrarium->onset_pulse)*3.6f;
+        DrawCircle3D((Vector3) { 0.0f, -1.66f, 0.0f }, ripple_radius,
+                     (Vector3) { 1, 0, 0 }, 90.0f,
+                     ColorAlpha(ColorFromHSV(fmodf(hue + 45.0f, 360.0f),
+                                             0.42f, 0.85f),
+                                terrarium->onset_pulse*0.55f));
+    }
 
     size_t plant_count = (size_t)ceilf((float)TERRARIUM_PLANT_COUNT*density);
     size_t particle_count = (size_t)ceilf((float)TERRARIUM_PARTICLE_COUNT*density);
@@ -389,6 +402,25 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
         scene_draw_tube(plant->root, middle, stem_radius, 6,
                         ColorAlpha(stem, 0.78f));
         scene_draw_tube(middle, tip, stem_radius*0.72f, 6, stem);
+        // A pair of leaf blades branching from mid-stem turns a bare stalk
+        // into a plant; they sway with the stem and open with amplitude.
+        float leaf_angle = terrarium_hash_unit(terrarium->seed,
+                                               (uint32_t)i + 1300U)*2.0f*PI;
+        float leaf_length = (0.16f + plant->height*0.14f)*
+                            (0.7f + amplitude*0.5f)*growth_scale;
+        Color leaf = ColorFromHSV(fmodf(hue + 95.0f + (float)i*3.1f, 360.0f),
+                                  0.68f, 0.34f + amplitude*0.40f);
+        for (int blade = 0; blade < 2; ++blade) {
+            float direction = leaf_angle + (float)blade*PI +
+                              sway*(0.5f + (float)blade*0.3f);
+            Vector3 leaf_tip = {
+                middle.x + cosf(direction)*leaf_length,
+                middle.y + leaf_length*(0.45f + amplitude*0.30f),
+                middle.z + sinf(direction)*leaf_length,
+            };
+            scene_draw_tube(middle, leaf_tip, stem_radius*0.55f, 5,
+                            ColorAlpha(leaf, 0.85f));
+        }
         DrawSphere(tip, 0.055f + amplitude*0.14f + terrarium->onset_pulse*0.025f,
                    ColorFromHSV(fmodf(hue + 145.0f + (float)i*8.0f, 360.0f),
                                 0.62f, 0.55f + amplitude*0.42f));
@@ -422,10 +454,64 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                          position.z + tangent.z*length };
         Color color = ColorFromHSV(fmodf(hue + 190.0f + (float)i*13.0f, 360.0f),
                                    0.58f, 0.58f + amplitude*0.38f);
+        // A fading wake behind each swimmer makes the flock's motion legible
+        // even in a still frame.
+        Vector3 wake = {
+            position.x - tangent.x*(0.30f + velocity_length*0.22f),
+            position.y - tangent.y*(0.30f + velocity_length*0.22f)*0.4f,
+            position.z - tangent.z*(0.30f + velocity_length*0.22f),
+        };
+        scene_draw_tube(wake, position, 0.008f + amplitude*0.006f, 5,
+                        ColorAlpha(color, 0.30f));
         scene_draw_tube(position, head, 0.014f + amplitude*0.012f, 6,
                         ColorAlpha(color, 0.8f));
+        // Beating side fins keyed to the simulation clock give each body a
+        // stroke cycle instead of a rigid dart shape.
+        Vector3 side = { -tangent.z, 0.0f, tangent.x };
+        float flap = sinf((float)terrarium->simulation_time*6.5f +
+                          creature->phase)*(0.5f + amplitude*0.5f);
+        float fin_length = 0.09f + amplitude*0.07f;
+        for (int fin = 0; fin < 2; ++fin) {
+            float fin_side = fin == 0 ? 1.0f : -1.0f;
+            Vector3 fin_tip = {
+                position.x + side.x*fin_side*fin_length,
+                position.y + flap*fin_side*fin_length*0.8f,
+                position.z + side.z*fin_side*fin_length,
+            };
+            scene_draw_tube(position, fin_tip, 0.007f, 4,
+                            ColorAlpha(color, 0.62f));
+        }
         DrawSphere(head, 0.07f + amplitude*0.09f, color);
         DrawSphere(position, 0.045f + terrarium->energy*0.035f, ColorAlpha(RAYWHITE, 0.72f));
+    }
+
+    // Creature glow: soft additive camera-facing sprites lift the flock out
+    // of the dark habitat the way lanternfish read in deep water.
+    if (creature_glow > 0.001f) {
+        Texture2D glow_texture = { rlGetTextureIdDefault(), 1, 1, 1,
+                                   PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+        Rectangle glow_source = { 0.0f, 0.0f, 1.0f, 1.0f };
+        SetShaderValue(renderer->circle_shader, renderer->circle_radius_location,
+                       (float[1]){ 0.06f }, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(renderer->circle_shader, renderer->circle_power_location,
+                       (float[1]){ 2.8f }, SHADER_UNIFORM_FLOAT);
+        BeginBlendMode(BLEND_ADDITIVE);
+        BeginShaderMode(renderer->circle_shader);
+        for (size_t i = 0; i < creature_count; ++i) {
+            const Terrarium_Creature *creature = &terrarium->creatures[i];
+            float amplitude = terrarium_band(frame, creature->band);
+            Vector3 position = terrarium_creature_position(creature, terrarium);
+            Color color = ColorFromHSV(
+                fmodf(hue + 190.0f + (float)i*13.0f, 360.0f),
+                0.52f, 0.9f);
+            float halo = (0.26f + amplitude*0.30f +
+                          terrarium->onset_pulse*0.10f)*creature_glow;
+            DrawBillboardRec(camera, glow_texture, glow_source, position,
+                             (Vector2){halo, halo},
+                             ColorAlpha(color, 0.30f + amplitude*0.25f));
+        }
+        EndShaderMode();
+        EndBlendMode();
     }
 
     // Sparse latitude rings imply a glass habitat without hiding its contents.
@@ -454,6 +540,9 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_GLASS_OPACITY);
     float density = scene_settings_get(
         renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_DENSITY);
+    float creature_glow = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM,
+        TERRARIUM_SETTING_CREATURE_GLOW);
 
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue = fmodf(145.0f + terrarium_hash_unit(terrarium->seed, 1500U)*125.0f
@@ -505,8 +594,8 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
     rlMatrixMode(RL_PROJECTION);
     rlScalef(full_aspect/viewport_aspect, 1.0f, 1.0f);
     rlMatrixMode(RL_MODELVIEW);
-    terrarium_draw_world(terrarium, frame, hue, growth_scale, particle_scale,
-                         glass_opacity, density);
+    terrarium_draw_world(terrarium, frame, renderer, camera, hue, growth_scale,
+                         particle_scale, glass_opacity, density, creature_glow);
     EndMode3D();
 
     rlDrawRenderBatchActive();

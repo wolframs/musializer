@@ -292,8 +292,13 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn("TERRARIUM_SETTING_GLASS_OPACITY", terrarium)
         self.assertIn("CONSTELLATION_SETTING_EVENT_REACH", constellation)
         self.assertIn("CONSTELLATION_SETTING_HUE_SWING", constellation)
-        self.assertIn("snapshot->count == 3", settings)
-        self.assertIn("MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE 64u", project)
+        self.assertIn("count == 3 || count == 7", settings)
+        self.assertIn("scene_settings_count_is_legacy", settings)
+        self.assertIn(
+            "MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE \\\n"
+            "    (SCENE_SETTINGS_SCENE_COUNT*SCENE_SETTINGS_MAX_CONTROLS)",
+            project,
+        )
 
     def test_export_keeps_exact_video_frames_and_color_contract_cross_platform(self):
         for filename in ("ffmpeg_posix.c", "ffmpeg_windows.c"):

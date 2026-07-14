@@ -181,7 +181,7 @@
         "blend_mode": {"enum": ["normal", "add", "multiply", "screen"]},
         "mappings": {
           "type": "array",
-          "maxItems": 64,
+          "maxItems": 90,
           "items": {"$ref": "#/$defs/mapping"}
         }
       },

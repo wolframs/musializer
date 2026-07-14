@@ -31,6 +31,12 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
         renderer->settings, SCENE_PULSE_FIELD, PULSE_SETTING_ARC);
     float weight = scene_settings_get(
         renderer->settings, SCENE_PULSE_FIELD, PULSE_SETTING_WEIGHT);
+    float petal_setting = scene_settings_get(
+        renderer->settings, SCENE_PULSE_FIELD, PULSE_SETTING_PETALS);
+    float hue_shift = scene_settings_get(
+        renderer->settings, SCENE_PULSE_FIELD, PULSE_SETTING_HUE);
+    float bloom = scene_settings_get(
+        renderer->settings, SCENE_PULSE_FIELD, PULSE_SETTING_GLOW);
 
     Vector2 center = {
         boundary.x + boundary.width*0.5f,
@@ -55,11 +61,27 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
     for (size_t i = count - low_count; i < count; ++i) treble += frame->audio.bands[i];
     bass /= (float)low_count;
     treble /= (float)low_count;
-    int fold = 3 + (int)lroundf(fminf(1.0f, treble/(bass + treble + 0.001f))*6.0f);
+    // Zero keeps the audio-driven fold (bass/treble balance chooses the rose);
+    // any explicit petal count pins the silhouette for a consistent look.
+    int fold = petal_setting >= 0.5f ? (int)lroundf(petal_setting) :
+               3 + (int)lroundf(fminf(1.0f, treble/(bass + treble + 0.001f))*6.0f);
     float rotation = pulse->rotation + (float)frame->time_seconds*motion*12.0f +
                      frame->audio.spectral_flux*motion*45.0f +
                      interpretation*motion*14.0f;
     BeginBlendMode(BLEND_ADDITIVE);
+    // A bass-breathing bloom anchors the rose's heart so the center never
+    // reads as an empty hole between petal passes.
+    if (bloom > 0.001f) {
+        float bloom_radius = extent*(0.26f + bass*0.44f)*bloom;
+        Color bloom_color = ColorFromHSV(
+            fmodf(rotation + semantic_hue + hue_shift + 720.0f, 360.0f),
+            0.58f, 0.85f);
+        DrawCircleGradient((int)center.x, (int)center.y, bloom_radius,
+                           ColorAlpha(bloom_color,
+                                      0.24f + bass*0.36f +
+                                      frame->audio.spectral_flux*0.22f),
+                           BLANK);
+    }
     for (size_t i = rings; i > 0; --i) {
         size_t band_index = (i - 1)*count/rings;
         float amplitude = frame->audio.bands[band_index];
@@ -72,7 +94,7 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
         if (sweep > 356.0f) sweep = 356.0f;
         float thickness = (1.0f + amplitude*8.0f)*renderer->pixel_scale*weight;
         Color color = ColorFromHSV(fmodf((float)i/rings*280.0f + rotation +
-                                        semantic_hue + 360.0f, 360.0f),
+                                        semantic_hue + hue_shift + 720.0f, 360.0f),
                                    0.72f, 0.95f);
         int segments = 112;
         float rose_depth = 0.045f + amplitude*0.17f + interpretation*0.06f;

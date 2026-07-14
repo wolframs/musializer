@@ -58,7 +58,8 @@ static unsigned char ascii_color_byte(float value)
 static Color ascii_main_color(const AsciiCell *cell,
                               float band,
                               float energy,
-                              float semantic_tension)
+                              float semantic_tension,
+                              float gain)
 {
     float luminance = ascii_clamp01(cell->luminance);
     float edge = ascii_clamp01(cell->edge_strength*3.0f);
@@ -93,10 +94,13 @@ static Color ascii_main_color(const AsciiCell *cell,
                   (0.86f + energy*0.08f + band*0.08f);
     alpha *= 0.30f + source_alpha*0.70f;
     alpha *= 0.94f + semantic_tension*0.06f;
+    alpha *= ascii_clamp01(0.62f + 0.38f*gain);
+    // Gain scales the delivered light, applied after the phosphor pipeline
+    // so it survives the lift/blend stages instead of being renormalized.
     return (Color) {
-        ascii_color_byte(source_r*255.0f),
-        ascii_color_byte(source_g*255.0f),
-        ascii_color_byte(source_b*255.0f),
+        ascii_color_byte(ascii_clamp01(source_r*gain)*255.0f),
+        ascii_color_byte(ascii_clamp01(source_g*gain)*255.0f),
+        ascii_color_byte(ascii_clamp01(source_b*gain)*255.0f),
         ascii_color_byte(ascii_clamp01(alpha)*255.0f),
     };
 }
@@ -231,6 +235,10 @@ static void ascii_field_draw(const void *state,
         renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_SCANLINES);
     float split_scale = scene_settings_get(
         renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_SPLIT);
+    float gain = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_GAIN);
+    float tint = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_TINT);
 
     /* Deep navy CRT surface: flat enough to preserve image contrast, but with
      * deterministic phosphor bands so an empty dark source does not become an
@@ -315,11 +323,18 @@ static void ascii_field_draw(const void *state,
                 blended.foreground.b = ascii_color_byte(
                     (float)blended.foreground.b*0.82f + spectrum_density*64.0f);
             } else {
+                // Band hue spread stretches the phosphor palette across the
+                // frequency axis: zero is a single-hue CRT, one sweeps
+                // bass-to-treble through the whole spectrum.
                 Color live = ColorFromHSV(
-                    fmodf(188.0f + (float)column/(float)draw_columns*132.0f +
+                    fmodf(188.0f + (float)column/(float)draw_columns*
+                          (36.0f + tint*270.0f) +
                           semantic_valence*28.0f, 360.0f),
-                    0.78f, 0.58f + spectrum_density*0.42f);
-                blended.foreground = (AsciiRgba){live.r, live.g, live.b, 255};
+                    0.78f, 0.30f + powf(spectrum_density, 0.75f)*0.70f);
+                blended.foreground = (AsciiRgba){
+                    live.r, live.g, live.b,
+                    ascii_color_byte((0.34f + spectrum_density*1.30f)*255.0f),
+                };
             }
             const AsciiCell *cell = &blended;
             float band = ascii_audio_band(frame, column, draw_columns);
@@ -341,7 +356,7 @@ static void ascii_field_draw(const void *state,
             float edge = ascii_clamp01(cell->edge_strength*4.0f);
             float luminance = ascii_clamp01(cell->luminance);
             Color color = ascii_main_color(cell, band, energy,
-                                           semantic_tension);
+                                           semantic_tension, gain);
 
             float glyph_activity = ascii_clamp01((energy*0.48f + band*0.36f +
                                                   flux*0.11f + pulse*0.24f)*
