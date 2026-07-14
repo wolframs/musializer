@@ -11,6 +11,8 @@
 #include "event_timeline.h"
 #include "lyrics.h"
 #include "semantic_lane.h"
+#include "scene_settings.h"
+#include "song_atlas_map.h"
 
 typedef enum {
     SCENE_SPECTRUM,
@@ -42,6 +44,7 @@ typedef struct {
     Semantic_Frame semantic;
     const Lyric_Cue *lyric;
     Event_Timeline_View events;
+    const Scene_Settings *settings;
 } Scene_Frame;
 
 typedef struct {
@@ -52,6 +55,8 @@ typedef struct {
     const AsciiCell *ascii_cells;
     size_t ascii_columns;
     size_t ascii_rows;
+    const Song_Atlas_Map *song_atlas_map;
+    const Scene_Settings *settings;
     // Physical target pixels per logical output pixel. Fixed-pixel scene
     // details use this so supersampling changes sampling, not composition.
     float pixel_scale;

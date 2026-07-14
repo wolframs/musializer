@@ -5,17 +5,7 @@
 #include <rlgl.h>
 
 #include "scene_draw.h"
-
-enum {
-    ORBITAL_RING_COUNT = 12,
-    ORBITAL_NODES_PER_RING = 16,
-};
-
-typedef struct {
-    uint64_t seed;
-    float onset_pulse;
-    float flux_swell;
-} Orbital_Lattice_State;
+#include "scene_orbital_lattice_motion.h"
 
 static float orbital_clamp01(float value)
 {
@@ -42,69 +32,67 @@ static float orbital_hash_unit(uint64_t seed, uint32_t ring, uint32_t node)
     return (float)(orbital_hash(seed, ring, node) & UINT32_C(0xffff))/65535.0f;
 }
 
-static float orbital_band(const Scene_Frame *frame, size_t index)
+static float orbital_time_phase(double time_seconds, double radians_per_second)
 {
-    if (frame->audio.bands == NULL || frame->audio.bands_count == 0) return 0.0f;
-    return orbital_clamp01(frame->audio.bands[index%frame->audio.bands_count]);
-}
-
-static float orbital_bass(const Scene_Frame *frame)
-{
-    if (frame->audio.bands == NULL || frame->audio.bands_count == 0) return 0.0f;
-
-    size_t count = frame->audio.bands_count/6;
-    if (count < 1) count = 1;
-    if (count > 8) count = 8;
-
-    float bass = 0.0f;
-    for (size_t i = 0; i < count; ++i) bass += orbital_clamp01(frame->audio.bands[i]);
-    return bass/(float)count;
+    if (!isfinite(time_seconds) || !isfinite(radians_per_second)) return 0.0f;
+    double phase = fmod(time_seconds*radians_per_second, 2.0*PI);
+    if (phase < 0.0) phase += 2.0*PI;
+    return (float)phase;
 }
 
 static void orbital_lattice_init(void *state, uint64_t seed)
 {
-    Orbital_Lattice_State *lattice = state;
-    lattice->seed = seed;
-    lattice->onset_pulse = 0.0f;
-    lattice->flux_swell = 0.0f;
+    orbital_lattice_motion_init(state, seed);
 }
 
 static void orbital_lattice_update(void *state, const Scene_Frame *frame)
 {
-    Orbital_Lattice_State *lattice = state;
-    float delta = frame->delta_seconds;
-    if (delta < 0.0f) delta = 0.0f;
-    if (delta > 0.1f) delta = 0.1f;
-
-    lattice->onset_pulse *= expf(-7.5f*delta);
-    if (frame->audio.onset) lattice->onset_pulse = 1.0f;
-
-    float flux = orbital_clamp01(frame->audio.spectral_flux*5.0f);
-    float blend = 1.0f - expf(-4.0f*delta);
-    lattice->flux_swell += (flux - lattice->flux_swell)*blend;
+    if (state == NULL || frame == NULL) return;
+    Orbital_Lattice_Motion_Input input = {
+        .time_seconds = frame->time_seconds,
+        .delta_seconds = frame->delta_seconds,
+        .bands = frame->audio.bands,
+        .bands_count = frame->audio.bands_count,
+        .rms = frame->audio.rms,
+        .spectral_flux = frame->audio.spectral_flux,
+        .onset = frame->audio.onset,
+        .semantic_available = frame->semantic.available,
+        .semantic_valence = frame->semantic.valence,
+        .semantic_tension = frame->semantic.tension,
+        .semantic_confidence = frame->semantic.confidence,
+        .motion_rate = scene_settings_get(
+            frame->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_MOTION),
+    };
+    orbital_lattice_motion_update(state, &input);
 }
 
 static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
                                  const Scene_Renderer *renderer, Rectangle boundary)
 {
-    (void)renderer;
-    const Orbital_Lattice_State *lattice = state;
+    const Orbital_Lattice_Motion *lattice = state;
     if (boundary.width <= 1.0f || boundary.height <= 1.0f) return;
 
-    float time = (float)frame->time_seconds;
-    float bass = orbital_bass(frame);
-    float energy = orbital_clamp01(frame->audio.rms*1.8f);
-    float flux = orbital_clamp01(frame->audio.spectral_flux*5.0f);
+    float bass = orbital_clamp01(lattice->bass);
+    float mids = orbital_clamp01(lattice->mids);
+    float treble = orbital_clamp01(lattice->treble);
+    float energy = orbital_clamp01(lattice->energy);
+    float flux = orbital_clamp01(lattice->flux);
     float pulse = orbital_clamp01(lattice->onset_pulse);
+    float radius_scale = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_RADIUS);
+    float depth_scale = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_DEPTH);
+    float node_scale = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_NODES);
+    float link_scale = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_LINKS);
     float seed_phase = orbital_hash_unit(lattice->seed, 0, 0)*2.0f*PI;
-    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
-    float hue_base = fmodf(205.0f + orbital_hash_unit(lattice->seed, 1, 0)*110.0f
-                           + time*(3.0f + flux*9.0f)
-                           + frame->semantic.valence*70.0f*semantic_weight, 360.0f);
+    float hue_base = fmodf((float)lattice->hue_degrees +
+                           lattice->semantic_valence*55.0f + 360.0f, 360.0f);
 
     Color background = ColorFromHSV(hue_base,
-                                    0.62f + frame->semantic.tension*0.2f*semantic_weight,
-                                    0.075f + energy*0.035f);
+                                    0.58f + lattice->semantic_tension*0.16f,
+                                    0.055f + energy*0.035f);
     DrawRectangleRec(boundary, background);
 
     int saved_framebuffer_width = rlGetFramebufferWidth();
@@ -140,16 +128,17 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     rlSetFramebufferWidth(viewport_width);
     rlSetFramebufferHeight(viewport_height);
 
-    float camera_orbit = time*(0.09f + lattice->flux_swell*0.12f) + seed_phase;
+    float camera_orbit = (float)lattice->camera_phase;
+    float camera_radius = 0.42f + mids*0.16f;
     Camera3D camera = {
         .position = {
-            cosf(camera_orbit)*(0.65f + energy*0.4f),
-            sinf(camera_orbit*0.73f)*(0.5f + bass*0.35f),
-            10.5f - pulse*0.65f,
+            cosf(camera_orbit)*camera_radius,
+            sinf(camera_orbit + seed_phase*0.37f)*(0.24f + treble*0.09f),
+            10.9f - bass*0.28f - pulse*0.12f,
         },
-        .target = { 0.0f, 0.0f, -8.0f },
+        .target = { 0.0f, 0.0f, -8.5f*depth_scale },
         .up = { 0.0f, 1.0f, 0.0f },
-        .fovy = 58.0f + flux*7.0f + pulse*4.0f,
+        .fovy = 55.0f + flux*2.3f + pulse*0.8f,
         .projection = CAMERA_PERSPECTIVE,
     };
 
@@ -164,62 +153,79 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     rlScalef(full_aspect/target_aspect, 1.0f, 1.0f);
     rlMatrixMode(RL_MODELVIEW);
 
-    for (int ring = ORBITAL_RING_COUNT - 1; ring >= 0; --ring) {
-        float depth_t = (float)ring/(float)(ORBITAL_RING_COUNT - 1);
-        float z = 3.0f - (float)ring*2.25f;
-        float travel = fmodf(time*(1.2f + energy*1.8f), 2.25f);
-        z += travel;
+    float breathe_phase = orbital_time_phase(frame->time_seconds, 0.32);
+    float drift_x_phase = orbital_time_phase(frame->time_seconds, 0.11);
+    float drift_y_phase = orbital_time_phase(frame->time_seconds, 0.09);
+    for (int ring = ORBITAL_LATTICE_RING_COUNT - 1; ring >= 0; --ring) {
+        Orbital_Lattice_Ring_Motion ring_motion;
+        if (!orbital_lattice_motion_ring(lattice, (size_t)ring,
+                                         &ring_motion) ||
+            ring_motion.visibility < 0.01f) continue;
+        float depth_t = ring_motion.depth_t;
+        float z = 3.0f - ring_motion.distance*depth_scale;
+        float ring_character = orbital_hash_unit(
+            lattice->seed, (uint32_t)ring, UINT32_C(0xa7));
 
-        float twist = time*(0.22f + flux*0.75f)
-                    + (float)ring*(0.19f + lattice->flux_swell*0.28f)
-                    + seed_phase;
-        float ring_wave = sinf(time*0.8f - (float)ring*0.65f + seed_phase);
-        float radius = 3.15f + bass*0.9f + ring_wave*(0.12f + pulse*0.35f);
-        float center_x = sinf(time*0.31f + (float)ring*0.37f + seed_phase)*0.38f;
-        float center_y = cosf(time*0.27f - (float)ring*0.29f + seed_phase)*0.28f;
+        float twist = (float)lattice->twist_phase + (float)ring*0.23f +
+                      (ring_character - 0.5f)*0.22f;
+        float ring_wave = sinf(breathe_phase - (float)ring*0.55f + seed_phase);
+        float radius = (3.12f + bass*0.48f +
+                        ring_wave*(0.10f + pulse*0.07f))*radius_scale;
+        float center_x = sinf(drift_x_phase + (float)ring*0.37f + seed_phase)*0.18f;
+        float center_y = cosf(drift_y_phase - (float)ring*0.29f + seed_phase)*0.12f;
 
         Vector3 first = { 0 };
         Vector3 previous = { 0 };
-        for (int node = 0; node < ORBITAL_NODES_PER_RING; ++node) {
-            float node_t = (float)node/(float)ORBITAL_NODES_PER_RING;
+        for (int node = 0; node < ORBITAL_LATTICE_NODES_PER_RING; ++node) {
+            float node_t = (float)node/(float)ORBITAL_LATTICE_NODES_PER_RING;
             float angle = node_t*2.0f*PI + twist;
-            size_t band_index = ((size_t)node*frame->audio.bands_count
-                               / ORBITAL_NODES_PER_RING + (size_t)ring);
-            float amplitude = orbital_band(frame, band_index);
+            size_t band_index = ((size_t)node + (size_t)ring*3U)%
+                                ORBITAL_LATTICE_NODES_PER_RING;
+            float amplitude = orbital_clamp01(lattice->node_bands[band_index]);
             float scatter = orbital_hash_unit(lattice->seed, (uint32_t)ring,
                                               (uint32_t)node) - 0.5f;
-            float radial = radius + amplitude*(0.35f + energy*0.8f) + scatter*0.15f;
+            float radial = radius + amplitude*(0.20f + energy*0.30f) +
+                           scatter*0.10f;
             Vector3 position = {
                 center_x + cosf(angle)*radial,
                 center_y + sinf(angle)*radial,
-                z + sinf(angle*3.0f + seed_phase)*0.11f*(0.3f + flux),
+                z + sinf(angle*2.0f + seed_phase)*0.07f*(0.4f + treble),
             };
 
-            float fog = 1.0f - depth_t*0.74f;
+            float fog = (1.0f - depth_t*0.78f)*ring_motion.visibility;
             float hue = fmodf(hue_base + node_t*105.0f + (float)ring*5.0f, 360.0f);
             Color color = ColorFromHSV(hue, 0.64f + amplitude*0.28f,
                                        orbital_clamp01(fog*(0.56f + amplitude*0.44f)));
-            float size = 0.11f + amplitude*0.42f + energy*0.12f + pulse*0.08f;
+            color = ColorAlpha(color, ring_motion.visibility);
+            float size = (0.10f + amplitude*0.23f + energy*0.06f + pulse*0.04f)*
+                         node_scale;
             Vector3 cube_size = {
-                size*(0.8f + bass*0.55f),
-                size*(1.0f + amplitude*0.9f),
-                size*(1.7f + flux*1.4f),
+                size*(0.88f + bass*0.30f),
+                size*(1.0f + amplitude*0.55f),
+                size*(1.45f + treble*0.65f),
             };
             DrawCubeV(position, cube_size, color);
-            if (ring < 5 || amplitude > 0.48f) {
-                DrawCubeWiresV(position, cube_size, ColorAlpha(RAYWHITE, fog*0.42f));
+            if (ring_motion.distance < 11.0f || amplitude > 0.55f) {
+                DrawCubeWiresV(position, cube_size,
+                               ColorAlpha(RAYWHITE, fog*0.32f));
             }
 
             if (node == 0) first = position;
-            if (node > 0) {
-                Color edge = ColorAlpha(color, fog*(0.12f + energy*0.18f));
-                scene_draw_tube(previous, position, 0.007f + energy*0.008f,
-                                6, edge);
+            if (node > 0 && link_scale > 0.001f) {
+                Color edge = ColorAlpha(color, fog*(0.10f + energy*0.13f));
+                edge = ColorAlpha(edge, fminf(1.0f, link_scale));
+                scene_draw_tube(previous, position,
+                                (0.006f + energy*0.006f)*link_scale, 6, edge);
             }
             previous = position;
         }
-        scene_draw_tube(previous, first, 0.007f + energy*0.008f, 6,
-                        ColorAlpha(RAYWHITE, (1.0f - depth_t)*0.16f));
+        if (link_scale > 0.001f) {
+            scene_draw_tube(previous, first,
+                            (0.006f + energy*0.006f)*link_scale, 6,
+                            ColorAlpha(RAYWHITE,
+                                       fminf(1.0f, link_scale)*
+                                       (1.0f - depth_t)*ring_motion.visibility*0.13f));
+        }
     }
     EndMode3D();
 
@@ -237,8 +243,8 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
 const Scene_Descriptor scene_orbital_lattice_descriptor = {
     .id = SCENE_ORBITAL_LATTICE,
     .name = "Orbital Lattice",
-    .state_version = 1,
-    .state_size = sizeof(Orbital_Lattice_State),
+    .state_version = 2,
+    .state_size = sizeof(Orbital_Lattice_Motion),
     .init = orbital_lattice_init,
     .update = orbital_lattice_update,
     .draw = orbital_lattice_draw,

@@ -1,5 +1,7 @@
 #include "project.h"
 
+#include "scene_settings.h"
+
 #include <math.h>
 #include <string.h>
 
@@ -311,7 +313,9 @@ Musi_Project_Editor_Support musi_project_editor_support(
         scene->blend_mode != MUSI_BLEND_NORMAL) {
         return MUSI_PROJECT_EDITOR_ERROR_SCENE_LAYOUT;
     }
-    if (scene->mapping_count != 0) {
+    if (scene->mapping_count != 0 &&
+        !scene_settings_mappings_supported(scene->mappings,
+                                           scene->mapping_count)) {
         return MUSI_PROJECT_EDITOR_ERROR_SCENE_MAPPINGS;
     }
     return MUSI_PROJECT_EDITOR_SUPPORTED;
@@ -328,7 +332,7 @@ const char *musi_project_editor_support_string(Musi_Project_Editor_Support suppo
         "only one scene is supported by this editor yet",
         "parameter automation cues are not supported by this editor yet",
         "the scene must cover the full track, be enabled, opaque, and Normal blend",
-        "scene parameter mappings are not supported by this editor yet",
+        "only canonical built-in constant scene settings are supported; arbitrary parameter mappings are not",
     };
     return (unsigned)support < sizeof(names)/sizeof(names[0]) ?
            names[support] : "unknown editor compatibility result";

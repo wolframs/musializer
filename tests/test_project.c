@@ -1,4 +1,5 @@
 #include "project.h"
+#include "scene_settings.h"
 #include "test_support.h"
 
 #include <math.h>
@@ -142,6 +143,23 @@ TEST(project_editor_subset_rejects_every_lossy_normalization)
     project.audio.mode = MUSI_ASSET_IMPORTED;
     EXPECT_TRUE(musi_project_editor_support(&project) ==
                 MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE);
+}
+
+TEST(project_editor_subset_accepts_canonical_scene_setting_presets)
+{
+    Musi_Project project = valid_project();
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    REQUIRE_TRUE(scene_settings_set(&settings, 1, PULSE_SETTING_RINGS, 31.0f));
+    project.audio.mode = MUSI_ASSET_REFERENCED;
+    project.cue_count = 0;
+    REQUIRE_TRUE(scene_settings_export_mappings(
+        &settings, project.scenes[0].mappings,
+        MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+        &project.scenes[0].mapping_count));
+    EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_SUPPORTED);
 }
 
 TEST(project_audio_metadata_identity_is_strict_and_tolerant_only_in_time)

@@ -93,6 +93,71 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn('"+0.1 s"', plug)
         self.assertIn("2.0f, COLOR_TIMELINE_CURSOR", plug)
 
+    def test_assist_state_policy_is_wired_into_every_product_target(self):
+        build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        self.assertEqual(build.count('"./src/assist_ui_state.c"'), 2)
+        self.assertIn('#include "assist_ui_state.h"', plug)
+        self.assertIn("assist_start_block(", plug)
+        self.assertIn("disabled_text_button(", plug)
+        self.assertIn("p->assist_confirmation_pending = true", plug)
+        self.assertIn("ASSIST_JOB_CANCELLING", plug)
+        self.assertIn("request_assist_job_cancel();", plug)
+        self.assertIn("draw_fullscreen_assist_status(preview_boundary);", plug)
+        self.assertIn("assist_timeline_height(", plug)
+        render_start = plug.index("static bool start_rendering_track_to")
+        render_body = plug[render_start:plug.index("static void start_rendering_track(",
+                                                   render_start)]
+        self.assertIn("assist_job_is_active(p->assist_job_state)", render_body)
+
+    def test_preview_audio_has_refill_headroom_before_main_thread_work(self):
+        host = (ROOT / "src/musializer.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        buffer_match = re.search(
+            r"#define PREVIEW_AUDIO_BUFFER_FRAMES\s+(\d+)", host
+        )
+        self.assertIsNotNone(buffer_match)
+        self.assertGreaterEqual(int(buffer_match.group(1)), 4096)
+        self.assertLess(
+            host.index("InitAudioDevice()"),
+            host.index("SetAudioStreamBufferSizeDefault(PREVIEW_AUDIO_BUFFER_FRAMES)"),
+        )
+        self.assertLess(
+            host.index("SetAudioStreamBufferSizeDefault(PREVIEW_AUDIO_BUFFER_FRAMES)"),
+            host.index("plug_init()"),
+        )
+        preview = re.search(
+            r"static void preview_screen\(void\)\s*\{.*?\n\}", plug, re.DOTALL
+        )
+        self.assertIsNotNone(preview)
+        self.assertLess(
+            preview.group(0).index("UpdateMusicStream(early_track->music)"),
+            preview.group(0).index("poll_assist_job()"),
+        )
+        start = re.search(
+            r"static void start_preview_track\([^;]+?\)\s*\{.*?\n\}",
+            plug,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(start)
+        self.assertLess(
+            start.group(0).index("UpdateMusicStream(track->music)"),
+            start.group(0).index("PlayMusicStream(track->music)"),
+        )
+
+        load_start = plug.index("MUSIALIZER_PLUG bool plug_load_track(")
+        load_end = plug.index("MUSIALIZER_PLUG bool plug_load_ascii_image(",
+                              load_start)
+        body = plug[load_start:load_end]
+        self.assertLess(body.index("PauseMusicStream(active_track->music)"),
+                        body.index("sha256_file_hex(canonical_path"))
+        self.assertLess(body.index("sha256_file_hex(canonical_path"),
+                        body.index("load_timeline_waveform(new_track)"))
+        self.assertLess(body.index("load_timeline_waveform(new_track)"),
+                        body.index("ResumeMusicStream(active_track->music)"))
+
     def test_ui_uses_bundled_readable_font_with_license(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
         plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
@@ -123,6 +188,29 @@ class DistributionManifestTests(unittest.TestCase):
         executable = info["CFBundleExecutable"]
         recipe = (ROOT / "src_build/nob_macos.c").read_text(encoding="utf-8")
         self.assertIn(f"Contents/MacOS/{executable}", recipe)
+
+    def test_macos_bundle_places_complete_assist_tree_beside_executable(self):
+        recipe = (ROOT / "src_build/nob_macos.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        support_root = "./build/Musializer.app/Contents/MacOS"
+        self.assertIn(f'copy_distribution_support("{support_root}")', recipe)
+        self.assertIn('"%s/tools/external_analysis.py"', plug)
+
+        # The helper derives its root from its own path, so copying the shared
+        # manifest here also keeps prompts/, schemas/, and sibling tools at the
+        # relative locations used by every Assist mode.
+        manifest = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        match = re.search(
+            r"static const char \*distribution_support_files\[\] = \{(.*?)\n\};",
+            manifest,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        support_files = set(re.findall(r'"([^"\\]+)"', match.group(1)))
+        self.assertIn("tools/external_analysis.py", support_files)
+        self.assertTrue(any(path.startswith("prompts/") for path in support_files))
+        self.assertTrue(any(path.startswith("schemas/") for path in support_files))
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "POSIX shell required")

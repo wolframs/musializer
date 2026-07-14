@@ -6,6 +6,8 @@
 
 #include <raylib.h>
 
+#define PREVIEW_AUDIO_BUFFER_FRAMES 8192
+
 #ifndef _WIN32
 #include <signal.h> // needed for sigaction()
 #endif // _WIN32
@@ -169,6 +171,14 @@ int main(int argc, char **argv)
         CloseWindow();
         return 1;
     }
+    // raylib's default music half-buffer is sampleRate/30 (about 33 ms). The
+    // editor occasionally performs durable saves or accepts completed analysis
+    // jobs on the main thread, so retain roughly 170-186 ms of refill headroom
+    // at the common 48/44.1 kHz source rates. This is decode-ahead, not output
+    // device latency, and applies only to streams created after this call.
+    SetAudioStreamBufferSizeDefault(PREVIEW_AUDIO_BUFFER_FRAMES);
+    TraceLog(LOG_INFO, "AUDIO: Music stream half-buffer: %u frames",
+             (unsigned)PREVIEW_AUDIO_BUFFER_FRAMES);
 
     plug_init();
     const char *render_output = NULL;
@@ -311,7 +321,10 @@ int main(int argc, char **argv)
     int exit_status = command_line_error ? 1 : 0;
     if (reload_once && exit_status == 0) {
         void *state = plug_pre_reload();
-        if (!reload_libplug()) {
+        if (state == NULL) {
+            TraceLog(LOG_ERROR, "Hot reload was vetoed while resources remain owned");
+            exit_status = 1;
+        } else if (!reload_libplug()) {
             exit_status = 1;
         } else {
             plug_post_reload(state);
@@ -328,8 +341,13 @@ int main(int argc, char **argv)
         if (WindowShouldClose() && plug_confirm_close()) break;
         if (IsKeyPressed(KEY_H)) {
             void *state = plug_pre_reload();
-            if (!reload_libplug()) return 1;
-            plug_post_reload(state);
+            if (state == NULL) {
+                TraceLog(LOG_WARNING,
+                         "Hot reload was vetoed while resources remain owned");
+            } else {
+                if (!reload_libplug()) return 1;
+                plug_post_reload(state);
+            }
         }
         plug_update();
         if (exit_after_render && !plug_render_active()) break;

@@ -233,7 +233,8 @@ static Vector3 terrarium_creature_position(const Terrarium_Creature *creature,
 }
 
 static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
-                                 const Scene_Frame *frame, float hue)
+                                 const Scene_Frame *frame, float hue,
+                                 float growth_scale, float particle_scale)
 {
     Color soil = ColorFromHSV(fmodf(hue + 115.0f, 360.0f), 0.55f, 0.16f + terrarium->bass*0.08f);
     DrawCylinder((Vector3) { 0.0f, -1.82f, 0.0f }, 4.15f, 3.9f, 0.22f, 48, soil);
@@ -243,7 +244,8 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
     for (size_t i = 0; i < TERRARIUM_PLANT_COUNT; ++i) {
         const Terrarium_Plant *plant = &terrarium->plants[i];
         float amplitude = terrarium_band(frame, plant->band);
-        float height = plant->height*(0.72f + amplitude*0.75f + terrarium->bass*0.18f);
+        float height = plant->height*(0.72f + amplitude*0.75f +
+                       terrarium->bass*0.18f)*growth_scale;
         float sway = sinf((float)terrarium->simulation_time*(0.75f + terrarium->flux)
                          + plant->phase)*plant->lean*(0.45f + amplitude);
         Vector3 middle = { plant->root.x + sway*0.42f, plant->root.y + height*0.54f,
@@ -266,7 +268,8 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
         float shimmer = 0.5f + 0.5f*sinf((float)terrarium->simulation_time*2.1f + particle->phase);
         Color color = ColorFromHSV(fmodf(hue + 35.0f + (float)i*4.7f, 360.0f), 0.38f,
                                    0.48f + shimmer*0.45f);
-        DrawSphere(particle->position, particle->size*(0.8f + terrarium->treble*1.3f),
+        DrawSphere(particle->position, particle->size*(0.8f +
+                   terrarium->treble*1.3f)*particle_scale,
                    ColorAlpha(color, 0.38f + shimmer*0.52f));
     }
 
@@ -298,13 +301,20 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
 static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
                                     const Scene_Renderer *renderer, Rectangle boundary)
 {
-    (void)renderer;
     const Spectral_Terrarium_State *terrarium = state;
     if (boundary.width <= 1.0f || boundary.height <= 1.0f) return;
 
+    float motion_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_MOTION);
+    float growth_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_GROWTH);
+    float particle_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_PARTICLES);
+
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue = fmodf(145.0f + terrarium_hash_unit(terrarium->seed, 1500U)*125.0f
-                    + (float)frame->time_seconds*(1.2f + terrarium->flux*2.5f)
+                    + (float)frame->time_seconds*motion_scale*
+                      (1.2f + terrarium->flux*2.5f)
                     + frame->semantic.valence*75.0f*semantic_weight, 360.0f);
     Color background = ColorFromHSV(hue, 0.68f, 0.035f + terrarium->energy*0.035f);
     DrawRectangleRec(boundary, background);
@@ -335,7 +345,7 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
     rlSetFramebufferWidth(viewport_width);
     rlSetFramebufferHeight(viewport_height);
 
-    float orbit = (float)frame->time_seconds*0.075f
+    float orbit = (float)frame->time_seconds*0.075f*motion_scale
                 + terrarium_hash_unit(terrarium->seed, 1600U)*2.0f*PI;
     Camera3D camera = {
         .position = { cosf(orbit)*7.6f, 3.3f + sinf(orbit*0.7f)*0.45f,
@@ -351,7 +361,7 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
     rlMatrixMode(RL_PROJECTION);
     rlScalef(full_aspect/viewport_aspect, 1.0f, 1.0f);
     rlMatrixMode(RL_MODELVIEW);
-    terrarium_draw_world(terrarium, frame, hue);
+    terrarium_draw_world(terrarium, frame, hue, growth_scale, particle_scale);
     EndMode3D();
 
     rlDrawRenderBatchActive();

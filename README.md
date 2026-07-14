@@ -25,8 +25,13 @@ The upstream demo below remains a lovely snapshot of where it began.
 - Play WAV, OGG, MP3, QOA, and FLAC files with live audio-reactive visuals.
 - Switch among seven built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
   ASCII Field, Song Atlas, Spectral Terrarium, and Constellation.
-- Import an image as ASCII art, author timeline events, and edit timed lyrics in
-  the application.
+- Tune every scene from a live parameter inspector. Song Atlas includes broad
+  terrain/camera ranges, hue and camera-speed controls, and Filled/Wireframe
+  surface modes; exact values and per-scene resets are saved with the track
+  and reused by offline export.
+- Import an image as a color-aware, audio-reactive ASCII field with animated
+  glyph waves and compression-resilient CRT scanlines; author timeline events
+  and edit timed lyrics in the application.
 - Navigate with a whole-track waveform, draggable hairline playhead, exact
   tenth/one/ten-second seek controls, and matching keyboard steps.
 - Generate local measured section suggestions, transcribe lyrics with Whisper,
@@ -134,19 +139,24 @@ The normal workflow is:
 
 1. Choose a scene from the left rail. Keys <kbd>1</kbd> through <kbd>7</kbd>
    switch scenes directly.
-2. Open **Lyrics** to write or import lyric cues and adjust their start/end
+2. Select **Tune** beside the scene list to open its parameter inspector. The
+   window expands to the right when the current monitor has room; otherwise
+   the track rail and preview compact without hiding the controls. Drag a
+   slider for live feedback or use **Reset** to restore that scene's defaults.
+3. Open **Lyrics** to write or import lyric cues and adjust their start/end
    times against the playhead.
-3. Open **Assist** for timed-lyric help, measured scene planning, semantic music
-   interpretation, or the complete pipeline. Results are staged with an impact
-   summary and require an explicit Apply action.
-4. Inspect the generated section markers and enable **Auto scenes** if they
+4. Open **Assist** for timed-lyric help, measured scene planning, semantic music
+   interpretation, or the complete pipeline. Selecting a workflow first shows
+   its local/remote data boundary. Results are validated and staged with a
+   lane-specific impact summary, then require an explicit Apply confirmation.
+5. Inspect the generated section markers and enable **Auto scenes** if they
    should drive both preview and export.
-5. Add manual Constellation events with **+ Feel**, **+ Cue**, and **+ Custom**,
+6. Add manual Constellation events with **+ Feel**, **+ Cue**, and **+ Custom**,
    or import an image into ASCII Field.
-6. Open **Export**, choose resolution, frame rate, and quality, then select the
+7. Open **Export**, choose resolution, frame rate, and quality, then select the
    destination. Progress reports the exact frame count and ETA; cancellation
    does not replace an existing video.
-7. Save with <kbd>Ctrl</kbd>+<kbd>S</kbd>, or use
+8. Save with <kbd>Ctrl</kbd>+<kbd>S</kbd>, or use
    <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for **Save As**.
 
 Canonical edits autosave after a short idle period. Unapplied lyric drafts,
@@ -172,9 +182,19 @@ Assistance is optional and capability-based:
 
 Whisper evidence, Codex review, measured audio features, MiMo interpretation,
 and user-authored events remain distinct data lanes. MiMo/OpenRouter modes are
-the explicit authorization boundary for sending derived music information to a
-remote service; the UI asks before launch. Model output is validated, staged,
-and never mutates the project automatically.
+the explicit authorization boundary for sending track audio to a remote
+service; every workflow asks before launch and names what leaves the
+computer. While a helper runs, the UI reports real elapsed time and the 40-minute
+job timeout rather than inventing a completion percentage. Cancellation is
+polled without blocking playback, and a staged lyric lane cannot replace an
+active authored lyric draft. Model output is validated, staged, and never
+mutates the project automatically.
+
+The more experimental scenes now have deliberately different jobs: **ASCII
+Field** preserves an imported image's aspect, tonal structure, and source color
+as a stable glyph canvas; **Orbital Lattice** turns band energy into damped,
+bounded orbital motion; and **Song Atlas** analyzes the complete decoded track
+into a time-by-frequency terrain with onset landmarks and a moving playhead.
 
 Set the optional credential in the process environment or in an ignored `.env`
 at the repository root:
@@ -213,9 +233,11 @@ reference; unrelated assets retain a canonical absolute path.
 The v1 schema deliberately describes future composition features that this
 editor cannot yet preserve. This build opens only its lossless editor subset:
 referenced full-track audio, integer-frame-rate H.264 MP4 output, one enabled
-opaque full-track Normal scene, and no parameter cues or mappings. Other
-schema-valid documents are rejected with an explicit unsupported-feature error
-instead of being silently rewritten.
+opaque full-track Normal scene, no parameter cues, and only Musializer's
+canonical constant mappings used to store scene-control values. Arbitrary
+analysis-driven mappings and other schema-valid composition features are
+rejected with an explicit unsupported-feature error instead of being silently
+rewritten.
 
 Imported ASCII grids are currently per-track editor state but are not stored in
 `.musi` v1. Export works, but project save is blocked while a populated grid

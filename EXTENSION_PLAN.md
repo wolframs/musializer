@@ -7,7 +7,7 @@
 
 ## Current status
 
-- **Last updated:** 2026-07-12, Europe/Berlin.
+- **Last updated:** 2026-07-14, Europe/Berlin.
 - **Active milestone:** M3 render-product hardening and reusable visual layers.
 - **Next vertical slice:** a layered render graph with reusable post-processing,
   followed by bounded asynchronous readback/encoding and a semantic-lane
@@ -146,6 +146,7 @@ referenced explicitly by the project format.
 | D-009 | Stage every assisted-analysis result and require Apply or Discard. | Accepted | Model output must remain inspectable and cannot overwrite authored work merely because a worker completed. |
 | D-010 | Publish project and video output transactionally. | Accepted | Cancellation, encoder failure, or a concurrent save must preserve the last complete artifact. |
 | D-011 | Embed evaluated semantic events in `.musi`; retain sidecars only as provenance. | Accepted | A moved project or later analysis job must not lose the visual meaning already accepted by the user. |
+| D-012 | Store bounded built-in scene controls as canonical constant `.musi` mappings while continuing to reject arbitrary automation mappings. | Accepted | Presets round-trip through the existing v1 contract without pretending the editor supports general parameter automation. |
 
 ## Validation baseline
 
@@ -157,9 +158,9 @@ Current machine:
 - FFmpeg 8.0.1.
 - Stock `nob` bootstrap and full application build: **passed**.
 - Release, debug, sanitizer, and runtime hot-reload builds: **passed**.
-- Headless C tests: **119/119 passed** in the latest integrated debug and
-  ASan+UBSan runs; a final release matrix is repeated at each checkpoint.
-- Offline Python/product tests: **40/40 passed**; HTTP remains mocked and the
+- Headless C tests: **154/154 passed** in the latest integrated debug, release,
+  and ASan+UBSan runs; a final release matrix is repeated at each checkpoint.
+- Offline Python/product tests: **56/56 passed**; HTTP remains mocked and the
   measured lane is entirely local.
 - Live demo-track smoke test: window, RTX 3090 OpenGL context, shaders,
   PulseAudio, MP3 loading/playback, analyzer, and legacy scene all initialized
@@ -201,7 +202,8 @@ target while the engine is extracted around it.
   intents, decoded-sample-derived frame scheduling, progress/ETA/cancellation,
   and transactional publication.
 - A Swiss record-label-style workspace for projects, tracks, scene selection,
-  timeline/event editing, staged assistance, lyric synchronization, and export.
+  live parameter tuning, timeline/event editing, staged assistance, lyric
+  synchronization, and export.
 - Atomic `.musi` v1 persistence plus a capability-aware product doctor and
   source/archive-backed Linux launcher.
 
@@ -466,8 +468,10 @@ M1 acceptance gate:
 
 - [x] Specify the versioned `.musi` project and sidecar schemas before choosing
   a parser implementation.
-- [ ] Add scene stacks, parameters, mappings, automation, cues, transitions,
-  asset provenance, and deterministic seeds.
+- [x] Add bounded per-scene parameters, a responsive live inspector, canonical
+  constant preset mappings, asset provenance, and deterministic seeds.
+- [ ] Add scene stacks, time-varying mappings, parameter automation/cues, and
+  transitions.
 - [x] Add whole-track measured analysis and a versioned cache.
 - [x] Import Whisper word/line timing with confidence and manual corrections,
   including the prior Remotion whisper.cpp/caption formats and an in-app
@@ -511,11 +515,13 @@ M3 acceptance gate:
 - Export and preview share scene/render-graph code.
 - Long exports remain responsive to cancellation and propagate FFmpeg errors.
 
-### M4 - Wild prototypes (queued)
+### M4 - Wild prototypes (in progress)
 
-- [ ] Whole-Song Atlas. A bounded streaming 3D terrain prototype now works in
-  preview/export; measured-cache prefill, saved parameters, and failure tests
-  remain before graduation.
+- [x] Whole-Song Atlas prototype. A bounded whole-track time/frequency map is
+  prepared from decoded PCM and rendered as batched 3D terrain in preview and
+  export, with deterministic map/failure tests and a live-input fallback.
+  Persistent analysis caching, saved camera parameters, multi-resolution mesh
+  detail, and free exploration remain follow-up product work.
 - [ ] Spectral Terrarium. A bounded fixed-step ecosystem prototype now works;
   saved parameters, reusable instancing, and failure tests remain before
   graduation.
@@ -733,6 +739,101 @@ failure-path test.
   scissored and 3D scenes query that state, while Spectrum and Pulse Field draw
   directly in logical 2D coordinates; all seven now share the same resize
   contract.
+
+### 2026-07-14 - Crackle-resistant preview streaming
+
+- Increased raylib music decode-ahead from its roughly 33 ms default half-buffer
+  to 8,192 frames (about 170 ms at 48 kHz), giving durable autosave and analysis
+  completion work bounded main-thread breathing room without changing the
+  audio-device period.
+- Preview streams are primed before playback and serviced before potentially
+  slow UI/job polling as well as afterward. Whole-track SHA-256 identity is now
+  calculated during initial load, rather than first autosave during playback.
+- Added product regression checks for buffer configuration order, minimum
+  refill headroom, early stream service, and pre-playback priming. The remaining
+  long-term improvement is moving all project serialization and large media
+  preparation off the UI thread rather than relying solely on decode-ahead.
+
+### 2026-07-14 - Assist product-state and responsive-layout pass
+
+- Reworked all four Assist workflows around one explicit selection and launch
+  confirmation model. Local/remote boundaries, real workflow stages, active
+  track, elapsed time, hard timeout, cancellation, immutable failure log, and
+  lane-specific replacement counts now remain visible through the lifecycle.
+- Added disabled mode states with actionable reasons, a supported-small-window
+  panel height policy, a two-column narrow fallback, clipping containment, and
+  a compact fullscreen handoff status. The longest staged-result view now fits
+  the 960x640 minimum window instead of extending below the timeline surface.
+- Made interactive cancellation non-blocking and polled, retained bounded
+  process-tree cleanup for unload/shutdown, recovered impossible active states,
+  and prevented assisted lyric replacement from clearing an authored draft.
+  Apply and Discard return the state machine to idle after a staged result is
+  resolved.
+- Added a dependency-light Assist policy module with headless tests for all
+  mode boundaries, start guards, responsive layouts, and lyric-draft conflict
+  protection, plus product-source wiring coverage.
+
+### 2026-07-14 - Experimental scene quality pass
+
+- Rebuilt ASCII image conversion around aspect-preserving bounds, robust tonal
+  normalization, alpha-aware source color, coherent edge detail, and a richer
+  glyph ramp. The scene now behaves as a stable image plane with restrained
+  audio response and supersampling-aware CRT accents instead of resizing and
+  scattering individual characters.
+- Replaced Orbital Lattice's absolute-time audio phase multiplication with
+  integrated, damped motion state. Separate attack/release envelopes and
+  bounded camera, node, ring, and convoy behavior keep it responsive without
+  late-track phase jumps or disorienting whole-scene jitter.
+- Turned Song Atlas into a bounded whole-track time/frequency terrain prepared
+  from decoded PCM, with normalized dynamics, onset landmarks, and a moving
+  playhead. Its live-input fallback scrolls continuously at renderer cadence;
+  both paths batch the surface and contours rather than issuing hundreds of
+  small 3D primitive calls.
+- Added deterministic ASCII glyph cycling and restrained two-axis wave motion,
+  while keeping coherent edges and empty image regions stable. Wider dark/light
+  CRT bands remain visible after aggressive web-video recompression.
+- Added focused tests for ASCII layout/conversion, frame-rate-independent
+  orbital motion, whole-track atlas mapping, and the scene performance wiring.
+- Integrated validation passed 148/148 C tests in debug, release, and
+  ASan/UBSan profiles; 52/52 Python adapter/product tests; all four Linux app
+  build profiles; the portable distribution build; and real 640x360 High
+  renders for ASCII Field, Orbital Lattice, and Song Atlas. Each render produced
+  exactly 144 H.264 High/yuv420p frames and a six-second AAC stream.
+- A final lifecycle audit added a true job-wide Assist deadline, race-free
+  Windows Job Object containment/cancellation, reload/shutdown ownership
+  retention, and the complete Assist support tree in the macOS bundle. Loading
+  an additional track now intentionally pauses and resumes active preview while
+  synchronous decode/hash/atlas preparation runs, avoiding buffer underrun
+  crackle during that bounded operation.
+
+### 2026-07-14 - Live scene-parameter inspector
+
+- Added bounded, descriptor-driven controls for all seven scenes. Spectrum,
+  ASCII Field, Spectral Terrarium, and Constellation expose three or four
+  focused controls; Pulse Field and Orbital Lattice expose five. Song Atlas
+  exposes eight controls for terrain, camera, contours, hue, motion, and
+  Filled/Wireframe surface style.
+- Added a right-side inspector with exact numeric readouts, drag sliders,
+  per-scene Reset, and dirty-state/autosave integration. **Tune** expands the
+  window by 340 logical pixels when the current monitor has room; otherwise a
+  shared responsive layout compacts the track rail and preview while retaining
+  a minimum 620-pixel workspace.
+- Kept preview and export on one parameterized renderer path. Motion remains
+  sample-clock deterministic, integer-like settings are quantized at the UI
+  boundary, invalid/nonfinite values fall back to documented defaults, and
+  every setting has a bounded range.
+- Persisted presets through canonical constant v1 parameter mappings. Older
+  zero-mapping projects reopen with defaults; unknown, dynamic, duplicate, or
+  out-of-range settings remain rejected rather than silently normalized.
+- Expanded Song Atlas terrain height to 2.75, terrain width to 3.20, and camera
+  height to 0.25-1.75. Hue shift affects the background, terrain, landmarks,
+  and contour palette; camera speed changes only deterministic camera travel,
+  preserving the audio-synchronized whole-song playhead. Wireframe mode skips
+  filled triangles and submits the complete row/frequency grid in batched line
+  passes for both decoded-track and live-input paths.
+- Validation passed the warning-clean debug application build, 154/154 C tests
+  in release and ASan+UBSan profiles, all eight focused scene-quality/UI
+  contract tests, and the complete 56/56 Python adapter/product suite.
 
 ## Milestones
 

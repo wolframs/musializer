@@ -1,0 +1,294 @@
+#include "scene_settings.h"
+
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define SETTING(key_, label_, min_, max_, default_, precision_) \
+    { key_, label_, min_, max_, default_, precision_, SCENE_SETTING_SLIDER }
+#define TOGGLE(key_, label_, default_) \
+    { key_, label_, 0.0f, 1.0f, default_, 0, SCENE_SETTING_TOGGLE }
+
+static const Scene_Setting_Descriptor spectrum_settings[] = {
+    SETTING("settings.spectrum.amplitude", "Amplitude", 0.40f, 2.00f, 1.00f, 2),
+    SETTING("settings.spectrum.trail", "Trail size", 0.25f, 2.50f, 1.00f, 2),
+    SETTING("settings.spectrum.saturation", "Saturation", 0.25f, 1.25f, 1.00f, 2),
+};
+
+static const Scene_Setting_Descriptor pulse_settings[] = {
+    SETTING("settings.pulse.scale", "Field scale", 0.55f, 1.15f, 1.00f, 2),
+    SETTING("settings.pulse.rings", "Ring count", 6.00f, 48.00f, 24.00f, 0),
+    SETTING("settings.pulse.motion", "Rotation speed", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.pulse.arc", "Arc length", 0.50f, 1.50f, 1.00f, 2),
+    SETTING("settings.pulse.weight", "Line weight", 0.30f, 2.50f, 1.00f, 2),
+};
+
+static const Scene_Setting_Descriptor orbital_settings[] = {
+    SETTING("settings.orbital.motion", "Motion speed", 0.15f, 2.00f, 1.00f, 2),
+    SETTING("settings.orbital.radius", "Lattice radius", 0.55f, 1.45f, 1.00f, 2),
+    SETTING("settings.orbital.depth", "Depth spacing", 0.55f, 1.55f, 1.00f, 2),
+    SETTING("settings.orbital.nodes", "Node size", 0.35f, 2.20f, 1.00f, 2),
+    SETTING("settings.orbital.links", "Link weight", 0.00f, 2.20f, 1.00f, 2),
+};
+
+static const Scene_Setting_Descriptor ascii_settings[] = {
+    SETTING("settings.ascii.motion", "Wave motion", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.ascii.cycling", "Glyph cycling", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.ascii.scanlines", "Scanlines", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.ascii.split", "Color split", 0.00f, 2.00f, 1.00f, 2),
+};
+
+static const Scene_Setting_Descriptor atlas_settings[] = {
+    SETTING("settings.atlas.height", "Terrain height", 0.35f, 2.75f, 1.00f, 2),
+    SETTING("settings.atlas.width", "Terrain width", 0.55f, 3.20f, 1.00f, 2),
+    SETTING("settings.atlas.depth", "Depth spacing", 0.50f, 1.65f, 1.00f, 2),
+    SETTING("settings.atlas.camera", "Camera height", 0.25f, 1.75f, 1.00f, 2),
+    SETTING("settings.atlas.contours", "Contour weight", 0.00f, 2.50f, 1.00f, 2),
+    SETTING("settings.atlas.color", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.atlas.speed", "Camera speed", 0.00f, 2.50f, 1.00f, 2),
+    TOGGLE("settings.atlas.wireframe", "Surface style", 0.0f),
+};
+
+static const Scene_Setting_Descriptor terrarium_settings[] = {
+    SETTING("settings.terrarium.motion", "Camera motion", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.terrarium.growth", "Plant growth", 0.40f, 1.80f, 1.00f, 2),
+    SETTING("settings.terrarium.particles", "Particle size", 0.00f, 2.20f, 1.00f, 2),
+};
+
+static const Scene_Setting_Descriptor constellation_settings[] = {
+    SETTING("settings.constellation.motion", "Camera motion", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.constellation.scale", "Field scale", 0.50f, 1.60f, 1.00f, 2),
+    SETTING("settings.constellation.glow", "Node glow", 0.00f, 2.20f, 1.00f, 2),
+};
+
+typedef struct Scene_Setting_Table {
+    const Scene_Setting_Descriptor *items;
+    size_t count;
+} Scene_Setting_Table;
+
+static const Scene_Setting_Table tables[SCENE_SETTINGS_SCENE_COUNT] = {
+    { spectrum_settings, sizeof(spectrum_settings)/sizeof(spectrum_settings[0]) },
+    { pulse_settings, sizeof(pulse_settings)/sizeof(pulse_settings[0]) },
+    { orbital_settings, sizeof(orbital_settings)/sizeof(orbital_settings[0]) },
+    { ascii_settings, sizeof(ascii_settings)/sizeof(ascii_settings[0]) },
+    { atlas_settings, sizeof(atlas_settings)/sizeof(atlas_settings[0]) },
+    { terrarium_settings, sizeof(terrarium_settings)/sizeof(terrarium_settings[0]) },
+    { constellation_settings,
+      sizeof(constellation_settings)/sizeof(constellation_settings[0]) },
+};
+
+static bool value_in_range(float value, const Scene_Setting_Descriptor *descriptor)
+{
+    if (descriptor == NULL || !isfinite(value) ||
+        value < descriptor->minimum || value > descriptor->maximum) return false;
+    return descriptor->kind != SCENE_SETTING_TOGGLE ||
+           value == 0.0f || value == 1.0f;
+}
+
+size_t scene_settings_count(size_t scene_index)
+{
+    return scene_index < SCENE_SETTINGS_SCENE_COUNT ? tables[scene_index].count : 0;
+}
+
+const Scene_Setting_Descriptor *scene_settings_descriptor(
+    size_t scene_index, size_t setting_index)
+{
+    if (scene_index >= SCENE_SETTINGS_SCENE_COUNT ||
+        setting_index >= tables[scene_index].count) return NULL;
+    return &tables[scene_index].items[setting_index];
+}
+
+void scene_settings_init(Scene_Settings *settings)
+{
+    if (settings == NULL) return;
+    memset(settings, 0, sizeof(*settings));
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        for (size_t index = 0; index < tables[scene].count; ++index) {
+            settings->values[scene][index] = tables[scene].items[index].default_value;
+        }
+    }
+}
+
+bool scene_settings_valid(const Scene_Settings *settings)
+{
+    if (settings == NULL) return false;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        for (size_t index = 0; index < tables[scene].count; ++index) {
+            if (!value_in_range(settings->values[scene][index],
+                                &tables[scene].items[index])) return false;
+        }
+    }
+    return true;
+}
+
+float scene_settings_get(const Scene_Settings *settings,
+                         size_t scene_index, size_t setting_index)
+{
+    const Scene_Setting_Descriptor *descriptor = scene_settings_descriptor(
+        scene_index, setting_index);
+    if (descriptor == NULL) return 1.0f;
+    if (settings == NULL ||
+        !value_in_range(settings->values[scene_index][setting_index], descriptor)) {
+        return descriptor->default_value;
+    }
+    return settings->values[scene_index][setting_index];
+}
+
+bool scene_settings_set(Scene_Settings *settings, size_t scene_index,
+                        size_t setting_index, float value)
+{
+    const Scene_Setting_Descriptor *descriptor = scene_settings_descriptor(
+        scene_index, setting_index);
+    if (settings == NULL || !value_in_range(value, descriptor)) return false;
+    settings->values[scene_index][setting_index] = value;
+    return true;
+}
+
+bool scene_settings_reset_scene(Scene_Settings *settings, size_t scene_index)
+{
+    if (settings == NULL || scene_index >= SCENE_SETTINGS_SCENE_COUNT) return false;
+    for (size_t index = 0; index < tables[scene_index].count; ++index) {
+        settings->values[scene_index][index] = tables[scene_index].items[index].default_value;
+    }
+    return true;
+}
+
+static const Scene_Setting_Descriptor *descriptor_for_key(
+    const char *key, size_t *scene_index, size_t *setting_index)
+{
+    if (key == NULL) return NULL;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        for (size_t index = 0; index < tables[scene].count; ++index) {
+            if (strcmp(key, tables[scene].items[index].key) == 0) {
+                if (scene_index != NULL) *scene_index = scene;
+                if (setting_index != NULL) *setting_index = index;
+                return &tables[scene].items[index];
+            }
+        }
+    }
+    return NULL;
+}
+
+bool scene_settings_mapping_supported(const Musi_Parameter_Mapping *mapping)
+{
+    if (mapping == NULL || descriptor_for_key(mapping->parameter, NULL, NULL) == NULL) {
+        return false;
+    }
+    return mapping->source == MUSI_ANALYSIS_RMS && mapping->band_index == 0 &&
+           mapping->input_min == 0.0 && mapping->input_max == 1.0 &&
+           mapping->output_min == mapping->output_max &&
+           isfinite(mapping->output_min) &&
+           mapping->interpolation == MUSI_INTERPOLATION_LINEAR && mapping->clamp;
+}
+
+bool scene_settings_mappings_supported(const Musi_Parameter_Mapping *mappings,
+                                       size_t count)
+{
+    if (count > MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE ||
+        (count > 0 && mappings == NULL)) return false;
+    for (size_t index = 0; index < count; ++index) {
+        if (!scene_settings_mapping_supported(&mappings[index])) return false;
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (strcmp(mappings[previous].parameter,
+                       mappings[index].parameter) == 0) return false;
+        }
+    }
+    return true;
+}
+
+bool scene_settings_export_mappings(
+    const Scene_Settings *settings,
+    Musi_Parameter_Mapping *mappings, size_t capacity, size_t *count)
+{
+    if (!scene_settings_valid(settings) || mappings == NULL || count == NULL) return false;
+    size_t required = 0;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        required += tables[scene].count;
+    }
+    if (required > capacity) return false;
+
+    Musi_Parameter_Mapping staged[MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE] = {0};
+    if (required > sizeof(staged)/sizeof(staged[0])) return false;
+    size_t at = 0;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        for (size_t index = 0; index < tables[scene].count; ++index) {
+            const Scene_Setting_Descriptor *descriptor = &tables[scene].items[index];
+            Musi_Parameter_Mapping *mapping = &staged[at++];
+            int length = snprintf(mapping->parameter, sizeof(mapping->parameter),
+                                  "%s", descriptor->key);
+            if (length <= 0 || (size_t)length >= sizeof(mapping->parameter)) return false;
+            mapping->source = MUSI_ANALYSIS_RMS;
+            mapping->input_min = 0.0;
+            mapping->input_max = 1.0;
+            mapping->output_min = settings->values[scene][index];
+            mapping->output_max = settings->values[scene][index];
+            mapping->interpolation = MUSI_INTERPOLATION_LINEAR;
+            mapping->clamp = true;
+        }
+    }
+    memcpy(mappings, staged, required*sizeof(staged[0]));
+    *count = required;
+    return true;
+}
+
+bool scene_settings_import_mappings(
+    Scene_Settings *settings,
+    const Musi_Parameter_Mapping *mappings, size_t count)
+{
+    if (settings == NULL || !scene_settings_mappings_supported(mappings, count)) {
+        return false;
+    }
+    Scene_Settings staged;
+    scene_settings_init(&staged);
+    for (size_t at = 0; at < count; ++at) {
+        size_t scene = 0;
+        size_t index = 0;
+        const Scene_Setting_Descriptor *descriptor = descriptor_for_key(
+            mappings[at].parameter, &scene, &index);
+        float value = (float)mappings[at].output_min;
+        if (!value_in_range(value, descriptor)) return false;
+        staged.values[scene][index] = value;
+    }
+    *settings = staged;
+    return true;
+}
+
+bool scene_settings_ui_layout(float window_width, bool inspector_open,
+                              Scene_Settings_Ui_Layout *layout)
+{
+    if (layout == NULL || !isfinite(window_width) || window_width < 640.0f) return false;
+    float inspector_width = 0.0f;
+    if (inspector_open) {
+        inspector_width = window_width*0.265f;
+        if (inspector_width < 280.0f) inspector_width = 280.0f;
+        if (inspector_width > 340.0f) inspector_width = 340.0f;
+        if (window_width - inspector_width < 620.0f) {
+            inspector_width = window_width - 620.0f;
+        }
+        if (inspector_width < 240.0f) inspector_width = 240.0f;
+    }
+    float workspace_width = window_width - inspector_width;
+    float tracks_width = inspector_open ? workspace_width*0.25f : 320.0f;
+    if (tracks_width < 240.0f) tracks_width = 240.0f;
+    if (tracks_width > 320.0f) tracks_width = 320.0f;
+    *layout = (Scene_Settings_Ui_Layout) {
+        .inspector_width = inspector_width,
+        .workspace_width = workspace_width,
+        .tracks_width = tracks_width,
+    };
+    return true;
+}
+
+bool scene_settings_window_can_expand(int window_x, int window_width,
+                                      int monitor_x, int monitor_width,
+                                      int inspector_width)
+{
+    if (window_width <= 0 || monitor_width <= 0 || inspector_width <= 0) return false;
+    int64_t window_right = (int64_t)window_x + window_width;
+    int64_t target_right = window_right + inspector_width;
+    int64_t monitor_left = monitor_x;
+    int64_t monitor_right = (int64_t)monitor_x + monitor_width;
+    return window_x >= monitor_left && window_right <= monitor_right &&
+           target_right <= monitor_right;
+}

@@ -208,6 +208,11 @@ bool build_dist(void)
 
     if (!nob_copy_file("./build/musializer", "./build/Musializer.app/Contents/MacOS/Musializer")) return false;
     if (!nob_copy_file("./src_build/Info.plist", "./build/Musializer.app/Contents/Info.plist")) return false;
+    // Assist resolves its packaged helper relative to GetApplicationDirectory(),
+    // which is Contents/MacOS for an application bundle. Keep the complete
+    // centralized support tree beside the executable so the helper's own
+    // repository-relative prompts, schemas, and sibling adapters remain valid.
+    if (!copy_distribution_support("./build/Musializer.app/Contents/MacOS")) return false;
 
     typedef struct {
         const char *out_path;

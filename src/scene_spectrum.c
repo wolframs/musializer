@@ -13,14 +13,22 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
 
     const float *bands = frame->audio.bands;
     const float *trails = frame->audio.trails;
+    float amplitude_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_AMPLITUDE);
+    float trail_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_TRAIL);
+    float saturation_scale = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_SATURATION);
     float cell_width = boundary.width/bands_count;
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float semantic_hue = frame->semantic.valence*55.0f*semantic_weight;
-    float saturation = 0.75f + frame->semantic.tension*0.2f*semantic_weight;
+    float saturation = (0.75f + frame->semantic.tension*0.2f*semantic_weight)*
+                       saturation_scale;
+    if (saturation > 1.0f) saturation = 1.0f;
     float value = 1.0f;
 
     for (size_t i = 0; i < bands_count; ++i) {
-        float t = bands[i];
+        float t = fminf(1.0f, bands[i]*amplitude_scale);
         float hue = (float)i/bands_count;
         Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 startPos = {
@@ -41,8 +49,8 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
     SetShaderValue(renderer->circle_shader, renderer->circle_power_location, (float[1]){ 3.0f }, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(renderer->circle_shader);
     for (size_t i = 0; i < bands_count; ++i) {
-        float start = trails[i];
-        float end = bands[i];
+        float start = fminf(1.0f, trails[i]*amplitude_scale);
+        float end = fminf(1.0f, bands[i]*amplitude_scale);
         float hue = (float)i/bands_count;
         Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 startPos = {
@@ -53,7 +61,7 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*end,
         };
-        float radius = cell_width*3*sqrtf(end);
+        float radius = cell_width*3*sqrtf(end)*trail_scale;
         Vector2 origin = {0};
         if (endPos.y >= startPos.y) {
             Rectangle dest = {
@@ -81,14 +89,14 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
     SetShaderValue(renderer->circle_shader, renderer->circle_power_location, (float[1]){ 5.0f }, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(renderer->circle_shader);
     for (size_t i = 0; i < bands_count; ++i) {
-        float t = bands[i];
+        float t = fminf(1.0f, bands[i]*amplitude_scale);
         float hue = (float)i/bands_count;
         Color color = ColorFromHSV(fmodf(hue*360 + semantic_hue + 360.0f, 360.0f), saturation, value);
         Vector2 center = {
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*t,
         };
-        float radius = cell_width*6*sqrtf(t);
+        float radius = cell_width*6*sqrtf(t)*trail_scale;
         Vector2 position = {
             .x = center.x - radius,
             .y = center.y - radius,

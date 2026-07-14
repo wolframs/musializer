@@ -402,6 +402,11 @@ typedef struct {
     const char *stdout_path;
     // Redirect stderr to file
     const char *stderr_path;
+#ifdef _WIN32
+    // Optional Job Object which must own the child before it begins executing.
+    // The caller retains ownership of the job handle.
+    HANDLE win32_job_object;
+#endif
 } Nob_Cmd_Opt;
 
 // Run the command with options.
@@ -768,7 +773,7 @@ NOBDEF char *nob_win32_error_message(DWORD err);
 static int nob__proc_wait_async(Nob_Proc proc, int ms);
 
 // Starts the process for the command. Its main purpose is to be the base for nob_cmd_run() and nob_cmd_run_opt().
-static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout, Nob_Fd *fderr);
+static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout, Nob_Fd *fderr, Nob_Proc win32_job_object);
 
 // Any messages with the level below nob_minimal_log_level are going to be suppressed.
 Nob_Log_Level nob_minimal_log_level = NOB_INFO;
@@ -1062,7 +1067,12 @@ NOBDEF bool nob_cmd_run_opt(Nob_Cmd *cmd, Nob_Cmd_Opt opt)
         if (fderr == NOB_INVALID_FD) nob_return_defer(false);
         opt_fderr = &fderr;
     }
-    Nob_Proc proc = nob__cmd_start_process(*cmd, opt_fdin, opt_fdout, opt_fderr);
+    Nob_Proc win32_job_object = NOB_INVALID_PROC;
+#ifdef _WIN32
+    win32_job_object = opt.win32_job_object;
+#endif
+    Nob_Proc proc = nob__cmd_start_process(
+        *cmd, opt_fdin, opt_fdout, opt_fderr, win32_job_object);
 
     if (opt.async) {
         if (proc == NOB_INVALID_PROC) nob_return_defer(false);
@@ -1104,10 +1114,11 @@ NOBDEF uint64_t nob_nanos_since_unspecified_epoch(void)
 
 NOBDEF Nob_Proc nob_cmd_run_async_redirect(Nob_Cmd cmd, Nob_Cmd_Redirect redirect)
 {
-    return nob__cmd_start_process(cmd, redirect.fdin, redirect.fdout, redirect.fderr);
+    return nob__cmd_start_process(
+        cmd, redirect.fdin, redirect.fdout, redirect.fderr, NOB_INVALID_PROC);
 }
 
-static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout, Nob_Fd *fderr)
+static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout, Nob_Fd *fderr, Nob_Proc win32_job_object)
 {
     if (cmd.count < 1) {
         nob_log(NOB_ERROR, "Could not run empty command");
@@ -1140,7 +1151,12 @@ static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout,
 
     nob__win32_cmd_quote(cmd, &sb);
     nob_sb_append_null(&sb);
-    BOOL bSuccess = CreateProcessA(NULL, sb.items, NULL, NULL, TRUE, 0, NULL, NULL, &siStartInfo, &piProcInfo);
+    bool assign_to_job = win32_job_object != NULL &&
+                         win32_job_object != NOB_INVALID_PROC;
+    DWORD creation_flags = assign_to_job ? CREATE_SUSPENDED : 0;
+    BOOL bSuccess = CreateProcessA(NULL, sb.items, NULL, NULL, TRUE,
+                                  creation_flags, NULL, NULL,
+                                  &siStartInfo, &piProcInfo);
     nob_sb_free(sb);
 
     if (!bSuccess) {
@@ -1148,10 +1164,46 @@ static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout,
         return NOB_INVALID_PROC;
     }
 
+    if (assign_to_job &&
+        !AssignProcessToJobObject(win32_job_object, piProcInfo.hProcess)) {
+        DWORD assign_error = GetLastError();
+        // The process is still suspended, so it cannot spawn an uncontained
+        // descendant while failure cleanup completes.
+        if (!TerminateProcess(piProcInfo.hProcess, 1)) {
+            nob_log(NOB_ERROR,
+                    "Could not terminate suspended child process for %s: %s",
+                    cmd.items[0], nob_win32_error_message(GetLastError()));
+        } else {
+            WaitForSingleObject(piProcInfo.hProcess, INFINITE);
+        }
+        CloseHandle(piProcInfo.hThread);
+        CloseHandle(piProcInfo.hProcess);
+        nob_log(NOB_ERROR, "Could not assign child process for %s to Job Object: %s",
+                cmd.items[0], nob_win32_error_message(assign_error));
+        return NOB_INVALID_PROC;
+    }
+
+    if (assign_to_job && ResumeThread(piProcInfo.hThread) == (DWORD)-1) {
+        DWORD resume_error = GetLastError();
+        if (!TerminateProcess(piProcInfo.hProcess, 1)) {
+            nob_log(NOB_ERROR,
+                    "Could not terminate unresumable child process for %s: %s",
+                    cmd.items[0], nob_win32_error_message(GetLastError()));
+        } else {
+            WaitForSingleObject(piProcInfo.hProcess, INFINITE);
+        }
+        CloseHandle(piProcInfo.hThread);
+        CloseHandle(piProcInfo.hProcess);
+        nob_log(NOB_ERROR, "Could not resume child process for %s: %s",
+                cmd.items[0], nob_win32_error_message(resume_error));
+        return NOB_INVALID_PROC;
+    }
+
     CloseHandle(piProcInfo.hThread);
 
     return piProcInfo.hProcess;
 #else
+    (void)win32_job_object;
     pid_t cpid = fork();
     if (cpid < 0) {
         nob_log(NOB_ERROR, "Could not fork child process: %s", strerror(errno));
@@ -1199,19 +1251,21 @@ static Nob_Proc nob__cmd_start_process(Nob_Cmd cmd, Nob_Fd *fdin, Nob_Fd *fdout,
 
 NOBDEF Nob_Proc nob_cmd_run_async(Nob_Cmd cmd)
 {
-    return nob__cmd_start_process(cmd, NULL, NULL, NULL);
+    return nob__cmd_start_process(cmd, NULL, NULL, NULL, NOB_INVALID_PROC);
 }
 
 NOBDEF Nob_Proc nob_cmd_run_async_and_reset(Nob_Cmd *cmd)
 {
-    Nob_Proc proc = nob__cmd_start_process(*cmd, NULL, NULL, NULL);
+    Nob_Proc proc = nob__cmd_start_process(
+        *cmd, NULL, NULL, NULL, NOB_INVALID_PROC);
     cmd->count = 0;
     return proc;
 }
 
 NOBDEF Nob_Proc nob_cmd_run_async_redirect_and_reset(Nob_Cmd *cmd, Nob_Cmd_Redirect redirect)
 {
-    Nob_Proc proc = nob__cmd_start_process(*cmd, redirect.fdin, redirect.fdout, redirect.fderr);
+    Nob_Proc proc = nob__cmd_start_process(
+        *cmd, redirect.fdin, redirect.fdout, redirect.fderr, NOB_INVALID_PROC);
     cmd->count = 0;
     if (redirect.fdin) {
         nob_fd_close(*redirect.fdin);
@@ -1468,26 +1522,30 @@ NOBDEF bool nob_procs_append_with_flush(Nob_Procs *procs, Nob_Proc proc, size_t 
 
 NOBDEF bool nob_cmd_run_sync_redirect(Nob_Cmd cmd, Nob_Cmd_Redirect redirect)
 {
-    Nob_Proc p = nob__cmd_start_process(cmd, redirect.fdin, redirect.fdout, redirect.fderr);
+    Nob_Proc p = nob__cmd_start_process(
+        cmd, redirect.fdin, redirect.fdout, redirect.fderr, NOB_INVALID_PROC);
     return nob_proc_wait(p);
 }
 
 NOBDEF bool nob_cmd_run_sync(Nob_Cmd cmd)
 {
-    Nob_Proc p = nob__cmd_start_process(cmd, NULL, NULL, NULL);
+    Nob_Proc p = nob__cmd_start_process(
+        cmd, NULL, NULL, NULL, NOB_INVALID_PROC);
     return nob_proc_wait(p);
 }
 
 NOBDEF bool nob_cmd_run_sync_and_reset(Nob_Cmd *cmd)
 {
-    Nob_Proc p = nob__cmd_start_process(*cmd, NULL, NULL, NULL);
+    Nob_Proc p = nob__cmd_start_process(
+        *cmd, NULL, NULL, NULL, NOB_INVALID_PROC);
     cmd->count = 0;
     return nob_proc_wait(p);
 }
 
 NOBDEF bool nob_cmd_run_sync_redirect_and_reset(Nob_Cmd *cmd, Nob_Cmd_Redirect redirect)
 {
-    Nob_Proc p = nob__cmd_start_process(*cmd, redirect.fdin, redirect.fdout, redirect.fderr);
+    Nob_Proc p = nob__cmd_start_process(
+        *cmd, redirect.fdin, redirect.fdout, redirect.fderr, NOB_INVALID_PROC);
     cmd->count = 0;
     if (redirect.fdin) {
         nob_fd_close(*redirect.fdin);

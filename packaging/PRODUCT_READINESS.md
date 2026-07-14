@@ -55,6 +55,12 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
   prevent repaint/cancel input despite bounded child cleanup. A writer queue
   and asynchronous finalization are required before claiming long-export UI
   responsiveness.
+- The Assist panel discovers its packaged helper and reports launch/runtime
+  failures with the immutable job log, but it does not duplicate the product
+  doctor's full Python/model/credential preflight in-process. The helper also
+  exposes elapsed time and a hard timeout, not structured per-stage progress or
+  a trustworthy percentage. Run `tools/musializer_doctor.py` before production
+  sessions that depend on Whisper, Codex, or OpenRouter.
 - Export currently decodes the complete track and holds both Raylib's Wave and
   a float analysis copy. Normal songs are handled, but hour-long mixes can use
   gigabytes and need a chunked canonical PCM reader before large-media claims.
@@ -66,7 +72,9 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
   and complex-script shaping are not implemented yet.
 - The current editor intentionally rejects schema-valid project features it
   cannot preserve: imported audio, partial ranges, fractional FPS/non-MP4
-  output, scene stacks/noncanonical layout, parameter cues, and mappings.
+  output, scene stacks/noncanonical layout, parameter cues, and arbitrary
+  analysis-driven mappings. Canonical constant mappings used for the built-in
+  scene-control inspector are validated and preserved.
 - There is no native system/package installer, auto-updater, code signing, or
   release upload workflow on any platform. Linux does provide a tested per-user
   XDG launcher installer for source and unpacked portable builds.

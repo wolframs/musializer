@@ -6,10 +6,14 @@
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #include "build/config.h"
 #include "analysis_bridge.h"
 #include "analysis_candidate.h"
+#include "assist_ui_state.h"
 #include "caption_layout.h"
 #include "audio_analyzer.h"
 #include "editor_draft.h"
@@ -94,7 +98,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 14
+#define PLUG_STATE_VERSION 19
 
 #define COLOR_ACCENT                  GetColor(0x002FA7FF)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -142,6 +146,8 @@ typedef struct {
     uint64_t scene_instance_id;
     Render_Export_Config render_config;
     Track_Timeline_Waveform timeline_waveform;
+    Song_Atlas_Map song_atlas_map;
+    Scene_Settings scene_settings;
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;
@@ -161,22 +167,6 @@ typedef struct {
     size_t count;
     size_t capacity;
 } Tracks;
-
-typedef enum {
-    ASSIST_MODE_LYRICS,
-    ASSIST_MODE_SECTIONS,
-    ASSIST_MODE_MIMO,
-    ASSIST_MODE_ALL,
-} Assist_Mode;
-
-typedef enum {
-    ASSIST_JOB_IDLE,
-    ASSIST_JOB_RUNNING,
-    ASSIST_JOB_SUCCEEDED,
-    ASSIST_JOB_FAILED,
-    ASSIST_JOB_CANCELLED,
-} Assist_Job_State;
-
 
 typedef enum {
     SIDE_LEFT,
@@ -253,6 +243,13 @@ typedef struct {
 
     // Scene engine
     Scene_Instance scene;
+    Scene_Settings scene_settings;
+    bool scene_settings_open;
+    bool scene_settings_window_expanded;
+    int scene_settings_restore_width;
+    int scene_settings_expanded_width;
+    float scene_settings_scroll;
+    Scene_Id scene_settings_scroll_scene;
     uint64_t scene_frame_index;
     double scene_previous_time;
     bool scene_clock_initialized;
@@ -286,12 +283,16 @@ typedef struct {
     Assist_Mode assist_mode;
     Assist_Job_State assist_job_state;
     Nob_Proc assist_process;
+#ifdef _WIN32
+    HANDLE assist_job_object;
+#endif
     size_t assist_track_index;
     char assist_output_dir[PLUG_RELOAD_PATH_CAPACITY];
     char assist_bridge_path[PLUG_RELOAD_PATH_CAPACITY];
     char assist_log_path[PLUG_RELOAD_PATH_CAPACITY];
     uint64_t assist_job_nonce;
     double assist_started_at;
+    double assist_cancel_started_at;
     bool assist_confirmation_pending;
     bool assist_apply_confirmation_pending;
     Analysis_Candidate *assist_candidate;
@@ -500,6 +501,9 @@ static void start_preview_track(Track *track)
     p->scene_frame_index = 0;
     p->scene_clock_initialized = false;
     scene_switch_reset(&track->scene_switches);
+    // Fill both processed halves before the device starts consuming them. This
+    // avoids making the first rendered frame race an initially silent stream.
+    UpdateMusicStream(track->music);
     PlayMusicStream(track->music);
 }
 
@@ -524,6 +528,7 @@ static void load_timeline_waveform(Track *track)
 {
     if (track == NULL || track->file_path == NULL) return;
     memset(&track->timeline_waveform, 0, sizeof(track->timeline_waveform));
+    memset(&track->song_atlas_map, 0, sizeof(track->song_atlas_map));
 
     Wave wave = LoadWave(track->file_path);
     if (!IsWaveValid(wave)) {
@@ -537,6 +542,12 @@ static void load_timeline_waveform(Track *track)
             samples, (size_t)wave.frameCount, (size_t)wave.channels,
             track->timeline_waveform.bins,
             NOB_ARRAY_LEN(track->timeline_waveform.bins));
+        if (song_atlas_map_build(
+                samples, (size_t)wave.frameCount, (size_t)wave.channels,
+                wave.sampleRate, &track->song_atlas_map) == 0) {
+            TraceLog(LOG_WARNING, "ATLAS: whole-song map could not be prepared for %s",
+                     track->file_path);
+        }
         UnloadWaveSamples(samples);
     }
     UnloadWave(wave);
@@ -573,11 +584,26 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     }
     AttachAudioStreamProcessor(music.stream, callback);
     Track *active_track = current_track();
+    bool resume_active_preview = active_track != NULL &&
+                                 IsMusicStreamPlaying(active_track->music);
+    if (resume_active_preview) {
+        // Loading another track performs whole-file decode, hashing, waveform
+        // reduction, and atlas analysis. Pause intentionally across that
+        // bounded synchronous preparation so the device never consumes an
+        // underfilled stream and turns a UI load into audible crackle.
+        PauseMusicStream(active_track->music);
+    }
     Scene_Id initial_scene = active_track != NULL ? active_track->base_scene : p->scene.id;
     uint64_t initial_scene_seed = scene_seed_for_track(active_track);
     new_track->file_path = owned_path;
     new_track->music = music;
     new_track->duration_seconds = decoded_duration;
+    if (!sha256_file_hex(canonical_path, new_track->audio_sha256)) {
+        // Saving can retry this non-fatal identity calculation, but doing it
+        // before first playback normally keeps whole-file I/O out of autosave.
+        TraceLog(LOG_WARNING, "AUDIO: source identity was deferred for %s",
+                 canonical_path);
+    }
     scene_switch_init(&new_track->scene_switches);
     event_timeline_init(&new_track->semantic_events);
     event_timeline_init(&new_track->manual_events);
@@ -585,8 +611,13 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     new_track->base_scene = initial_scene;
     new_track->scene_seed = initial_scene_seed;
     new_track->scene_instance_id = 1;
+    scene_settings_init(&new_track->scene_settings);
     new_track->render_config = p->render_config;
     load_timeline_waveform(new_track);
+    if (resume_active_preview) {
+        UpdateMusicStream(active_track->music);
+        ResumeMusicStream(active_track->music);
+    }
     if (p->ascii_columns > 0 && p->ascii_rows > 0) {
         memcpy(new_track->ascii_cells, p->ascii_cells,
                p->ascii_columns*p->ascii_rows*sizeof(p->ascii_cells[0]));
@@ -620,12 +651,15 @@ MUSIALIZER_PLUG bool plug_load_ascii_image(const char *file_path)
     if (!IsImageValid(image)) return false;
     ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
 
-    size_t columns = (size_t)image.width;
-    if (columns > ASCII_GRID_MAX_COLUMNS) columns = ASCII_GRID_MAX_COLUMNS;
-    size_t rows = (size_t)image.height*columns/(size_t)image.width;
-    rows = (rows + 1)/2; // Alegreya glyphs are roughly twice as tall as wide.
-    if (rows < 1) rows = 1;
-    if (rows > ASCII_GRID_MAX_ROWS) rows = ASCII_GRID_MAX_ROWS;
+    size_t columns = 0;
+    size_t rows = 0;
+    if (!ascii_art_fit_grid_dimensions(
+            (size_t)image.width, (size_t)image.height,
+            ASCII_GRID_MAX_COLUMNS, ASCII_GRID_MAX_ROWS,
+            &columns, &rows)) {
+        UnloadImage(image);
+        return false;
+    }
 
     Track *track = current_track();
     AsciiCell *destination = track != NULL ? track->ascii_cells : p->ascii_cells;
@@ -799,6 +833,7 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         .time_seconds = time_seconds,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
+        .settings = track != NULL ? &track->scene_settings : &p->scene_settings,
         .semantic = semantic,
         .lyric = lyric,
         .events = combined_scene_events(),
@@ -897,6 +932,8 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
         .ascii_cells = ascii_cells,
         .ascii_columns = ascii_columns,
         .ascii_rows = ascii_rows,
+        .song_atlas_map = track != NULL ? &track->song_atlas_map : NULL,
+        .settings = track != NULL ? &track->scene_settings : &p->scene_settings,
         .pixel_scale = pixel_scale,
     };
     scene_instance_update(&p->scene, &frame);
@@ -1082,7 +1119,9 @@ static int button_with_id(uint64_t id, Rectangle boundary);
 static bool start_assist_job(Assist_Mode mode, Track *track);
 static uint32_t assist_mode_lanes(Assist_Mode mode);
 static void poll_assist_job(void);
-static void cancel_assist_job(void);
+static void request_assist_job_cancel(void);
+static bool request_assist_job_stop(Assist_Job_State stopping_state);
+static bool cancel_assist_job_blocking(void);
 static bool apply_assist_candidate(void);
 static void discard_assist_candidate(void);
 static void start_rendering_track(Track *track);
@@ -1116,6 +1155,28 @@ static int text_button(uint64_t id, Rectangle boundary, const char *label, bool 
                          boundary.y + (boundary.height - size.y)*0.5f},
                font_size, 0.0f, selected ? WHITE : COLOR_UI_INK);
     return state;
+}
+
+static void disabled_text_button(Rectangle boundary, const char *label, bool selected)
+{
+    Color background = selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.62f) :
+                                  ColorAlpha(COLOR_TRACK_BUTTON_BACKGROUND, 0.72f);
+    Color foreground = selected ? ColorAlpha(WHITE, 0.82f) : COLOR_UI_MUTED;
+    DrawRectangleRec(boundary, background);
+    DrawRectangleLinesEx(boundary, 1.0f,
+                         selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.7f) :
+                                    ColorAlpha(COLOR_UI_RULE, 0.8f));
+    float font_size = fminf(boundary.height*0.52f, 22.0f);
+    Vector2 size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
+    float available_width = boundary.width - 12.0f;
+    if (size.x > available_width && size.x > 0.0f) {
+        font_size *= available_width/size.x;
+        size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
+    }
+    DrawTextEx(ui_font(), label,
+               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
+                         boundary.y + (boundary.height - size.y)*0.5f},
+               font_size, 0.0f, foreground);
 }
 
 static Color event_type_color(uint32_t type)
@@ -1613,23 +1674,6 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
     }
 }
 
-static const char *assist_mode_display_name(Assist_Mode mode)
-{
-    switch (mode) {
-    case ASSIST_MODE_LYRICS: return "Timed lyrics";
-    case ASSIST_MODE_SECTIONS: return "Scene changes";
-    case ASSIST_MODE_MIMO: return "MiMo feelings";
-    case ASSIST_MODE_ALL: return "Full assist";
-    }
-    return "Analysis";
-}
-
-static bool assist_mode_needs_confirmation(Assist_Mode mode)
-{
-    return mode == ASSIST_MODE_LYRICS || mode == ASSIST_MODE_MIMO ||
-           mode == ASSIST_MODE_ALL;
-}
-
 static bool find_assist_helper(char *path, size_t capacity)
 {
     if (path == NULL || capacity == 0) return false;
@@ -1658,189 +1702,43 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     const float gap = 8.0f;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
+    BeginScissorMode((int)boundary.x + 1, (int)boundary.y + 1,
+                     (int)fmaxf(0.0f, boundary.width - 2.0f),
+                     (int)fmaxf(0.0f, boundary.height - 2.0f));
     DrawTextEx(ui_font(), "ASSISTED ANALYSIS",
                (Vector2){boundary.x + padding, boundary.y + padding},
                19.0f, 1.0f, signal);
     DrawTextEx(ui_font(),
-               "Every result is validated and staged. Nothing replaces editor content until you apply it.",
+               "Validated results stay staged until you apply them.",
                (Vector2){boundary.x + padding, boundary.y + 36.0f},
                15.0f, 1.0f, COLOR_UI_MUTED);
 
-    const char *labels[] = {"Timed lyrics", "Scene changes", "MiMo feelings", "Full assist"};
-    const char *badges[] = {"WHISPER + CODEX", "LOCAL", "OPENROUTER AUDIO", "LOCAL + REMOTE"};
     const Assist_Mode modes[] = {
         ASSIST_MODE_LYRICS, ASSIST_MODE_SECTIONS, ASSIST_MODE_MIMO, ASSIST_MODE_ALL,
     };
-    float button_width = (boundary.width - padding*2.0f - gap*3.0f)/4.0f;
+    static_assert(NOB_ARRAY_LEN(modes) == ASSIST_MODE_COUNT,
+                  "Assist mode selector is incomplete");
     char helper_path[PLUG_RELOAD_PATH_CAPACITY];
     bool helpers_available = find_assist_helper(helper_path, sizeof(helper_path));
-    bool busy = p->assist_job_state == ASSIST_JOB_RUNNING;
-    for (size_t i = 0; i < NOB_ARRAY_LEN(labels); ++i) {
-        Rectangle button_boundary = {
-            boundary.x + padding + i*(button_width + gap),
-            boundary.y + 60.0f,
-            button_width,
-            39.0f,
-        };
-        bool selected = (busy && p->assist_mode == modes[i]) ||
-                        (p->assist_confirmation_pending && p->assist_mode == modes[i]);
-        int state = text_button(UINT64_C(0x4153534953540000) + i,
-                                button_boundary, labels[i], selected);
-        DrawTextEx(ui_font(), badges[i],
-                   (Vector2){button_boundary.x + 3.0f, button_boundary.y + 42.0f},
-                   11.0f, 1.0f, busy ? ColorAlpha(COLOR_UI_MUTED, 0.55f) : COLOR_UI_MUTED);
-        if ((state & BS_CLICKED) && helpers_available && !busy) {
-            if (p->assist_candidate != NULL) {
-                notice_push(UI_NOTICE_INFO, "Review pending suggestions first",
-                            "Apply or discard the staged result before starting another job.",
-                            NULL, false);
-            } else if (assist_mode_needs_confirmation(modes[i])) {
-                p->assist_mode = modes[i];
-                p->assist_confirmation_pending = true;
-            } else if (!start_assist_job(modes[i], track)) {
-                notice_push(UI_NOTICE_ERROR, "Analysis could not start",
-                            "Check the helper installation and the application log.",
-                            p->assist_log_path, true);
-            }
-        }
-    }
+    bool active = assist_job_is_active(p->assist_job_state);
+    Assist_Start_Block start_block = assist_start_block(
+        helpers_available, p->assist_job_state, p->assist_candidate != NULL);
+    Assist_Panel_Content content = assist_panel_content(
+        p->assist_job_state, p->assist_confirmation_pending,
+        p->assist_candidate != NULL);
+    Assist_Ui_Layout layout = assist_ui_layout(boundary.width, content);
+    float button_width = (boundary.width - padding*2.0f -
+                          gap*(float)(layout.mode_columns - 1u))/
+                         (float)layout.mode_columns;
 
-    float status_y = boundary.y + 120.0f;
-    char status[256];
-    if (!helpers_available) {
-        snprintf(status, sizeof(status), "Assist helper is unavailable in this installation.");
-    } else if (busy) {
-        double elapsed = fmax(0.0, GetTime() - p->assist_started_at);
-        const char *track_name = p->assist_track_index < p->tracks.count ?
-                                 GetFileName(p->tracks.items[p->assist_track_index].file_path) :
-                                 "unknown track";
-        snprintf(status, sizeof(status), "%s is running for %s  |  %02u:%02u elapsed",
-                 assist_mode_display_name(p->assist_mode), track_name,
-                 (unsigned)(elapsed/60.0), (unsigned)fmod(elapsed, 60.0));
-    } else if (p->assist_confirmation_pending) {
-        snprintf(status, sizeof(status), "%s needs your confirmation",
-                 assist_mode_display_name(p->assist_mode));
-    } else if (p->assist_candidate != NULL) {
-        const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
-                                 GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
-                                 "unknown track";
-        snprintf(status, sizeof(status), "Validated suggestions are ready for %s", track_name);
-    } else if (p->assist_job_state == ASSIST_JOB_CANCELLED) {
-        snprintf(status, sizeof(status), "Cancelled. Previous editor content is unchanged.");
-    } else if (p->assist_job_state == ASSIST_JOB_FAILED) {
-        snprintf(status, sizeof(status), "Analysis failed. Previous editor content is unchanged.");
-    } else {
-        snprintf(status, sizeof(status), "Helper found. Run the product doctor for capability preflight.");
-    }
-    DrawTextEx(ui_font(), status, (Vector2){boundary.x + padding, status_y},
-               16.0f, 1.0f, busy ? signal : COLOR_UI_INK);
-
-    float action_y = status_y + 28.0f;
-    if (p->assist_confirmation_pending && !busy) {
-        const char *privacy = "";
-        const char *start_label = "Start";
-        if (p->assist_mode == ASSIST_MODE_LYRICS) {
-            privacy = "Whisper runs locally. Transcript evidence is sent to headless Codex; audio is not.";
-            start_label = "Run Whisper + Codex";
-        } else if (p->assist_mode == ASSIST_MODE_MIMO) {
-            privacy = "The track audio is sent to OpenRouter for MiMo. Zero Data Retention routing is requested.";
-            start_label = "Send audio + run MiMo";
-        } else {
-            privacy = "Runs local analysis and sends transcript evidence to Codex and track audio to OpenRouter MiMo.";
-            start_label = "Start full assist";
-        }
-        DrawTextEx(ui_font(), privacy, (Vector2){boundary.x + padding, action_y},
-                   14.0f, 1.0f, COLOR_UI_MUTED);
-        Rectangle start = {boundary.x + padding, action_y + 24.0f, 190.0f, 36.0f};
-        Rectangle cancel = {start.x + start.width + gap, start.y, 94.0f, start.height};
-        if (text_button(UINT64_C(0x4153534953544346), start, start_label, false) & BS_CLICKED) {
-            p->assist_confirmation_pending = false;
-            if (!start_assist_job(p->assist_mode, track)) {
-                notice_push(UI_NOTICE_ERROR, "Analysis could not start",
-                            "Check the helper installation and required credentials.",
-                            p->assist_log_path, true);
-            }
-        }
-        if (text_button(UINT64_C(0x4153534953544343), cancel, "Cancel", false) & BS_CLICKED) {
-            p->assist_confirmation_pending = false;
-        }
-    } else if (busy) {
-        Rectangle cancel = {boundary.x + padding, action_y, 130.0f, 36.0f};
-        if (text_button(UINT64_C(0x4153534953545354), cancel, "Cancel job", false) & BS_CLICKED) {
-            cancel_assist_job();
-        }
-        DrawTextEx(ui_font(), "Playback remains available while the helper runs.",
-                   (Vector2){cancel.x + cancel.width + gap, cancel.y + 9.0f},
-                   14.0f, 1.0f, COLOR_UI_MUTED);
-    } else if (p->assist_candidate != NULL) {
-        Analysis_Candidate *candidate = p->assist_candidate;
-        Track *candidate_track = p->assist_candidate_track_index < p->tracks.count ?
-                                 &p->tracks.items[p->assist_candidate_track_index] : NULL;
-        char summary[256];
-        snprintf(summary, sizeof(summary),
-                 "%zu lyrics (%zu uncertain)  |  %zu scene sections  |  %zu feeling cues",
-                 candidate->lyrics.count, candidate->uncertain_lyric_count,
-                 candidate->sections.count, candidate->semantic_events.count);
-        DrawTextEx(ui_font(), summary, (Vector2){boundary.x + padding, action_y},
-                   14.0f, 1.0f, COLOR_UI_MUTED);
-        char replacement[320];
-        snprintf(replacement, sizeof(replacement),
-                 "Apply will replace: lyrics %zu -> %zu  |  sections %zu -> %zu  |  feelings %zu -> %zu",
-                 candidate_track != NULL ? candidate_track->lyrics.count : 0,
-                 (candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0 ?
-                    candidate->lyrics.count :
-                    (candidate_track != NULL ? candidate_track->lyrics.count : 0),
-                 candidate_track != NULL ? candidate_track->scene_switches.count : 0,
-                 (candidate->available_lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0 ?
-                    candidate->sections.count :
-                    (candidate_track != NULL ? candidate_track->scene_switches.count : 0),
-                 candidate_track != NULL ? candidate_track->semantic_events.count : 0,
-                 (candidate->available_lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0 ?
-                    candidate->semantic_events.count :
-                    (candidate_track != NULL ? candidate_track->semantic_events.count : 0));
-        DrawTextEx(ui_font(), replacement,
-                   (Vector2){boundary.x + padding, action_y + 21.0f},
-                   13.0f, 1.0f,
-                   p->assist_apply_confirmation_pending ? COLOR_ACCENT : COLOR_UI_MUTED);
-        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0 &&
-            candidate->lyrics.count > 0) {
-            char first_lyric[180];
-            snprintf(first_lyric, sizeof(first_lyric), "First staged lyric: %.140s",
-                     candidate->lyrics.cues[0].text);
-            DrawTextEx(ui_font(), first_lyric,
-                       (Vector2){boundary.x + padding, action_y + 41.0f},
-                       13.0f, 1.0f, COLOR_UI_INK);
-        }
-        Rectangle apply = {boundary.x + padding, action_y + 62.0f, 176.0f, 36.0f};
-        Rectangle discard = {apply.x + apply.width + gap, apply.y, 100.0f, apply.height};
-        if (text_button(UINT64_C(0x4153534953544150), apply,
-                        p->assist_apply_confirmation_pending ?
-                            "Confirm replacement" : "Review + apply",
-                        p->assist_apply_confirmation_pending) & BS_CLICKED) {
-            if (p->assist_apply_confirmation_pending) {
-                (void)apply_assist_candidate();
-            } else {
-                p->assist_apply_confirmation_pending = true;
-                notice_push(UI_NOTICE_WARNING, "Confirm lane replacement",
-                            replacement, NULL, false);
-            }
-        }
-        if (text_button(UINT64_C(0x4153534953544449), discard,
-                        "Discard", false) & BS_CLICKED) {
-            discard_assist_candidate();
-        }
-    }
-
-    if (track->scene_switches.count > 0) {
+    if (track->scene_switches.count > 0 && boundary.width >= 560.0f) {
         char auto_label[96];
-        snprintf(auto_label, sizeof(auto_label), "Auto scenes: %s (%zu)",
+        snprintf(auto_label, sizeof(auto_label), "Current auto scenes: %s (%zu)",
                  track->scene_switches.enabled ? "On" : "Off",
                  track->scene_switches.count);
         Rectangle toggle = {
             boundary.x + boundary.width - padding - 190.0f,
-            boundary.y + boundary.height - 38.0f,
-            190.0f,
-            36.0f,
+            boundary.y + 8.0f, 190.0f, 36.0f,
         };
         if (text_button(UINT64_C(0x4155544F5343454E), toggle, auto_label,
                         track->scene_switches.enabled) & BS_CLICKED) {
@@ -1853,6 +1751,234 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
             mark_project_dirty(track);
         }
     }
+
+    for (size_t i = 0; i < NOB_ARRAY_LEN(modes); ++i) {
+        size_t row = i/layout.mode_columns;
+        size_t column = i%layout.mode_columns;
+        Rectangle button_boundary = {
+            boundary.x + padding + (float)column*(button_width + gap),
+            boundary.y + layout.mode_top + (float)row*layout.mode_row_height,
+            button_width,
+            36.0f,
+        };
+        bool selected = (p->assist_candidate != NULL &&
+                         p->assist_candidate_mode == modes[i]) ||
+                        ((active || p->assist_confirmation_pending) &&
+                         p->assist_mode == modes[i]);
+        int state = BS_NONE;
+        if (start_block == ASSIST_START_ALLOWED) {
+            state = text_button(UINT64_C(0x4153534953540000) + i,
+                                button_boundary,
+                                assist_mode_display_name(modes[i]), selected);
+        } else {
+            disabled_text_button(button_boundary,
+                                 assist_mode_display_name(modes[i]), selected);
+        }
+        DrawTextEx(ui_font(), assist_mode_badge(modes[i]),
+                   (Vector2){button_boundary.x + 3.0f, button_boundary.y + 39.0f},
+                   11.0f, 1.0f,
+                   start_block == ASSIST_START_ALLOWED ? COLOR_UI_MUTED :
+                   ColorAlpha(COLOR_UI_MUTED, 0.62f));
+        if (state & BS_CLICKED) {
+            p->assist_mode = modes[i];
+            p->assist_confirmation_pending = true;
+        }
+    }
+
+    float status_y = boundary.y + layout.status_y;
+    char status[384];
+    if (p->assist_candidate != NULL) {
+        const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
+                                 GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
+                                 "missing track";
+        snprintf(status, sizeof(status), "%s result  |  Validated  |  %s",
+                 assist_mode_display_name(p->assist_candidate_mode), track_name);
+    } else if (p->assist_job_state == ASSIST_JOB_CANCELLING ||
+               p->assist_job_state == ASSIST_JOB_TIMING_OUT ||
+               p->assist_job_state == ASSIST_JOB_FAILING) {
+        const char *track_name = p->assist_track_index < p->tracks.count ?
+                                 GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                                 "missing track";
+        const char *action = p->assist_job_state == ASSIST_JOB_TIMING_OUT ?
+                             "Stopping at the 40:00 job deadline" :
+                             p->assist_job_state == ASSIST_JOB_FAILING ?
+                             "Verifying process-tree cleanup" : "Cancelling";
+        snprintf(status, sizeof(status), "%s %s  |  %s", action,
+                 assist_mode_display_name(p->assist_mode), track_name);
+    } else if (p->assist_job_state == ASSIST_JOB_RUNNING) {
+        double elapsed = fmax(0.0, GetTime() - p->assist_started_at);
+        const char *track_name = p->assist_track_index < p->tracks.count ?
+                                 GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                                 "missing track";
+        snprintf(status, sizeof(status), "%s  |  %s  |  %02u:%02u elapsed",
+                 assist_mode_display_name(p->assist_mode), track_name,
+                 (unsigned)(elapsed/60.0), (unsigned)fmod(elapsed, 60.0));
+    } else if (p->assist_confirmation_pending) {
+        const char *setup_state = p->assist_job_state == ASSIST_JOB_FAILED ?
+                                  "Last launch failed; review and retry" :
+                                  "Review before starting";
+        snprintf(status, sizeof(status), "%s  |  %s  |  %s%s",
+                 assist_mode_display_name(p->assist_mode),
+                 GetFileName(track->file_path),
+                 setup_state,
+                 helpers_available ? "" : "  |  Helper unavailable");
+    } else if (!helpers_available) {
+        snprintf(status, sizeof(status), "%s",
+                 assist_start_block_reason(ASSIST_START_HELPER_UNAVAILABLE));
+    } else if (p->assist_job_state == ASSIST_JOB_CANCELLED) {
+        snprintf(status, sizeof(status),
+                 "Analysis cancelled  |  Editor content unchanged");
+    } else if (p->assist_job_state == ASSIST_JOB_TIMED_OUT) {
+        snprintf(status, sizeof(status),
+                 "40:00 job deadline reached  |  Editor content unchanged");
+    } else if (p->assist_job_state == ASSIST_JOB_FAILED) {
+        snprintf(status, sizeof(status),
+                 "Analysis failed  |  Editor content unchanged  |  Log: %s",
+                 p->assist_log_path[0] != '\0' ? GetFileName(p->assist_log_path) :
+                                                 "application log");
+    } else {
+        snprintf(status, sizeof(status),
+                 "Ready  |  Select a workflow to review its data boundary");
+    }
+    DrawTextEx(ui_font(), status, (Vector2){boundary.x + padding, status_y},
+               16.0f, 1.0f, active ? signal : COLOR_UI_INK);
+
+    float action_y = boundary.y + layout.content_y;
+    if (p->assist_confirmation_pending && !active && p->assist_candidate == NULL) {
+        DrawTextEx(ui_font(), assist_mode_workflow(p->assist_mode),
+                   (Vector2){boundary.x + padding, action_y},
+                   14.0f, 1.0f, COLOR_UI_INK);
+        DrawTextEx(ui_font(), assist_mode_data_boundary(p->assist_mode),
+                   (Vector2){boundary.x + padding, action_y + 21.0f},
+                   14.0f, 1.0f, COLOR_UI_MUTED);
+        Rectangle start = {boundary.x + padding, action_y + 48.0f, 144.0f, 36.0f};
+        Rectangle cancel = {start.x + start.width + gap, start.y, 94.0f, start.height};
+        if (helpers_available) {
+            if (text_button(UINT64_C(0x4153534953544346), start,
+                            "Start analysis", false) & BS_CLICKED) {
+                if (!start_assist_job(p->assist_mode, track)) {
+                    notice_push(UI_NOTICE_ERROR, "Analysis could not start",
+                                "Check Python, required model tools, credentials, and the job log.",
+                                p->assist_log_path, true);
+                }
+            }
+        } else {
+            disabled_text_button(start, "Start analysis", false);
+        }
+        if (text_button(UINT64_C(0x4153534953544343), cancel, "Cancel", false) & BS_CLICKED) {
+            p->assist_confirmation_pending = false;
+        }
+    } else if (p->assist_job_state == ASSIST_JOB_RUNNING) {
+        DrawTextEx(ui_font(), assist_mode_workflow(p->assist_mode),
+                   (Vector2){boundary.x + padding, action_y},
+                   14.0f, 1.0f, COLOR_UI_INK);
+        DrawTextEx(ui_font(),
+                   "No percentage is reported. The complete job stops at 40:00; playback remains available.",
+                   (Vector2){boundary.x + padding, action_y + 21.0f},
+                   14.0f, 1.0f, COLOR_UI_MUTED);
+        Rectangle cancel = {boundary.x + padding, action_y + 48.0f, 130.0f, 36.0f};
+        if (text_button(UINT64_C(0x4153534953545354), cancel,
+                        "Cancel job", false) & BS_CLICKED) {
+            request_assist_job_cancel();
+        }
+    } else if (p->assist_job_state == ASSIST_JOB_CANCELLING ||
+               p->assist_job_state == ASSIST_JOB_TIMING_OUT ||
+               p->assist_job_state == ASSIST_JOB_FAILING) {
+        DrawTextEx(ui_font(),
+                   p->assist_job_state == ASSIST_JOB_TIMING_OUT ?
+                       "The 40:00 job deadline was reached. Verifying that the complete process tree stopped." :
+                       "Waiting for the helper and its child processes to stop. Editor content is unchanged.",
+                   (Vector2){boundary.x + padding, action_y},
+                   14.0f, 1.0f, COLOR_UI_MUTED);
+    } else if (p->assist_candidate != NULL) {
+        Analysis_Candidate *candidate = p->assist_candidate;
+        Track *candidate_track = p->assist_candidate_track_index < p->tracks.count ?
+                                 &p->tracks.items[p->assist_candidate_track_index] : NULL;
+        float line_y = action_y;
+        char line[256];
+        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0) {
+            if (candidate->uncertain_lyric_count == 0) {
+                snprintf(line, sizeof(line),
+                         "Lyrics: %zu -> %zu  |  No timing cues flagged for review",
+                         candidate_track != NULL ? candidate_track->lyrics.count : 0,
+                         candidate->lyrics.count);
+            } else {
+                snprintf(line, sizeof(line),
+                         "Lyrics: %zu -> %zu  |  %zu timing cue%s %s review",
+                         candidate_track != NULL ? candidate_track->lyrics.count : 0,
+                         candidate->lyrics.count, candidate->uncertain_lyric_count,
+                         candidate->uncertain_lyric_count == 1 ? "" : "s",
+                         candidate->uncertain_lyric_count == 1 ? "needs" : "need");
+            }
+            DrawTextEx(ui_font(), line, (Vector2){boundary.x + padding, line_y},
+                       14.0f, 1.0f, COLOR_UI_INK);
+            line_y += 18.0f;
+        }
+        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
+            snprintf(line, sizeof(line), "Scene changes: %zu -> %zu",
+                     candidate_track != NULL ? candidate_track->scene_switches.count : 0,
+                     candidate->sections.count);
+            DrawTextEx(ui_font(), line, (Vector2){boundary.x + padding, line_y},
+                       14.0f, 1.0f, COLOR_UI_INK);
+            line_y += 18.0f;
+        }
+        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0) {
+            snprintf(line, sizeof(line), "Feeling cues: %zu -> %zu",
+                     candidate_track != NULL ? candidate_track->semantic_events.count : 0,
+                     candidate->semantic_events.count);
+            DrawTextEx(ui_font(), line, (Vector2){boundary.x + padding, line_y},
+                       14.0f, 1.0f, COLOR_UI_INK);
+            line_y += 18.0f;
+        }
+        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0 &&
+            candidate->lyrics.count > 0) {
+            char first_lyric[256];
+            snprintf(first_lyric, sizeof(first_lyric), "First staged lyric: %.180s",
+                     candidate->lyrics.cues[0].text);
+            DrawTextEx(ui_font(), first_lyric,
+                       (Vector2){boundary.x + padding, line_y},
+                       13.0f, 1.0f, COLOR_UI_MUTED);
+        }
+        Rectangle apply = {boundary.x + padding, action_y + 72.0f, 144.0f, 36.0f};
+        Rectangle discard = {apply.x + apply.width + gap, apply.y, 100.0f, apply.height};
+        bool draft_conflict = assist_candidate_conflicts_with_lyric_draft(
+            (candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0,
+            p->assist_candidate_track_index == (size_t)p->current_track,
+            candidate_track != NULL && lyric_editor_has_unsaved_draft(candidate_track));
+        bool apply_blocked = candidate_track == NULL || draft_conflict;
+        if (apply_blocked) {
+            disabled_text_button(apply,
+                                 p->assist_apply_confirmation_pending ?
+                                     "Confirm apply" : "Apply changes",
+                                 p->assist_apply_confirmation_pending);
+        } else if (text_button(UINT64_C(0x4153534953544150), apply,
+                               p->assist_apply_confirmation_pending ?
+                                   "Confirm apply" : "Apply changes",
+                               p->assist_apply_confirmation_pending) & BS_CLICKED) {
+            if (!p->assist_apply_confirmation_pending) {
+                p->assist_apply_confirmation_pending = true;
+                notice_push(UI_NOTICE_WARNING, "Confirm staged changes",
+                            "Only the listed lanes will be replaced; unlisted editor content remains unchanged.",
+                            NULL, false);
+            } else {
+                (void)apply_assist_candidate();
+            }
+        }
+        if (text_button(UINT64_C(0x4153534953544449), discard,
+                        "Discard", false) & BS_CLICKED) {
+            discard_assist_candidate();
+        }
+        if (draft_conflict) {
+            DrawTextEx(ui_font(), "Finish the active lyric draft before applying this result.",
+                       (Vector2){discard.x + discard.width + gap, discard.y + 10.0f},
+                       13.0f, 1.0f, COLOR_ACCENT);
+        } else if (candidate_track == NULL) {
+            DrawTextEx(ui_font(), "The target track is no longer available. Discard this result.",
+                       (Vector2){discard.x + discard.width + gap, discard.y + 10.0f},
+                       13.0f, 1.0f, COLOR_ACCENT);
+        }
+    }
+    EndScissorMode();
 }
 
 static void draw_export_panel(Rectangle boundary, Track *track)
@@ -2311,31 +2437,57 @@ static uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
     return hash;
 }
 
-static const char *assist_mode_argument(Assist_Mode mode)
+static bool assist_job_start_failed(void)
 {
-    switch (mode) {
-    case ASSIST_MODE_LYRICS: return "lyrics";
-    case ASSIST_MODE_SECTIONS: return "sections";
-    case ASSIST_MODE_MIMO: return "mimo";
-    case ASSIST_MODE_ALL: return "all";
+    p->assist_process = NOB_INVALID_PROC;
+#ifdef _WIN32
+    if (p->assist_job_object != NULL) {
+        CloseHandle(p->assist_job_object);
+        p->assist_job_object = NULL;
     }
-    return "sections";
+#endif
+    p->assist_job_state = ASSIST_JOB_FAILED;
+    return false;
 }
+
+#ifdef _WIN32
+static HANDLE create_assist_job_object(void)
+{
+    HANDLE job = CreateJobObjectA(NULL, NULL);
+    if (job == NULL) return NULL;
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    memset(&limits, 0, sizeof(limits));
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                 &limits, sizeof(limits))) {
+        CloseHandle(job);
+        return NULL;
+    }
+    return job;
+}
+#endif
 
 static bool start_assist_job(Assist_Mode mode, Track *track)
 {
-    if (track == NULL || p->assist_job_state == ASSIST_JOB_RUNNING ||
+    if (track == NULL || assist_job_is_active(p->assist_job_state) ||
         p->assist_candidate != NULL || assist_mode_lanes(mode) == 0) return false;
     size_t track_index = (size_t)(track - p->tracks.items);
     if (track_index >= p->tracks.count) return false;
+    p->assist_bridge_path[0] = '\0';
+    p->assist_log_path[0] = '\0';
 
     uint64_t path_hash = djb2(DJB2_INIT, track->file_path, strlen(track->file_path));
     path_hash = djb2(path_hash, &track->lyrics.duration_seconds,
                      sizeof(track->lyrics.duration_seconds));
-    if (!nob_mkdir_if_not_exists("./build/analysis")) return false;
+    if (!nob_mkdir_if_not_exists("./build/analysis")) {
+        return assist_job_start_failed();
+    }
     snprintf(p->assist_output_dir, sizeof(p->assist_output_dir),
              "./build/analysis/%016llx", (unsigned long long)path_hash);
-    if (!nob_mkdir_if_not_exists(p->assist_output_dir)) return false;
+    if (!nob_mkdir_if_not_exists(p->assist_output_dir)) {
+        return assist_job_start_failed();
+    }
     // The output directory remains stable so the Python orchestration layer can
     // reuse measured/model caches. Each accepted bridge and its diagnostic log
     // are immutable job artifacts: a later Lyrics run must not invalidate the
@@ -2359,20 +2511,31 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
             (unsigned long long)p->assist_job_nonce);
         if (bridge_length <= 0 || log_length <= 0 ||
             (size_t)bridge_length >= sizeof(p->assist_bridge_path) ||
-            (size_t)log_length >= sizeof(p->assist_log_path)) return false;
+            (size_t)log_length >= sizeof(p->assist_log_path)) {
+            return assist_job_start_failed();
+        }
         if (!FileExists(p->assist_bridge_path) && !FileExists(p->assist_log_path)) {
             unique_artifacts = true;
             break;
         }
     }
-    if (!unique_artifacts) return false;
+    if (!unique_artifacts) return assist_job_start_failed();
 
     char duration_text[64];
     snprintf(duration_text, sizeof(duration_text), "%.9f", track->lyrics.duration_seconds);
     char helper_path[PLUG_RELOAD_PATH_CAPACITY];
-    if (!find_assist_helper(helper_path, sizeof(helper_path))) return false;
+    if (!find_assist_helper(helper_path, sizeof(helper_path))) {
+        return assist_job_start_failed();
+    }
     Nob_Cmd command = {0};
     Nob_Procs processes = {0};
+#ifdef _WIN32
+    HANDLE assist_job_object = create_assist_job_object();
+    if (assist_job_object == NULL) {
+        nob_cmd_free(command);
+        return assist_job_start_failed();
+    }
+#endif
 #ifdef _WIN32
     nob_cmd_append(&command, "py", "-3");
 #else
@@ -2388,21 +2551,32 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
     if (mode == ASSIST_MODE_MIMO || mode == ASSIST_MODE_ALL) {
         nob_cmd_append(&command, "--zdr");
     }
+#ifdef _WIN32
+    bool started = nob_cmd_run(&command, .async = &processes, .max_procs = 1,
+                               .stderr_path = p->assist_log_path,
+                               .win32_job_object = assist_job_object);
+#else
     bool started = nob_cmd_run(&command, .async = &processes, .max_procs = 1,
                                .stderr_path = p->assist_log_path);
+#endif
     nob_cmd_free(command);
     if (!started || processes.count != 1) {
+#ifdef _WIN32
+        CloseHandle(assist_job_object);
+#endif
         nob_da_free(processes);
-        p->assist_process = NOB_INVALID_PROC;
-        p->assist_job_state = ASSIST_JOB_FAILED;
-        return false;
+        return assist_job_start_failed();
     }
     p->assist_process = processes.items[0];
+#ifdef _WIN32
+    p->assist_job_object = assist_job_object;
+#endif
     nob_da_free(processes);
     p->assist_mode = mode;
     p->assist_track_index = track_index;
     p->assist_job_state = ASSIST_JOB_RUNNING;
     p->assist_started_at = GetTime();
+    p->assist_cancel_started_at = 0.0;
     p->assist_confirmation_pending = false;
     TraceLog(LOG_INFO, "ASSIST: started %s analysis for %s",
              assist_mode_argument(mode), track->file_path);
@@ -2416,6 +2590,7 @@ static uint32_t assist_mode_lanes(Assist_Mode mode)
     case ASSIST_MODE_SECTIONS: return ANALYSIS_CANDIDATE_SECTIONS;
     case ASSIST_MODE_MIMO: return ANALYSIS_CANDIDATE_SEMANTICS;
     case ASSIST_MODE_ALL: return ANALYSIS_CANDIDATE_ALL;
+    case ASSIST_MODE_COUNT: break;
     }
     return 0;
 }
@@ -2508,6 +2683,14 @@ static bool apply_candidate_to_track(Analysis_Candidate *candidate, size_t track
 {
     if (candidate == NULL || track_index >= p->tracks.count) return false;
     Track *track = &p->tracks.items[track_index];
+    if (assist_candidate_conflicts_with_lyric_draft(
+            (candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0,
+            track == current_track(), lyric_editor_has_unsaved_draft(track))) {
+        notice_push(UI_NOTICE_WARNING, "Suggestions were not applied",
+                    "Apply or discard the active lyric draft before replacing the lyric lane.",
+                    NULL, false);
+        return false;
+    }
     if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0 &&
         lyrics_document_normalize_duration(
             &candidate->lyrics, &candidate->lyrics,
@@ -2554,39 +2737,58 @@ static bool apply_assist_candidate(void)
     if (p->assist_candidate == NULL) return false;
     Track *track = p->assist_candidate_track_index < p->tracks.count ?
                    &p->tracks.items[p->assist_candidate_track_index] : NULL;
+    if (track == NULL) {
+        notice_push(UI_NOTICE_ERROR, "Suggestions were not applied",
+                    "The track targeted by this staged result is no longer available.",
+                    p->assist_bridge_path, true);
+        return false;
+    }
     if (!apply_candidate_to_track(p->assist_candidate,
                                   p->assist_candidate_track_index)) return false;
-    if (track != NULL) {
-        uint32_t lanes = p->assist_candidate->available_lanes;
-        if ((lanes & ANALYSIS_CANDIDATE_LYRICS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_LYRIC_TIMING,
-                                    p->assist_bridge_path, "whisper-codex");
-        }
-        if ((lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_MEASURED_SIGNAL,
-                                    p->assist_bridge_path, "measured-sections");
-        }
-        if ((lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_SEMANTIC_SCORE,
-                                    p->assist_bridge_path, "xiaomi-mimo-v2.5");
-        }
+    uint32_t lanes = p->assist_candidate->available_lanes;
+    if ((lanes & ANALYSIS_CANDIDATE_LYRICS) != 0) {
+        track_set_analysis_lane(track, MUSI_LANE_LYRIC_TIMING,
+                                p->assist_bridge_path, "whisper-codex");
+    }
+    if ((lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
+        track_set_analysis_lane(track, MUSI_LANE_MEASURED_SIGNAL,
+                                p->assist_bridge_path, "measured-sections");
+    }
+    if ((lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0) {
+        track_set_analysis_lane(track, MUSI_LANE_SEMANTIC_SCORE,
+                                p->assist_bridge_path, "xiaomi-mimo-v2.5");
     }
     free(p->assist_candidate);
     p->assist_candidate = NULL;
+    p->assist_confirmation_pending = false;
     p->assist_apply_confirmation_pending = false;
+    p->assist_job_state = ASSIST_JOB_IDLE;
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail),
+             "The selected validated lanes are now in %s.",
+             GetFileName(track->file_path));
     notice_push(UI_NOTICE_SUCCESS, "Suggestions applied",
-                "The selected validated lanes are now in the editor.", NULL, false);
+                detail, NULL, false);
     return true;
 }
 
 static void discard_assist_candidate(void)
 {
     if (p->assist_candidate == NULL) return;
+    const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
+                             GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
+                             "the missing target track";
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail),
+             "The staged result for %s was discarded. Editor content is unchanged.",
+             track_name);
     free(p->assist_candidate);
     p->assist_candidate = NULL;
+    p->assist_confirmation_pending = false;
     p->assist_apply_confirmation_pending = false;
+    p->assist_job_state = ASSIST_JOB_IDLE;
     notice_push(UI_NOTICE_INFO, "Suggestions discarded",
-                "Previous editor content is unchanged.", NULL, false);
+                detail, NULL, false);
 }
 
 MUSIALIZER_PLUG bool plug_load_analysis_bridge(const char *file_path)
@@ -2629,20 +2831,166 @@ MUSIALIZER_PLUG bool plug_set_auto_scenes(bool enabled)
     return true;
 }
 
+static Assist_Job_State assist_stopped_state(Assist_Job_State stopping_state)
+{
+    if (stopping_state == ASSIST_JOB_TIMING_OUT) return ASSIST_JOB_TIMED_OUT;
+    if (stopping_state == ASSIST_JOB_CANCELLING) return ASSIST_JOB_CANCELLED;
+    return ASSIST_JOB_FAILED;
+}
+
+#ifdef _WIN32
+static bool assist_windows_job_empty(bool *empty)
+{
+    if (empty == NULL || p->assist_job_object == NULL) return false;
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    memset(&accounting, 0, sizeof(accounting));
+    if (!QueryInformationJobObject(
+            p->assist_job_object, JobObjectBasicAccountingInformation,
+            &accounting, sizeof(accounting), NULL)) return false;
+    *empty = accounting.ActiveProcesses == 0;
+    return true;
+}
+
+static void assist_windows_close_process_ownership(void)
+{
+    if (p->assist_process != NOB_INVALID_PROC) CloseHandle(p->assist_process);
+    if (p->assist_job_object != NULL) CloseHandle(p->assist_job_object);
+    p->assist_process = NOB_INVALID_PROC;
+    p->assist_job_object = NULL;
+}
+#endif
+
+static void finish_assist_stop(Assist_Job_State stopping_state)
+{
+    p->assist_process = NOB_INVALID_PROC;
+    p->assist_job_state = assist_stopped_state(stopping_state);
+    const char *track_name = p->assist_track_index < p->tracks.count ?
+                             GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                             "the missing target track";
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail),
+             "The job for %s stopped. Editor content is unchanged.", track_name);
+    if (stopping_state == ASSIST_JOB_TIMING_OUT) {
+        notice_push(UI_NOTICE_WARNING, "Analysis reached its 40-minute deadline",
+                    detail, p->assist_log_path, true);
+    } else if (stopping_state == ASSIST_JOB_CANCELLING) {
+        notice_push(UI_NOTICE_INFO, "Analysis cancelled",
+                    detail, p->assist_log_path, false);
+    } else {
+        notice_push(UI_NOTICE_ERROR, "Analysis cleanup failed",
+                    detail, p->assist_log_path, true);
+    }
+}
+
 static void poll_assist_job(void)
 {
-    if (p->assist_job_state != ASSIST_JOB_RUNNING ||
-        p->assist_process == NOB_INVALID_PROC) return;
+    if (!assist_job_is_active(p->assist_job_state)) return;
+    if (p->assist_process == NOB_INVALID_PROC) {
+#ifdef _WIN32
+        if (p->assist_job_object != NULL) {
+            (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+            bool empty = false;
+            if (!assist_windows_job_empty(&empty) || !empty) {
+                p->assist_job_state = ASSIST_JOB_FAILING;
+                return;
+            }
+            CloseHandle(p->assist_job_object);
+            p->assist_job_object = NULL;
+        }
+#endif
+        p->assist_job_state = ASSIST_JOB_FAILED;
+        TraceLog(LOG_WARNING, "ASSIST: active job lost its process handle");
+        notice_push(UI_NOTICE_ERROR, "Analysis state was recovered",
+                    "The worker handle was unavailable. Editor content is unchanged.",
+                    p->assist_log_path, true);
+        return;
+    }
+
+    if (assist_job_deadline_expired(p->assist_job_state,
+                                    p->assist_started_at, GetTime())) {
+        if (request_assist_job_stop(ASSIST_JOB_TIMING_OUT)) {
+            notice_push(UI_NOTICE_WARNING, "Analysis deadline reached",
+                        "Stopping the complete Assist process tree after 40:00.",
+                        p->assist_log_path, false);
+        }
+    }
+
     Nob_Proc process = p->assist_process;
-    int status = nob__proc_wait_async(process, 0);
+    if (p->assist_job_state == ASSIST_JOB_CANCELLING ||
+        p->assist_job_state == ASSIST_JOB_TIMING_OUT ||
+        p->assist_job_state == ASSIST_JOB_FAILING) {
+        Assist_Job_State stopping_state = p->assist_job_state;
+        bool finished = false;
+#ifdef _WIN32
+        if (stopping_state == ASSIST_JOB_FAILING && p->assist_job_object != NULL) {
+            (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+        }
+        DWORD waited = WaitForSingleObject(process, 0);
+        bool empty = false;
+        bool queried = assist_windows_job_empty(&empty);
+        if (waited == WAIT_OBJECT_0 && queried && empty) {
+            assist_windows_close_process_ownership();
+            finished = true;
+        } else if (waited == WAIT_FAILED || !queried) {
+            if (stopping_state != ASSIST_JOB_FAILING) {
+                TraceLog(LOG_ERROR,
+                         "ASSIST: process-tree termination could not be verified");
+            }
+            p->assist_job_state = ASSIST_JOB_FAILING;
+        }
+#else
+        pid_t waited = waitpid(process, NULL, WNOHANG);
+        if (waited == process || (waited < 0 && errno == ECHILD)) {
+            finished = true;
+        } else if (waited < 0 && errno != EINTR) {
+            if (stopping_state != ASSIST_JOB_FAILING) {
+                TraceLog(LOG_ERROR, "ASSIST: worker termination could not be reaped");
+            }
+            p->assist_job_state = ASSIST_JOB_FAILING;
+        } else if (GetTime() - p->assist_cancel_started_at >= 2.0) {
+            if (kill(-process, SIGKILL) < 0 && errno == ESRCH) {
+                (void)kill(process, SIGKILL);
+            }
+        }
+#endif
+        if (finished) finish_assist_stop(stopping_state);
+        return;
+    }
+
+    int status = 0;
+#ifdef _WIN32
+    DWORD waited = WaitForSingleObject(process, 0);
+    if (waited == WAIT_TIMEOUT) return;
+    if (waited == WAIT_FAILED) {
+        p->assist_job_state = ASSIST_JOB_FAILING;
+        if (p->assist_job_object != NULL) {
+            (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+        }
+        return;
+    }
+    bool empty = false;
+    if (!assist_windows_job_empty(&empty)) {
+        p->assist_job_state = ASSIST_JOB_FAILING;
+        (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+        return;
+    }
+    if (!empty) {
+        // The Python worker waits for every subprocess. A signaled root with
+        // live descendants is an abnormal escape path, never a completed job.
+        p->assist_job_state = ASSIST_JOB_FAILING;
+        p->assist_cancel_started_at = GetTime();
+        (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+        return;
+    }
+    DWORD exit_status = 1;
+    status = GetExitCodeProcess(process, &exit_status) && exit_status == 0 ? 1 : -1;
+    assist_windows_close_process_ownership();
+#else
+    status = nob__proc_wait_async(process, 0);
+#endif
     if (status == 0) return;
     p->assist_process = NOB_INVALID_PROC;
     if (status < 0) {
-#ifdef _WIN32
-        // nob's nonzero-exit polling path reports failure without closing the
-        // process handle; ownership remains ours on that branch.
-        CloseHandle(process);
-#endif
         p->assist_job_state = ASSIST_JOB_FAILED;
         TraceLog(LOG_WARNING, "ASSIST: analysis failed; see %s", p->assist_log_path);
         notice_push(UI_NOTICE_ERROR, "Analysis failed",
@@ -2664,35 +3012,86 @@ static void poll_assist_job(void)
     p->assist_candidate_track_index = p->assist_track_index;
     p->assist_candidate_mode = p->assist_mode;
     p->assist_job_state = ASSIST_JOB_SUCCEEDED;
+    const char *track_name = p->assist_track_index < p->tracks.count ?
+                             GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                             "the missing target track";
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail),
+             "Validated suggestions for %s are staged in the Assist panel.",
+             track_name);
     notice_push(UI_NOTICE_SUCCESS, "Analysis ready for review",
-                "Validated suggestions are staged in the Assist panel.",
-                p->assist_bridge_path, false);
+                detail, p->assist_bridge_path, false);
 }
 
-static void cancel_assist_job(void)
+static void request_assist_job_cancel(void)
+{
+    (void)request_assist_job_stop(ASSIST_JOB_CANCELLING);
+}
+
+static bool request_assist_job_stop(Assist_Job_State stopping_state)
 {
     if (p == NULL || p->assist_job_state != ASSIST_JOB_RUNNING ||
-        p->assist_process == NOB_INVALID_PROC) return;
+        p->assist_process == NOB_INVALID_PROC ||
+        (stopping_state != ASSIST_JOB_CANCELLING &&
+         stopping_state != ASSIST_JOB_TIMING_OUT &&
+         stopping_state != ASSIST_JOB_FAILING)) return false;
 #ifdef _WIN32
-    DWORD process_id = GetProcessId(p->assist_process);
-    if (process_id != 0) {
-        char process_id_text[32];
-        snprintf(process_id_text, sizeof(process_id_text), "%lu",
-                 (unsigned long)process_id);
-        Nob_Cmd terminate = {0};
-        nob_cmd_append(&terminate, "taskkill", "/PID", process_id_text, "/T", "/F");
-        (void)nob_cmd_run(&terminate);
-        nob_cmd_free(terminate);
+    if (p->assist_job_object == NULL ||
+        !TerminateJobObject(p->assist_job_object, ERROR_CANCELLED)) {
+        p->assist_job_state = ASSIST_JOB_FAILING;
+        p->assist_cancel_started_at = GetTime();
+        notice_push(UI_NOTICE_ERROR, "Analysis could not be cancelled",
+                    "Windows could not terminate the contained process tree; ownership is retained for retry.",
+                    p->assist_log_path, true);
+        return false;
     }
-    if (WaitForSingleObject(p->assist_process, 2000) == WAIT_TIMEOUT) {
-        TerminateProcess(p->assist_process, 1);
-        WaitForSingleObject(p->assist_process, 2000);
-    }
-    CloseHandle(p->assist_process);
 #else
     pid_t process = p->assist_process;
-    if (kill(-process, SIGTERM) < 0 && errno == ESRCH) kill(process, SIGTERM);
+    int result = kill(-process, SIGTERM);
+    if (result < 0 && errno == ESRCH) result = kill(process, SIGTERM);
+    if (result < 0 && errno != ESRCH) {
+        notice_push(UI_NOTICE_ERROR, "Analysis could not be cancelled",
+                    "The worker did not accept a termination request.",
+                    p->assist_log_path, true);
+        p->assist_job_state = ASSIST_JOB_FAILING;
+        p->assist_cancel_started_at = GetTime();
+        return false;
+    }
+#endif
+    p->assist_job_state = stopping_state;
+    p->assist_cancel_started_at = GetTime();
+    p->assist_confirmation_pending = false;
+    return true;
+}
+
+static bool cancel_assist_job_blocking(void)
+{
+    if (p == NULL || !assist_job_is_active(p->assist_job_state) ||
+        p->assist_process == NOB_INVALID_PROC) return true;
+    if (p->assist_job_state == ASSIST_JOB_RUNNING) {
+        (void)request_assist_job_stop(ASSIST_JOB_CANCELLING);
+    }
     bool finished = false;
+#ifdef _WIN32
+    if (p->assist_job_object != NULL) {
+        (void)TerminateJobObject(p->assist_job_object, ERROR_CANCELLED);
+    }
+    for (unsigned attempt = 0; attempt < 400; ++attempt) {
+        bool empty = false;
+        if (WaitForSingleObject(p->assist_process, 0) == WAIT_OBJECT_0 &&
+            assist_windows_job_empty(&empty) && empty) {
+            assist_windows_close_process_ownership();
+            finished = true;
+            break;
+        }
+        Sleep(10);
+    }
+#else
+    pid_t process = p->assist_process;
+    if (p->assist_job_state == ASSIST_JOB_RUNNING &&
+        kill(-process, SIGTERM) < 0 && errno == ESRCH) {
+        (void)kill(process, SIGTERM);
+    }
     for (unsigned attempt = 0; attempt < 200; ++attempt) {
         pid_t waited = waitpid(process, NULL, WNOHANG);
         if (waited == process || (waited < 0 && errno == ECHILD)) {
@@ -2720,11 +3119,16 @@ static void cancel_assist_job(void)
         }
     }
 #endif
-    p->assist_process = NOB_INVALID_PROC;
-    p->assist_job_state = ASSIST_JOB_CANCELLED;
+    if (finished) {
+        p->assist_process = NOB_INVALID_PROC;
+        p->assist_job_state = assist_stopped_state(p->assist_job_state);
+    } else {
+        // Keep the process-tree ownership and active state truthful. Callers
+        // must not unload/free the Plug while these tokens remain live.
+        p->assist_job_state = ASSIST_JOB_FAILING;
+    }
     p->assist_confirmation_pending = false;
-    notice_push(UI_NOTICE_INFO, "Analysis cancelled",
-                "Previous editor content is unchanged.", p->assist_log_path, false);
+    return finished;
 }
 
 static void track_set_analysis_lane(Track *track, Musi_Analysis_Lane_Kind kind,
@@ -2824,6 +3228,10 @@ static bool build_project(Track *track, const char *project_path,
     snprintf(project->scenes[0].scene_type,
              sizeof(project->scenes[0].scene_type), "%s",
              scene_stable_name(track->base_scene));
+    if (!scene_settings_export_mappings(
+            &track->scene_settings, project->scenes[0].mappings,
+            MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+            &project->scenes[0].mapping_count)) return false;
 
     project->lyrics = track->lyrics;
     project->semantic_events = track->semantic_events;
@@ -2926,7 +3334,7 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
     track->project_autosave_failed = false;
     if (show_success) {
         notice_push(UI_NOTICE_SUCCESS, "Project saved",
-                    "Lyrics, semantic cues, manual events, scene suggestions, and output settings are durable.",
+                    "Lyrics, scene settings, events, suggestions, and output settings are durable.",
                     path, false);
     }
     return true;
@@ -3013,6 +3421,16 @@ static bool open_project_path(const char *path)
     if (!scene_id_from_name(project->scenes[0].scene_type, &scene_id)) {
         notice_push(UI_NOTICE_ERROR, "Project scene is unavailable",
                     project->scenes[0].scene_type, path, true);
+        free(project);
+        return false;
+    }
+    Scene_Settings hydrated_settings;
+    if (!scene_settings_import_mappings(
+            &hydrated_settings, project->scenes[0].mappings,
+            project->scenes[0].mapping_count)) {
+        notice_push(UI_NOTICE_ERROR, "Project scene settings were rejected",
+                    "A stored control is unknown or outside its supported range.",
+                    path, true);
         free(project);
         return false;
     }
@@ -3134,6 +3552,7 @@ static bool open_project_path(const char *path)
     track->base_scene = scene_id;
     track->scene_seed = project->deterministic_seed;
     track->scene_instance_id = project->scenes[0].instance_id;
+    track->scene_settings = hydrated_settings;
     track->project_metadata = project->metadata;
     track->project_metadata_initialized = true;
     track->analysis_lane_count = project->analysis_lane_count;
@@ -3487,6 +3906,234 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
 
 }
 
+static float slider_get_value(float x, float lox, float hix);
+
+static void set_scene_settings_open(bool open)
+{
+    if (p->scene_settings_open == open) return;
+
+    if (open) {
+        p->scene_settings_open = true;
+        p->scene_settings_scroll = 0.0f;
+        p->scene_settings_scroll_scene = p->scene.id;
+        if (!IsWindowMaximized()) {
+            const int inspector_width = 340;
+            int monitor = GetCurrentMonitor();
+            Vector2 position = GetWindowPosition();
+            Vector2 monitor_position = GetMonitorPosition(monitor);
+            int current_width = GetScreenWidth();
+            if (scene_settings_window_can_expand(
+                    (int)roundf(position.x), current_width,
+                    (int)roundf(monitor_position.x), GetMonitorWidth(monitor),
+                    inspector_width)) {
+                p->scene_settings_restore_width = current_width;
+                p->scene_settings_expanded_width = current_width + inspector_width;
+                p->scene_settings_window_expanded = true;
+                SetWindowSize(p->scene_settings_expanded_width, GetScreenHeight());
+            }
+        }
+        return;
+    }
+
+    p->scene_settings_open = false;
+    p->active_button_id = 0;
+    if (p->scene_settings_window_expanded && !IsWindowMaximized() &&
+        abs(GetScreenWidth() - p->scene_settings_expanded_width) <= 4) {
+        SetWindowSize(p->scene_settings_restore_width, GetScreenHeight());
+    }
+    p->scene_settings_window_expanded = false;
+    p->scene_settings_restore_width = 0;
+    p->scene_settings_expanded_width = 0;
+}
+
+static bool scene_setting_slider(Rectangle boundary, Scene_Id scene_id,
+                                 size_t setting_index, float *value)
+{
+    const Scene_Setting_Descriptor *descriptor = scene_settings_descriptor(
+        (size_t)scene_id, setting_index);
+    if (descriptor == NULL || value == NULL || boundary.width <= 1.0f) return false;
+
+    const uint64_t id = UINT64_C(0x534554534C440000) +
+                        (uint64_t)scene_id*SCENE_SETTINGS_MAX_CONTROLS +
+                        setting_index;
+    Vector2 mouse = GetMousePosition();
+    bool hover = CheckCollisionPointRec(mouse, boundary);
+    if (p->active_button_id == 0 && hover &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        p->active_button_id = id;
+    }
+
+    bool changed = false;
+    if (p->active_button_id == id) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            float normalized = slider_get_value(mouse.x, boundary.x,
+                                                boundary.x + boundary.width);
+            float next = descriptor->minimum +
+                         normalized*(descriptor->maximum - descriptor->minimum);
+            if (descriptor->precision == 0) next = roundf(next);
+            if (next != *value) {
+                *value = next;
+                changed = true;
+            }
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) p->active_button_id = 0;
+    }
+
+    float normalized = (*value - descriptor->minimum)/
+                       (descriptor->maximum - descriptor->minimum);
+    if (normalized < 0.0f) normalized = 0.0f;
+    if (normalized > 1.0f) normalized = 1.0f;
+    float center_y = boundary.y + boundary.height*0.5f;
+    DrawRectangle((int)boundary.x, (int)(center_y - 1.0f),
+                  (int)boundary.width, 2, COLOR_UI_RULE);
+    DrawRectangle((int)boundary.x, (int)(center_y - 2.0f),
+                  (int)(boundary.width*normalized), 4, COLOR_ACCENT);
+    float handle_x = boundary.x + boundary.width*normalized;
+    DrawRectangleRec((Rectangle){handle_x - 5.0f, center_y - 8.0f, 10.0f, 16.0f},
+                     COLOR_ACCENT);
+    if (hover || p->active_button_id == id) {
+        DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(COLOR_ACCENT, 0.28f));
+    }
+    return changed;
+}
+
+static bool scene_setting_surface_toggle(Rectangle boundary, Scene_Id scene_id,
+                                         size_t setting_index, float *value)
+{
+    if (value == NULL || boundary.width <= 1.0f) return false;
+    const uint64_t base = UINT64_C(0x534554544F470000) +
+                          ((uint64_t)scene_id*SCENE_SETTINGS_MAX_CONTROLS +
+                           setting_index)*2U;
+    const float gap = 6.0f;
+    Rectangle filled = {boundary.x, boundary.y,
+                        (boundary.width - gap)*0.5f, boundary.height};
+    Rectangle wireframe = {filled.x + filled.width + gap, boundary.y,
+                           filled.width, boundary.height};
+    bool enabled = *value >= 0.5f;
+    if (text_button(base, filled, "Filled", !enabled) & BS_CLICKED) {
+        if (!enabled) return false;
+        *value = 0.0f;
+        return true;
+    }
+    if (text_button(base + 1U, wireframe, "Wireframe", enabled) & BS_CLICKED) {
+        if (enabled) return false;
+        *value = 1.0f;
+        return true;
+    }
+    return false;
+}
+
+static void scene_settings_panel(Rectangle boundary, Track *track)
+{
+    if (track == NULL || boundary.width < 1.0f || boundary.height < 1.0f) return;
+    DrawRectangleRec(boundary, COLOR_UI_SURFACE);
+    DrawLineEx((Vector2){boundary.x, boundary.y},
+               (Vector2){boundary.x, boundary.y + boundary.height},
+               2.0f, COLOR_ACCENT);
+
+    const float padding = 18.0f;
+    DrawTextEx(ui_font(), "SCENE SETTINGS",
+               (Vector2){boundary.x + padding, boundary.y + 18.0f},
+               15.0f, 1.0f, COLOR_UI_MUTED);
+    DrawTextEx(ui_font(), scene_name(p->scene.id),
+               (Vector2){boundary.x + padding, boundary.y + 39.0f},
+               24.0f, 0.0f, COLOR_UI_INK);
+
+    float button_y = boundary.y + 72.0f;
+    float button_width = (boundary.width - padding*2.0f - 8.0f)*0.5f;
+    Rectangle reset = {boundary.x + padding, button_y, button_width, 30.0f};
+    Rectangle hide = {reset.x + reset.width + 8.0f, button_y,
+                      button_width, 30.0f};
+    if (text_button(UINT64_C(0x53455454494E4752), reset,
+                    "Reset", false) & BS_CLICKED) {
+        if (scene_settings_reset_scene(&track->scene_settings, p->scene.id)) {
+            mark_project_dirty(track);
+        }
+    }
+    if (text_button(UINT64_C(0x53455454494E4748), hide,
+                    "Hide", false) & BS_CLICKED) {
+        set_scene_settings_open(false);
+    }
+
+    if (p->scene_settings_scroll_scene != p->scene.id) {
+        p->scene_settings_scroll_scene = p->scene.id;
+        p->scene_settings_scroll = 0.0f;
+    }
+    const float content_top = button_y + 44.0f;
+    const float footer_height = 44.0f;
+    const float content_height = fmaxf(0.0f, boundary.height -
+                                       (content_top - boundary.y) - footer_height);
+    const float row_height = 76.0f;
+    size_t setting_count = scene_settings_count(p->scene.id);
+    float total_height = (float)setting_count*row_height;
+    float max_scroll = fmaxf(0.0f, total_height - content_height);
+    Vector2 mouse = GetMousePosition();
+    Rectangle content = {boundary.x, content_top, boundary.width, content_height};
+    if (CheckCollisionPointRec(mouse, content)) {
+        p->scene_settings_scroll -= GetMouseWheelMove()*34.0f;
+    }
+    if (p->scene_settings_scroll < 0.0f) p->scene_settings_scroll = 0.0f;
+    if (p->scene_settings_scroll > max_scroll) p->scene_settings_scroll = max_scroll;
+
+    BeginScissorMode((int)content.x, (int)content.y,
+                     (int)content.width, (int)content.height);
+    for (size_t index = 0; index < setting_count; ++index) {
+        const Scene_Setting_Descriptor *descriptor = scene_settings_descriptor(
+            p->scene.id, index);
+        float y = content.y + (float)index*row_height - p->scene_settings_scroll;
+        if (descriptor == NULL || y + row_height < content.y ||
+            y > content.y + content.height) continue;
+        DrawTextEx(ui_font(), descriptor->label,
+                   (Vector2){boundary.x + padding, y + 5.0f},
+                   16.0f, 0.0f, COLOR_UI_INK);
+        char value_text[32];
+        float value = scene_settings_get(&track->scene_settings, p->scene.id, index);
+        if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+            snprintf(value_text, sizeof(value_text), "%s",
+                     value >= 0.5f ? "Wireframe" : "Filled");
+        } else {
+            snprintf(value_text, sizeof(value_text), "%.*f",
+                     (int)descriptor->precision, value);
+        }
+        Vector2 value_size = MeasureTextEx(ui_font(), value_text, 15.0f, 0.0f);
+        DrawTextEx(ui_font(), value_text,
+                   (Vector2){boundary.x + boundary.width - padding - value_size.x,
+                             y + 6.0f},
+                   15.0f, 0.0f, COLOR_ACCENT);
+        Rectangle slider = {boundary.x + padding, y + 31.0f,
+                            boundary.width - padding*2.0f, 30.0f};
+        bool changed = descriptor->kind == SCENE_SETTING_TOGGLE ?
+            scene_setting_surface_toggle(slider, p->scene.id, index, &value) :
+            scene_setting_slider(slider, p->scene.id, index, &value);
+        if (changed &&
+            scene_settings_set(&track->scene_settings, p->scene.id, index, value)) {
+            mark_project_dirty(track);
+        }
+        DrawLine((int)(boundary.x + padding), (int)(y + row_height - 1.0f),
+                 (int)(boundary.x + boundary.width - padding),
+                 (int)(y + row_height - 1.0f), COLOR_UI_RULE);
+    }
+    EndScissorMode();
+
+    if (max_scroll > 0.0f && content_height > 0.0f) {
+        Rectangle rail = {boundary.x + boundary.width - 7.0f, content.y,
+                          2.0f, content.height};
+        float thumb_height = fmaxf(34.0f,
+                                    content.height*content.height/total_height);
+        if (thumb_height > content.height) thumb_height = content.height;
+        float thumb_y = content.y +
+            (content.height - thumb_height)*(p->scene_settings_scroll/max_scroll);
+        DrawRectangleRec(rail, COLOR_UI_RULE);
+        DrawRectangleRec((Rectangle){rail.x - 1.0f, thumb_y, 4.0f, thumb_height},
+                         COLOR_ACCENT);
+    }
+
+    DrawTextEx(ui_font(), "Saved with this track",
+               (Vector2){boundary.x + padding,
+                         boundary.y + boundary.height - 29.0f},
+               14.0f, 0.0f, COLOR_UI_MUTED);
+}
+
 static void scene_browser(Rectangle boundary)
 {
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
@@ -3501,17 +4148,33 @@ static void scene_browser(Rectangle boundary)
                header_font, 0.0f, COLOR_UI_INK);
     char status[64];
     Track *track = current_track();
-    if (track != NULL && track->scene_switches.enabled) {
+    bool compact_header = boundary.width < 280.0f;
+    if (track != NULL && track->scene_switches.enabled && compact_header) {
+        snprintf(status, sizeof(status), "AUTO");
+    } else if (track != NULL && track->scene_switches.enabled) {
         snprintf(status, sizeof(status), "AUTO  |  %zu events",
                  combined_scene_events().count);
+    } else if (compact_header) {
+        snprintf(status, sizeof(status), "%zu", combined_scene_events().count);
     } else {
         snprintf(status, sizeof(status), "%zu events", combined_scene_events().count);
     }
-    Vector2 status_size = MeasureTextEx(ui_font(), status, 14.0f, 0.0f);
+    Rectangle settings_button = {
+        boundary.x + boundary.width - padding - 68.0f,
+        boundary.y + 3.0f,
+        68.0f,
+        24.0f,
+    };
+    if (text_button(UINT64_C(0x5343454E45534554), settings_button,
+                    p->scene_settings_open ? "Hide" : "Tune",
+                    p->scene_settings_open) & BS_CLICKED) {
+        set_scene_settings_open(!p->scene_settings_open);
+    }
+    Vector2 status_size = MeasureTextEx(ui_font(), status, 12.0f, 0.0f);
     DrawTextEx(ui_font(), status,
-               (Vector2){boundary.x + boundary.width - status_size.x - padding,
-                         boundary.y + 8.0f},
-               14.0f, 0.0f, COLOR_UI_MUTED);
+               (Vector2){settings_button.x - status_size.x - 7.0f,
+                         boundary.y + 9.0f},
+               12.0f, 0.0f, COLOR_UI_MUTED);
 
     const float footer_height = 36.0f;
     const float gap = 4.0f;
@@ -3981,6 +4644,12 @@ static void warn_render_staging_file_retained(const char *path)
 static bool start_rendering_track_to(Track *track, const char *output_path)
 {
     if (track == NULL || output_path == NULL || output_path[0] == '\0') return false;
+    if (assist_job_is_active(p->assist_job_state)) {
+        notice_push(UI_NOTICE_WARNING, "Export was not started",
+                    "Wait for Assist to finish, or cancel its job, before starting a render.",
+                    p->assist_log_path, false);
+        return false;
+    }
     if (p->render_audio_path[0] != '\0') {
         if (remove_render_staging_file(p->render_audio_path)) {
             p->render_audio_path[0] = '\0';
@@ -4242,7 +4911,7 @@ MUSIALIZER_PLUG bool plug_confirm_close(void)
     }
     bool dirty_draft = lyric_editor_has_unsaved_draft(active);
     bool staged_suggestions = p->assist_candidate != NULL;
-    bool analysis_running = p->assist_job_state == ASSIST_JOB_RUNNING;
+    bool analysis_running = assist_job_is_active(p->assist_job_state);
     bool export_running = p->rendering;
     if (dirty_projects == 0 && !dirty_draft && !staged_suggestions &&
         !analysis_running && !export_running) return true;
@@ -4289,6 +4958,12 @@ static void finish_rendering_track(Track *track)
 #ifdef MUSIALIZER_MICROPHONE
 static void start_capture(void)
 {
+    if (assist_job_is_active(p->assist_job_state)) {
+        notice_push(UI_NOTICE_WARNING, "Capture was not started",
+                    "Wait for Assist to finish, or cancel its job, before starting microphone capture.",
+                    p->assist_log_path, false);
+        return;
+    }
     ma_result result = MA_SUCCESS;
 
     assert(!p->capturing);
@@ -4429,10 +5104,59 @@ static bool toolbar(Track *track, Rectangle boundary)
     return interacted;
 }
 
+static void draw_fullscreen_assist_status(Rectangle preview_boundary)
+{
+    const char *message = NULL;
+    char status[256];
+    if (p->assist_candidate != NULL) {
+        snprintf(status, sizeof(status), "Assist result ready  |  F to review");
+        message = status;
+    } else if (p->assist_job_state == ASSIST_JOB_CANCELLING ||
+               p->assist_job_state == ASSIST_JOB_TIMING_OUT ||
+               p->assist_job_state == ASSIST_JOB_FAILING) {
+        snprintf(status, sizeof(status), "%s  |  F to return to the editor",
+                 p->assist_job_state == ASSIST_JOB_TIMING_OUT ?
+                     "Assist reached its 40:00 job deadline" :
+                     "Assist is verifying process-tree cleanup");
+        message = status;
+    } else if (p->assist_job_state == ASSIST_JOB_RUNNING) {
+        double elapsed = fmax(0.0, GetTime() - p->assist_started_at);
+        snprintf(status, sizeof(status), "%s  |  %02u:%02u elapsed  |  F to return",
+                 assist_mode_display_name(p->assist_mode),
+                 (unsigned)(elapsed/60.0), (unsigned)fmod(elapsed, 60.0));
+        message = status;
+    } else if (p->assist_panel_open && p->assist_confirmation_pending) {
+        snprintf(status, sizeof(status), "Assist setup pending  |  F to continue");
+        message = status;
+    } else if (p->assist_panel_open && p->assist_job_state == ASSIST_JOB_FAILED) {
+        snprintf(status, sizeof(status), "Assist failed  |  F to inspect the job log");
+        message = status;
+    }
+    if (message == NULL || preview_boundary.width < 320.0f) return;
+
+    float width = fminf(440.0f, preview_boundary.width - 24.0f);
+    Rectangle badge = {preview_boundary.x + 12.0f, preview_boundary.y + 12.0f,
+                       width, 42.0f};
+    DrawRectangleRec(badge, ColorAlpha(COLOR_UI_RAISED, 0.93f));
+    DrawRectangleLinesEx(badge, 1.0f, COLOR_UI_RULE);
+    DrawRectangleRec((Rectangle){badge.x, badge.y, 4.0f, badge.height}, COLOR_ACCENT);
+    BeginScissorMode((int)badge.x + 5, (int)badge.y,
+                     (int)fmaxf(0.0f, badge.width - 6.0f), (int)badge.height);
+    DrawTextEx(ui_font(), message, (Vector2){badge.x + 14.0f, badge.y + 12.0f},
+               14.0f, 1.0f, COLOR_UI_INK);
+    EndScissorMode();
+}
+
 static void preview_screen(void)
 {
     int w = GetScreenWidth();
     int h = GetScreenHeight();
+
+    // Service decode buffers before polling jobs, handling drops, hashing, or
+    // any other operation that may occasionally stall the UI thread. The later
+    // call catches tracks created by those operations and refills after them.
+    Track *early_track = current_track();
+    if (early_track != NULL) UpdateMusicStream(early_track->music);
 
     poll_assist_job();
 
@@ -4473,6 +5197,13 @@ static void preview_screen(void)
 
     Track *track = current_track();
     if (track) { // The music is loaded and ready
+        Scene_Settings_Ui_Layout settings_layout = {
+            .workspace_width = (float)w,
+            .tracks_width = 320.0f,
+        };
+        (void)scene_settings_ui_layout((float)w, p->scene_settings_open,
+                                       &settings_layout);
+        float workspace_width = settings_layout.workspace_width;
         UpdateMusicStream(track->music);
         for (size_t i = 0; i < p->tracks.count; ++i) {
             poll_project_autosave(&p->tracks.items[i]);
@@ -4524,7 +5255,7 @@ static void preview_screen(void)
             Rectangle preview_boundary = {
                 .x = 0,
                 .y = 0,
-                .width = w,
+                .width = workspace_width,
                 .height = h,
             };
 
@@ -4547,6 +5278,7 @@ static void preview_screen(void)
             if (moved) hud_timer = HUD_TIMER_SECS;
 
             scene_render(preview_boundary, spectrum, scene_time, scene_dt);
+            draw_fullscreen_assist_status(preview_boundary);
 
 #if 0
             // TODO: toggle track playing on right mouse click on the preview
@@ -4559,17 +5291,27 @@ static void preview_screen(void)
 
             notice_tray(preview_boundary);
         } else {
-            float tracks_panel_width = 320.0f;
-            float timeline_height = (p->lyrics_editor_open || p->assist_panel_open ||
-                                     p->export_panel_open) ?
-                                    330.0f : 180.0f;
-            if (timeline_height > h - toolbar_height - 180.0f) {
-                timeline_height = fmaxf(150.0f, h - toolbar_height - 180.0f);
+            float tracks_panel_width = settings_layout.tracks_width;
+            float timeline_height = 180.0f;
+            if (p->assist_panel_open) {
+                Assist_Panel_Content assist_content = assist_panel_content(
+                    p->assist_job_state, p->assist_confirmation_pending,
+                    p->assist_candidate != NULL);
+                Assist_Ui_Layout assist_layout = assist_ui_layout(
+                    workspace_width - 12.0f, assist_content);
+                timeline_height = assist_timeline_height(
+                    (float)h, toolbar_height, assist_layout.required_height);
+            } else if (p->lyrics_editor_open || p->export_panel_open) {
+                timeline_height = 330.0f;
+                if (timeline_height > h - toolbar_height - 180.0f) {
+                    timeline_height = fmaxf(150.0f,
+                                            h - toolbar_height - 180.0f);
+                }
             }
             Rectangle preview_boundary = {
                 .x = tracks_panel_width,
                 .y = 0,
-                .width = w - tracks_panel_width,
+                .width = workspace_width - tracks_panel_width,
                 .height = h - timeline_height - toolbar_height,
             };
 
@@ -4607,7 +5349,7 @@ static void preview_screen(void)
             timeline(CLITERAL(Rectangle) {
                 .x = 0,
                 .y = h - timeline_height,
-                .width = w,
+                .width = workspace_width,
                 .height = timeline_height,
             }, track);
 
@@ -4617,6 +5359,14 @@ static void preview_screen(void)
                 .width = preview_boundary.width,
                 .height = toolbar_height,
             });
+        }
+        if (p->scene_settings_open) {
+            scene_settings_panel((Rectangle){
+                .x = workspace_width,
+                .y = 0.0f,
+                .width = (float)w - workspace_width,
+                .height = (float)h,
+            }, track);
         }
     } else {
         DrawRectangle(0, 0, w, h, COLOR_UI_SURFACE);
@@ -4989,11 +5739,15 @@ static void unload_assets(void)
     memset(p->icon_textures, 0, sizeof(p->icon_textures));
 }
 
-static void release_reload_sensitive_resources(void)
+static bool release_reload_sensitive_resources(void)
 {
     // A helper may still be executing code/files from this checkout. Stop it
     // before unloading the plug that owns its process handle.
-    cancel_assist_job();
+    if (!cancel_assist_job_blocking()) {
+        TraceLog(LOG_ERROR,
+                 "HOTRELOAD: Assist process ownership is still active; reload cancelled");
+        return false;
+    }
 #ifdef MUSIALIZER_MICROPHONE
     // miniaudio retains ma_callback, so the device must be stopped before the
     // old shared object is unmapped.
@@ -5058,6 +5812,7 @@ static void release_reload_sensitive_resources(void)
     memset(&p->screen, 0, sizeof(p->screen));
     unload_assets();
     sample_ring_reset(&p->sample_ring);
+    return true;
 }
 
 static void free_rejected_reload_allocations(Plug_Reload_Handoff *handoff)
@@ -5185,6 +5940,7 @@ MUSIALIZER_PLUG void plug_init(void)
     ui_notice_queue_init(&p->notices);
     p->lyric_list_follow_selection = true;
     render_export_config_init(&p->render_config);
+    scene_settings_init(&p->scene_settings);
     p->render_resolution = RENDER_RESOLUTION_1080P;
     p->render_frame_rate = RENDER_FRAME_RATE_30;
     analyzer_configure(48000, 2);
@@ -5251,20 +6007,17 @@ MUSIALIZER_PLUG void *plug_pre_reload(void)
         if (p->scene.state != NULL && (descriptor == NULL || descriptor->unload == NULL)) {
             owned_allocations[handoff->owned_allocation_count++] = p->scene.state;
         }
-    }
-
-    release_reload_sensitive_resources();
-    if (handoff == NULL || owned_allocations == NULL) {
-        // Allocation failure is rare, but dlclose is still imminent.  Prefer a
-        // clean fresh session over leaking resources or retaining callbacks.
+    } else {
+        // Returning NULL vetoes reload in the host. No callback, process, GPU,
+        // audio, or heap ownership has been released yet.
+        TraceLog(LOG_ERROR, "HOTRELOAD: handoff allocation failed; reload cancelled");
         free(handoff);
         free(owned_allocations);
-        for (size_t i = 0; i < p->tracks.count; ++i) free(p->tracks.items[i].file_path);
-        free(p->tracks.items);
-        free(p->assist_candidate);
-        if (p->scene.state != NULL) scene_instance_unload(&p->scene);
-        free(p);
-        p = NULL;
+        return NULL;
+    }
+    if (!release_reload_sensitive_resources()) {
+        free(handoff->owned_allocations);
+        free(handoff);
         return NULL;
     }
     p = NULL;
@@ -5349,7 +6102,13 @@ MUSIALIZER_PLUG void plug_post_reload(void *pp)
 MUSIALIZER_PLUG void plug_shutdown(void)
 {
     if (p == NULL) return;
-    cancel_assist_job();
+    if (!cancel_assist_job_blocking()) {
+        // Do not free the sole PID/HANDLE ownership record. The host is already
+        // crossing its final process boundary and will reclaim this state.
+        TraceLog(LOG_ERROR,
+                 "SHUTDOWN: retaining Assist ownership until process teardown");
+        return;
+    }
 #ifdef MUSIALIZER_MICROPHONE
     if (p->microphone_working) {
         ma_device_uninit(&p->microphone);

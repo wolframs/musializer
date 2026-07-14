@@ -128,11 +128,16 @@ static Color constellation_event_color(uint32_t type, float hue, float brightnes
 static void constellation_draw(const void *state, const Scene_Frame *frame,
                                const Scene_Renderer *renderer, Rectangle boundary)
 {
-    (void)renderer;
     const Constellation_State *constellation = state;
     if (boundary.width <= 1.0f || boundary.height <= 1.0f) return;
 
-    float time = (float)frame->time_seconds;
+    float motion_scale = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_MOTION);
+    float field_scale = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_SCALE);
+    float glow_scale = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_GLOW);
+    float time = (float)frame->time_seconds*motion_scale;
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float base_hue = fmodf(201.0f + constellation_unit(constellation->seed, 9)*95.0f
                          + time*1.8f + frame->semantic.valence*70.0f*semantic_weight,
@@ -201,6 +206,9 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
             positions[i].y += sinf(phase*1.7f)*displacement;
             positions[i].z += sinf(phase)*displacement;
         }
+        positions[i].x *= field_scale;
+        positions[i].y *= field_scale;
+        positions[i].z *= field_scale;
     }
 
     for (size_t i = 0; i < CONSTELLATION_NODE_COUNT; ++i) {
@@ -223,10 +231,10 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         float brightness = 0.47f + band*0.3f + strengths[i]*0.52f;
         Color color = constellation_event_color(types[i],
                          fmodf(base_hue + (float)i*2.1f, 360.0f), brightness);
-        float radius = 0.045f + band*0.075f + strengths[i]*0.16f
-                     + constellation->onset_pulse*0.018f;
+        float radius = (0.045f + band*0.075f + strengths[i]*0.16f
+                     + constellation->onset_pulse*0.018f)*glow_scale;
         DrawSphere(positions[i], radius, color);
-        if (strengths[i] > 0.12f) {
+        if (strengths[i] > 0.12f && glow_scale > 0.001f) {
             DrawSphereWires(positions[i], radius*(1.5f + strengths[i]), 5, 8,
                             ColorAlpha(RAYWHITE, strengths[i]*0.6f));
         }

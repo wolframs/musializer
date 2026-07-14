@@ -40,6 +40,86 @@ static float ascii_seed_phase(uint64_t seed)
     return (float)(seed & UINT64_C(0xffff))/65535.0f*2.0f*PI;
 }
 
+static float ascii_lerp(float first, float second, float amount)
+{
+    return first + (second - first)*ascii_clamp01(amount);
+}
+
+static unsigned char ascii_color_byte(float value)
+{
+    if (!isfinite(value) || value <= 0.0f) return 0;
+    if (value >= 255.0f) return 255;
+    return (unsigned char)(value + 0.5f);
+}
+
+static Color ascii_main_color(const AsciiCell *cell,
+                              float band,
+                              float energy,
+                              float semantic_tension)
+{
+    float luminance = ascii_clamp01(cell->luminance);
+    float edge = ascii_clamp01(cell->edge_strength*3.0f);
+    float detail = fmaxf(luminance, edge*0.82f);
+    float source_r = (float)cell->foreground.r/255.0f;
+    float source_g = (float)cell->foreground.g/255.0f;
+    float source_b = (float)cell->foreground.b/255.0f;
+    float source_max = fmaxf(source_r, fmaxf(source_g, source_b));
+    /* Glyph density already carries the source luminance. Keep every mark
+     * bright enough to survive 720p/1080p delivery and use the original hue
+     * to distinguish regions instead of multiplying dark ink into oblivion. */
+    float target = 0.42f + powf(detail, 0.72f)*0.58f;
+    float lift = target/fmaxf(source_max, 0.05f);
+    if (lift > 8.5f) lift = 8.5f;
+    source_r = ascii_clamp01(source_r*lift);
+    source_g = ascii_clamp01(source_g*lift);
+    source_b = ascii_clamp01(source_b*lift);
+    source_r = fmaxf(source_r, target*0.18f);
+    source_g = fmaxf(source_g, target*0.65f);
+    source_b = fmaxf(source_b, target*0.78f);
+
+    const float cyan_r = 0.0f;
+    const float cyan_g = 240.0f/255.0f;
+    const float cyan_b = 1.0f;
+    float phosphor = 0.11f + edge*0.12f + band*0.08f;
+    source_r = ascii_lerp(source_r, cyan_r, phosphor);
+    source_g = ascii_lerp(source_g, cyan_g, phosphor);
+    source_b = ascii_lerp(source_b, cyan_b, phosphor);
+
+    float source_alpha = (float)cell->foreground.a/255.0f;
+    float alpha = (0.44f + powf(detail, 0.68f)*0.56f)*
+                  (0.86f + energy*0.08f + band*0.08f);
+    alpha *= 0.30f + source_alpha*0.70f;
+    alpha *= 0.94f + semantic_tension*0.06f;
+    return (Color) {
+        ascii_color_byte(source_r*255.0f),
+        ascii_color_byte(source_g*255.0f),
+        ascii_color_byte(source_b*255.0f),
+        ascii_color_byte(ascii_clamp01(alpha)*255.0f),
+    };
+}
+
+static Vector2 ascii_measure_glyph(Font font, uint32_t glyph, float font_size)
+{
+    int byte_count = 0;
+    const char *text = CodepointToUTF8((int)glyph, &byte_count);
+    if (text == NULL || byte_count <= 0) return (Vector2){font_size, font_size};
+    return MeasureTextEx(font, text, font_size, 0.0f);
+}
+
+static void ascii_draw_glyph(Font font,
+                             uint32_t glyph,
+                             Vector2 center,
+                             float font_size,
+                             Vector2 measured,
+                             Color color)
+{
+    Vector2 position = {
+        center.x - measured.x*0.5f,
+        center.y - measured.y*0.5f,
+    };
+    DrawTextCodepoint(font, (int)glyph, position, font_size, color);
+}
+
 static bool ascii_scissor(Rectangle boundary, int *x, int *y, int *width, int *height)
 {
     float right = boundary.x + boundary.width;
@@ -73,25 +153,33 @@ static Font ascii_font(const Scene_Renderer *renderer)
     return font;
 }
 
+static Font ascii_grid_font(void)
+{
+    /* The bundled caption face is intentionally literary and proportional.
+     * Raylib's built-in pixel face is monospaced, heavier at tiny sizes, and
+     * therefore keeps individual ASCII samples legible after video encoding. */
+    return GetFontDefault();
+}
+
 static void ascii_draw_empty(const Scene_Renderer *renderer, Rectangle boundary)
 {
     Font font = ascii_font(renderer);
     float pixel_scale = renderer->pixel_scale > 0.0f ? renderer->pixel_scale : 1.0f;
-    const char *title = "ASCII FIELD // AWAITING IMAGE";
-    const char *hint = "drop an image to give the signal a face";
-    float title_size = fminf(22.0f*pixel_scale,
-                             fmaxf(10.0f*pixel_scale, boundary.width/26.0f));
-    float hint_size = title_size*0.62f;
+    const char *title = "Import an image for ASCII Field";
+    const char *hint = "Drop an image file or choose Import image.";
+    float title_size = fminf(24.0f*pixel_scale,
+                             fmaxf(11.0f*pixel_scale, boundary.width/28.0f));
+    float hint_size = title_size*0.66f;
     Vector2 title_measure = MeasureTextEx(font, title, title_size, 1.0f);
     Vector2 hint_measure = MeasureTextEx(font, hint, hint_size, 0.5f);
     float center_x = boundary.x + boundary.width*0.5f;
     float center_y = boundary.y + boundary.height*0.5f;
-    Color title_color = { 140, 224, 218, 205 };
-    Color hint_color = { 112, 132, 148, 165 };
+    Color title_color = { 0, 240, 255, 220 };
+    Color hint_color = { 172, 166, 194, 180 };
 
     DrawLineEx((Vector2){ center_x - title_measure.x*0.58f, center_y - title_size },
                (Vector2){ center_x + title_measure.x*0.58f, center_y - title_size },
-               1.0f*pixel_scale, (Color){ 73, 117, 128, 120 });
+               1.0f*pixel_scale, (Color){ 255, 0, 110, 120 });
     DrawTextEx(font, title,
                (Vector2){ center_x - title_measure.x*0.5f, center_y - title_size*0.68f },
                title_size, 1.0f, title_color);
@@ -134,12 +222,35 @@ static void ascii_field_draw(const void *state,
     float time = isfinite(frame->time_seconds)
         ? (float)fmod(frame->time_seconds, 4096.0) : 0.0f;
     float seed_phase = ascii_seed_phase(field->seed);
-    float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
-    float hue = fmodf(196.0f + seed_phase*9.5f + time*(1.0f + flux*5.0f) +
-                      frame->semantic.valence*65.0f*semantic_weight, 360.0f);
-    if (hue < 0.0f) hue += 360.0f;
-    Color background = ColorFromHSV(hue, 0.52f, 0.035f + energy*0.025f);
-    DrawRectangleRec(boundary, background);
+    float semantic_weight = frame->semantic.available
+        ? ascii_clamp01(frame->semantic.confidence) : 0.0f;
+    float semantic_tension = frame->semantic.available
+        ? ascii_clamp01(frame->semantic.tension)*semantic_weight : 0.0f;
+    float semantic_valence = frame->semantic.available
+        ? ascii_clamp01((frame->semantic.valence + 1.0f)*0.5f)*semantic_weight : 0.0f;
+    float pixel_scale = renderer->pixel_scale > 0.0f
+        ? renderer->pixel_scale : 1.0f;
+    float motion_scale = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_MOTION);
+    float cycling_scale = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_CYCLING);
+    float scanline_scale = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_SCANLINES);
+    float split_scale = scene_settings_get(
+        renderer->settings, SCENE_ASCII_FIELD, ASCII_SETTING_SPLIT);
+
+    /* Deep navy CRT surface: flat enough to preserve image contrast, but with
+     * deterministic phosphor bands so an empty dark source does not become an
+     * undifferentiated black rectangle. */
+    DrawRectangleRec(boundary, (Color){ 5, 4, 18, 255 });
+    float background_step = fmaxf(6.0f*pixel_scale, 2.0f);
+    for (float y = boundary.y; y < boundary.y + boundary.height;
+         y += background_step) {
+        DrawRectangleRec((Rectangle){boundary.x, y, boundary.width,
+                                     fmaxf(2.0f*pixel_scale, 1.0f)},
+                         (Color){0, 0, 0,
+                                 ascii_color_byte(34.0f*scanline_scale)});
+    }
 
     BeginScissorMode(scissor_x, scissor_y, scissor_width, scissor_height);
     if (renderer->ascii_cells == NULL || renderer->ascii_columns == 0 ||
@@ -155,17 +266,37 @@ static void ascii_field_draw(const void *state,
     size_t draw_columns = columns < ASCII_FIELD_MAX_COLUMNS
         ? columns : ASCII_FIELD_MAX_COLUMNS;
     size_t draw_rows = rows < ASCII_FIELD_MAX_ROWS ? rows : ASCII_FIELD_MAX_ROWS;
-    float cell_extent = fminf(boundary.width/(float)draw_columns,
-                              boundary.height/(float)draw_rows);
-    if (!isfinite(cell_extent) || cell_extent <= 0.0f) {
+    float margin = fmaxf(9.0f*pixel_scale,
+                         fminf(boundary.width, boundary.height)*0.035f);
+    if (boundary.width <= margin*2.0f || boundary.height <= margin*2.0f) {
         EndScissorMode();
         return;
     }
-    float field_width = cell_extent*(float)draw_columns;
-    float field_height = cell_extent*(float)draw_rows;
-    float origin_x = boundary.x + (boundary.width - field_width)*0.5f;
-    float origin_y = boundary.y + (boundary.height - field_height)*0.5f;
-    Font font = ascii_font(renderer);
+    Rectangle drawing_area = {
+        boundary.x + margin,
+        boundary.y + margin,
+        boundary.width - margin*2.0f,
+        boundary.height - margin*2.0f,
+    };
+    AsciiGridLayout layout;
+    if (!ascii_art_grid_layout(drawing_area.width, drawing_area.height,
+                               draw_columns, draw_rows, 1.0f, &layout)) {
+        EndScissorMode();
+        return;
+    }
+    float origin_x = drawing_area.x + layout.offset_x;
+    float origin_y = drawing_area.y + layout.offset_y;
+    Font font = ascii_grid_font();
+    float font_size = layout.cell_height*1.15f;
+    Rectangle field_box = {
+        origin_x - 2.0f*pixel_scale,
+        origin_y - 2.0f*pixel_scale,
+        layout.field_width + 4.0f*pixel_scale,
+        layout.field_height + 4.0f*pixel_scale,
+    };
+    DrawRectangleRec(field_box, (Color){ 2, 5, 16, 126 });
+    DrawRectangleLinesEx(field_box, fmaxf(pixel_scale, 1.0f),
+                         (Color){ 0, 240, 255, 34 });
 
     size_t source_y = 0;
     size_t y_error = 0;
@@ -181,50 +312,61 @@ static void ascii_field_draw(const void *state,
             float band = ascii_audio_band(frame, column, draw_columns);
             float horizontal_t = ((float)column + 0.5f)/(float)draw_columns;
             float vertical_t = ((float)row + 0.5f)/(float)draw_rows;
-            float phase = seed_phase + horizontal_t*PI*5.0f + vertical_t*PI*2.0f;
-            float wave = sinf(time*(1.1f + flux*1.7f) + phase);
-            float cross_wave = cosf(time*0.71f - horizontal_t*PI*3.0f + phase*0.3f);
-            float displacement = cell_extent*(0.04f + band*0.22f + pulse*0.08f);
-            float center_x = origin_x + ((float)column + 0.5f)*cell_extent
-                           + cross_wave*displacement*0.35f;
-            float center_y = origin_y + ((float)row + 0.5f)*cell_extent
-                           + wave*displacement;
+            float phase = seed_phase + horizontal_t*PI*4.0f - vertical_t*PI*1.7f;
+            float glyph_wave = sinf(time*motion_scale*(0.66f + energy*0.18f) + phase);
+            float counter_wave = sinf(time*motion_scale*0.43f - vertical_t*PI*3.2f +
+                                      horizontal_t*PI*0.8f + seed_phase);
+            float column_drift = glyph_wave*layout.cell_height*
+                                 (0.035f + band*0.060f + energy*0.018f)*motion_scale;
+            float row_drift = counter_wave*layout.cell_width*
+                              (0.012f + flux*0.030f + pulse*0.016f)*motion_scale;
+            float center_x = origin_x + ((float)column + 0.5f)*layout.cell_width;
+            center_x += row_drift;
+            float center_y = origin_y + ((float)row + 0.5f)*layout.cell_height +
+                             column_drift;
 
             float edge = ascii_clamp01(cell->edge_strength*4.0f);
             float luminance = ascii_clamp01(cell->luminance);
-            float font_size = cell_extent*(0.82f + band*0.18f + edge*0.10f + pulse*0.06f);
-            float alpha = (0.30f + luminance*0.48f + edge*0.34f)
-                        * (0.76f + energy*0.22f + band*0.24f);
-            float source_alpha = (float)cell->foreground.a/255.0f;
-            alpha *= 0.45f + source_alpha*0.55f;
-            alpha = ascii_clamp01(alpha);
+            Color color = ascii_main_color(cell, band, energy,
+                                           semantic_tension);
 
-            Color color = {
-                cell->foreground.r,
-                cell->foreground.g,
-                cell->foreground.b,
-                (unsigned char)(alpha*255.0f + 0.5f),
-            };
-            if (luminance < 0.35f) {
-                float lift = 1.0f - luminance/0.35f;
-                lift = 0.72f + lift*0.28f;
-                float target_r = 96.0f + 112.0f*band;
-                float target_g = 196.0f + 54.0f*band;
-                float target_b = 224.0f + 30.0f*band;
-                color.r = (unsigned char)(color.r + (target_r - color.r)*lift);
-                color.g = (unsigned char)(color.g + (target_g - color.g)*lift);
-                color.b = (unsigned char)(color.b + (target_b - color.b)*lift);
-                if (color.a < 176) color.a = 176;
-            }
-
-            uint32_t glyph = cell->glyph <= 0x10ffffu ? cell->glyph : 0xfffdu;
+            float glyph_activity = ascii_clamp01((energy*0.48f + band*0.36f +
+                                                  flux*0.11f + pulse*0.24f)*
+                                                 cycling_scale);
+            uint32_t glyph = ascii_art_animated_glyph(
+                cell, row, column, frame->time_seconds*cycling_scale,
+                glyph_activity,
+                field->seed);
             if (glyph != ' ' && glyph != 0) {
-                Vector2 measured = MeasureTextEx(font, "M", font_size, 0.0f);
-                Vector2 position = {
-                    center_x - measured.x*0.5f,
-                    center_y - measured.y*0.5f,
-                };
-                DrawTextCodepoint(font, (int)glyph, position, font_size, color);
+                Vector2 center = {center_x, center_y};
+                Vector2 measured = ascii_measure_glyph(font, glyph, font_size);
+                uint64_t cell_hash = field->seed ^
+                    ((uint64_t)row*UINT64_C(0x9e3779b97f4a7c15)) ^
+                    ((uint64_t)column*UINT64_C(0xbf58476d1ce4e5b9));
+                bool chromatic_detail = edge > 0.18f || luminance > 0.62f ||
+                    ((cell_hash >> 59) == 0 && luminance > 0.24f);
+                if (chromatic_detail) {
+                    float split = pixel_scale*(0.42f + flux*1.20f +
+                                  pulse*1.10f + semantic_tension*0.65f)*
+                                  split_scale;
+                    unsigned char ghost_alpha = ascii_color_byte(
+                        (float)color.a*(0.13f + flux*0.10f + pulse*0.07f)*
+                        split_scale);
+                    Color magenta = {
+                        255,
+                        ascii_color_byte(18.0f + semantic_valence*28.0f),
+                        110,
+                        ghost_alpha,
+                    };
+                    Color cyan = {0, 240, 255, ghost_alpha};
+                    ascii_draw_glyph(font, glyph,
+                                     (Vector2){center.x - split, center.y},
+                                     font_size, measured, magenta);
+                    ascii_draw_glyph(font, glyph,
+                                     (Vector2){center.x + split, center.y},
+                                     font_size, measured, cyan);
+                }
+                ascii_draw_glyph(font, glyph, center, font_size, measured, color);
             }
 
             size_t x_advance = x_step;
@@ -243,13 +385,39 @@ static void ascii_field_draw(const void *state,
         }
         source_y += y_advance;
     }
+
+    /* Two-pixel dark bands plus a faint phosphor lip survive downsampling and
+     * ordinary web-video compression better than the old alpha-12 hairlines. */
+    for (float y = field_box.y; y < field_box.y + field_box.height;
+         y += background_step) {
+        DrawRectangleRec((Rectangle){field_box.x, y, field_box.width,
+                                     fmaxf(2.0f*pixel_scale, 1.0f)},
+                         (Color){0, 0, 0,
+                                 ascii_color_byte((42.0f + energy*10.0f)*
+                                                  scanline_scale)});
+        DrawRectangleRec((Rectangle){field_box.x,
+                                     y + fmaxf(2.0f*pixel_scale, 1.0f),
+                                     field_box.width,
+                                     fmaxf(pixel_scale, 1.0f)},
+                         (Color){0, 240, 255,
+                                 ascii_color_byte(10.0f*scanline_scale)});
+    }
+    float sweep_phase = fmodf(time*(0.055f + energy*0.045f) +
+                              seed_phase/(2.0f*PI), 1.0f);
+    if (sweep_phase < 0.0f) sweep_phase += 1.0f;
+    float sweep_y = field_box.y + sweep_phase*field_box.height;
+    DrawRectangleRec((Rectangle){field_box.x, sweep_y, field_box.width,
+                                 fmaxf(pixel_scale, 1.0f)},
+                     (Color){0, 240, 255,
+                             ascii_color_byte((18.0f + energy*24.0f +
+                                               pulse*25.0f)*scanline_scale)});
     EndScissorMode();
 }
 
 const Scene_Descriptor scene_ascii_field_descriptor = {
     .id = SCENE_ASCII_FIELD,
     .name = "ASCII Field",
-    .state_version = 1,
+    .state_version = 3,
     .state_size = sizeof(Ascii_Field_State),
     .init = ascii_field_init,
     .update = ascii_field_update,
