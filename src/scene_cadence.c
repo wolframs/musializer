@@ -4,7 +4,10 @@
 #include <string.h>
 
 enum {
-    CADENCE_MAX_WORDS = 32,
+    // A full 511-byte cue can contain 256 one-byte words separated by spaces.
+    // Derive the fixed bound from the lyric contract so no valid cue is
+    // silently truncated when its timed word sequence is assembled.
+    CADENCE_MAX_WORDS = (LYRICS_TEXT_CAPACITY + 1U)/2U,
     CADENCE_AMBIENT_PARTICLES = 96,
 };
 

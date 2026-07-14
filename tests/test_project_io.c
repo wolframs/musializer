@@ -117,6 +117,37 @@ TEST(project_io_original_v1_defaults_new_workspace_fields)
     free(json);
 }
 
+TEST(project_io_early_v1_defaults_optional_scene_authoring_fields)
+{
+    Musi_Project p=fixture(),decoded;size_t n;char*json=encode(&p,&n);if(!json)return;
+
+    char *cursor=strstr(json,"\"scene_switches\":");REQUIRE_TRUE(cursor!=NULL);
+    for(size_t i=0;i<p.scene_switches.count;++i){
+        char *settings=strstr(cursor,",\"settings\":[");REQUIRE_TRUE(settings!=NULL);
+        char *end=strchr(settings,']');REQUIRE_TRUE(end!=NULL);
+        memmove(settings,end+1,strlen(end+1)+1);cursor=settings;
+    }
+    char *presets=strstr(json,",\"scene_presets\":[");REQUIRE_TRUE(presets!=NULL);
+    char *events_after_presets=strstr(presets,"],\"semantic_events\":");
+    REQUIRE_TRUE(events_after_presets!=NULL);
+    memmove(presets,events_after_presets+1,strlen(events_after_presets+1)+1);
+    char *ascii=strstr(json,",\"ascii_image\":");REQUIRE_TRUE(ascii!=NULL);
+    char *output_after_ascii=strstr(ascii,",\"output\":");
+    REQUIRE_TRUE(output_after_ascii!=NULL);
+    memmove(ascii,output_after_ascii,strlen(output_after_ascii)+1);n=strlen(json);
+
+    REQUIRE_TRUE(musi_project_json_deserialize(&decoded,json,n)==MUSI_PROJECT_IO_OK);
+    EXPECT_FALSE(decoded.ascii_image.present);
+    EXPECT_EQ_SIZE(decoded.scene_preset_count,0);
+    EXPECT_EQ_SIZE(decoded.scene_switches.count,p.scene_switches.count);
+    for(size_t i=0;i<decoded.scene_switches.count;++i){
+        EXPECT_EQ_SIZE(decoded.scene_switches.cues[i].setting_count,0);
+        EXPECT_TRUE(strcmp(decoded.scene_switches.cues[i].scene_name,
+                           p.scene_switches.cues[i].scene_name)==0);
+    }
+    free(json);
+}
+
 TEST(project_io_embedded_semantics_survive_without_provenance_artifact)
 {
     Musi_Project p=fixture(),decoded;

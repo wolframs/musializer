@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -7,6 +8,47 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SceneQualityRegressionTests(unittest.TestCase):
+    def test_scene_reset_undo_is_scoped_to_track_and_scene(self):
+        source = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        guard = source.index("if (p->scene_settings_reset_scene != p->scene.id ||")
+        panel = source.index("float button_y =", guard)
+        self.assertIn(
+            "p->scene_settings_reset_track != p->current_track",
+            source[guard:panel],
+        )
+        track_switch = source.index("p->current_track = i;")
+        track_switch_end = source.index("}", track_switch)
+        self.assertIn(
+            "p->scene_settings_reset_undo_available = false;",
+            source[track_switch:track_switch_end],
+        )
+
+    def test_assist_rejection_detail_is_shared_by_panel_and_notice(self):
+        source = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        helper = source.index("static void assist_candidate_failure(")
+        loader = source.index("static Analysis_Candidate *load_analysis_candidate", helper)
+        helper_source = source[helper:loader]
+        self.assertIn("p->assist_failure_detail", helper_source)
+        self.assertIn(
+            "notice_push(UI_NOTICE_ERROR, title, p->assist_failure_detail, path, true)",
+            helper_source,
+        )
+
+    def test_project_preset_capacity_matches_every_scene_slot(self):
+        schema = json.loads(
+            (ROOT / "schemas/project-v1.schema.json").read_text(encoding="utf-8")
+        )
+        project_header = (ROOT / "src/project.h").read_text(encoding="utf-8")
+
+        expected = 9 * 8
+        self.assertEqual(schema["properties"]["scene_presets"]["maxItems"], expected)
+        self.assertIn(
+            "(SCENE_SETTINGS_SCENE_COUNT*SCENE_SETTINGS_PRESETS_PER_SCENE)",
+            project_header,
+        )
+
     def test_every_scene_exposes_renderer_backed_parameter_controls(self):
         scene_sources = [
             "scene_spectrum.c",
@@ -92,6 +134,15 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIn("fmaxf(2.0f*pixel_scale, 1.0f)", source)
         self.assertIn("42.0f + energy*10.0f", source)
         self.assertNotIn("(Color){0, 0, 0, 12}", source)
+
+    def test_cadence_word_capacity_covers_the_full_lyric_contract(self):
+        source = (ROOT / "src/scene_cadence.c").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "CADENCE_MAX_WORDS = (LYRICS_TEXT_CAPACITY + 1U)/2U",
+            source,
+        )
+        self.assertNotIn("CADENCE_MAX_WORDS = 32", source)
 
     def test_song_atlas_scrolls_between_fixed_history_samples(self):
         source = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")

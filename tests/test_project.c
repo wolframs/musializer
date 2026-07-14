@@ -191,6 +191,36 @@ TEST(project_validates_scene_presets_and_cue_setting_snapshots)
                 MUSI_PROJECT_ERROR_SCENE_PRESET);
 }
 
+TEST(project_accepts_every_per_scene_preset_slot)
+{
+    static const char *const scene_names[SCENE_SETTINGS_SCENE_COUNT] = {
+        "spectrum", "pulse", "orbital", "ascii", "atlas",
+        "terrarium", "constellation", "cadence", "loom",
+    };
+    Musi_Project project = valid_project();
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+
+    EXPECT_EQ_SIZE(MUSI_PROJECT_MAX_SCENE_PRESETS,
+                   SCENE_SETTINGS_SCENE_COUNT*SCENE_SETTINGS_PRESETS_PER_SCENE);
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        Scene_Settings_Snapshot snapshot;
+        REQUIRE_TRUE(scene_settings_capture(&settings, scene, &snapshot));
+        for (size_t slot = 0; slot < SCENE_SETTINGS_PRESETS_PER_SCENE; ++slot) {
+            size_t index = scene*SCENE_SETTINGS_PRESETS_PER_SCENE + slot;
+            Musi_Scene_Preset *preset = &project.scene_presets[index];
+            preset->id = index + 1;
+            strcpy(preset->scene_name, scene_names[scene]);
+            strcpy(preset->name, "Preset");
+            preset->setting_count = snapshot.count;
+            memcpy(preset->settings, snapshot.values,
+                   snapshot.count*sizeof(snapshot.values[0]));
+        }
+    }
+    project.scene_preset_count = MUSI_PROJECT_MAX_SCENE_PRESETS;
+    EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
+}
+
 TEST(project_audio_metadata_identity_is_strict_and_tolerant_only_in_time)
 {
     Musi_Project project = valid_project();

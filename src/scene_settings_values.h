@@ -7,6 +7,7 @@
 enum {
     SCENE_SETTINGS_SCENE_COUNT = 9,
     SCENE_SETTINGS_MAX_CONTROLS = 10,
+    SCENE_SETTINGS_PRESETS_PER_SCENE = 8,
 };
 
 typedef struct Scene_Settings_Snapshot {

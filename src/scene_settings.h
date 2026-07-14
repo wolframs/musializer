@@ -8,7 +8,6 @@
 #include "scene_settings_values.h"
 
 enum {
-    SCENE_SETTINGS_PRESETS_PER_SCENE = 8,
     SCENE_SETTINGS_PRESET_NAME_CAPACITY = 129,
 };
 

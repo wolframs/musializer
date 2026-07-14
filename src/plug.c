@@ -95,7 +95,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 24
+#define PLUG_STATE_VERSION 25
 
 #define COLOR_ACCENT                  GetColor(0x002FA7FF)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -279,6 +279,7 @@ typedef struct {
     bool scene_settings_reset_confirmation;
     bool scene_settings_reset_undo_available;
     Scene_Id scene_settings_reset_scene;
+    int scene_settings_reset_track;
     Scene_Settings_Snapshot scene_settings_reset_undo;
     uint64_t scene_settings_reset_notice_id;
     bool scene_preset_delete_confirmation;
@@ -2985,29 +2986,41 @@ static uint32_t assist_mode_lanes(Assist_Mode mode)
     return 0;
 }
 
+static void assist_candidate_failure(const char *title, const char *detail,
+                                     const char *path)
+{
+    snprintf(p->assist_failure_detail, sizeof(p->assist_failure_detail), "%s",
+             detail != NULL ? detail :
+             "The analysis result could not be validated.");
+    notice_push(UI_NOTICE_ERROR, title, p->assist_failure_detail, path, true);
+}
+
 static Analysis_Candidate *load_analysis_candidate_for_track(
     const char *path, size_t track_index, Assist_Mode mode)
 {
     if (path == NULL || track_index >= p->tracks.count) return NULL;
     int file_size = GetFileLength(path);
     if (file_size <= 0 || (size_t)file_size > ANALYSIS_BRIDGE_INPUT_MAX_BYTES) {
-        notice_push(UI_NOTICE_ERROR, "Analysis result was rejected",
-                    "The bridge is empty or exceeds the 4 MiB input limit.", path, true);
+        assist_candidate_failure(
+            "Analysis result was rejected",
+            "The bridge is empty or exceeds the 4 MiB input limit.", path);
         return NULL;
     }
     int input_size = 0;
     unsigned char *input = LoadFileData(path, &input_size);
     if (input == NULL || input_size <= 0) {
         if (input != NULL) UnloadFileData(input);
-        notice_push(UI_NOTICE_ERROR, "Analysis result could not be read",
-                    "The validated bridge file is unavailable.", path, true);
+        assist_candidate_failure(
+            "Analysis result could not be read",
+            "The validated bridge file is unavailable.", path);
         return NULL;
     }
     Analysis_Bridge *bridge = malloc(sizeof(*bridge));
     if (bridge == NULL) {
         UnloadFileData(input);
-        notice_push(UI_NOTICE_ERROR, "Analysis result could not be staged",
-                    "There is not enough memory for the bounded bridge.", path, true);
+        assist_candidate_failure(
+            "Analysis result could not be staged",
+            "There is not enough memory for the bounded bridge.", path);
         return NULL;
     }
     analysis_bridge_init(bridge);
@@ -3022,8 +3035,9 @@ static Analysis_Candidate *load_analysis_candidate_for_track(
     } else {
         UnloadFileData(input);
         free(bridge);
-        notice_push(UI_NOTICE_ERROR, "Track identity could not be verified",
-                    "The source audio could not be hashed.", track->file_path, true);
+        assist_candidate_failure(
+            "Track identity could not be verified",
+            "The source audio could not be hashed.", track->file_path);
         return NULL;
     }
     Analysis_Bridge_Result parsed = analysis_bridge_parse(
@@ -3033,8 +3047,8 @@ static Analysis_Candidate *load_analysis_candidate_for_track(
     if (parsed != ANALYSIS_BRIDGE_OK) {
         TraceLog(LOG_WARNING, "ASSIST: rejected bridge: %s",
                  analysis_bridge_result_string(parsed));
-        notice_push(UI_NOTICE_ERROR, "Analysis result was rejected",
-                    analysis_bridge_result_string(parsed), path, true);
+        assist_candidate_failure("Analysis result was rejected",
+                                 analysis_bridge_result_string(parsed), path);
         free(bridge);
         return NULL;
     }
@@ -3044,8 +3058,9 @@ static Analysis_Candidate *load_analysis_candidate_for_track(
     double bridge_duration = (double)bridge->duration_ms/1000.0;
     if (fabs(bridge_duration - track->lyrics.duration_seconds) > 0.25) {
         TraceLog(LOG_WARNING, "ASSIST: bridge duration does not match the active track");
-        notice_push(UI_NOTICE_ERROR, "Analysis result was rejected",
-                    "The result duration does not match this track.", path, true);
+        assist_candidate_failure(
+            "Analysis result was rejected",
+            "The result duration does not match this track.", path);
         free(bridge);
         return NULL;
     }
@@ -3053,16 +3068,17 @@ static Analysis_Candidate *load_analysis_candidate_for_track(
     Analysis_Candidate *candidate = malloc(sizeof(*candidate));
     if (candidate == NULL) {
         free(bridge);
-        notice_push(UI_NOTICE_ERROR, "Analysis result could not be staged",
-                    "There is not enough memory for editable suggestions.", path, true);
+        assist_candidate_failure(
+            "Analysis result could not be staged",
+            "There is not enough memory for editable suggestions.", path);
         return NULL;
     }
     Analysis_Candidate_Result prepared = analysis_candidate_prepare(
         candidate, bridge, assist_mode_lanes(mode), bridge_duration, COUNT_SCENES);
     free(bridge);
     if (prepared != ANALYSIS_CANDIDATE_OK) {
-        notice_push(UI_NOTICE_ERROR, "Analysis result was rejected",
-                    analysis_candidate_result_string(prepared), path, true);
+        assist_candidate_failure("Analysis result was rejected",
+                                 analysis_candidate_result_string(prepared), path);
         free(candidate);
         return NULL;
     }
@@ -4438,6 +4454,11 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
                 start_preview_track(next_track);
                 p->event_undo_available = false;
                 p->clear_events_confirmation = false;
+                p->scene_settings_reset_confirmation = false;
+                p->scene_settings_reset_undo_available = false;
+                p->scene_settings_reset_track = p->current_track;
+                p->scene_settings_reset_scene = p->scene.id;
+                notice_dismiss(&p->scene_settings_reset_notice_id);
             }
         } else {
             color = COLOR_TRACK_BUTTON_SELECTED;
@@ -4685,10 +4706,12 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                24.0f, 0.0f, COLOR_UI_INK);
 
     Scene_Settings *editable_settings = track_effective_scene_settings(track);
-    if (p->scene_settings_reset_scene != p->scene.id) {
+    if (p->scene_settings_reset_scene != p->scene.id ||
+        p->scene_settings_reset_track != p->current_track) {
         p->scene_settings_reset_confirmation = false;
         p->scene_settings_reset_undo_available = false;
         p->scene_settings_reset_scene = p->scene.id;
+        p->scene_settings_reset_track = p->current_track;
         notice_dismiss(&p->scene_settings_reset_notice_id);
     }
     float button_y = boundary.y + 72.0f;
@@ -4722,6 +4745,8 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                 scene_settings_reset_scene(editable_settings, p->scene.id)) {
                 p->scene_settings_reset_undo = previous;
                 p->scene_settings_reset_undo_available = true;
+                p->scene_settings_reset_track = p->current_track;
+                p->scene_settings_reset_scene = p->scene.id;
                 p->scene_settings_reset_confirmation = false;
                 notice_dismiss(&p->scene_settings_reset_notice_id);
                 commit_active_cue_settings(track, p->scene.id);
@@ -6883,6 +6908,7 @@ MUSIALIZER_PLUG void plug_init(void)
     p->lyric_list_follow_selection = true;
     render_export_config_init(&p->render_config);
     scene_settings_init(&p->scene_settings);
+    p->scene_settings_reset_track = -1;
     p->render_resolution = RENDER_RESOLUTION_1080P;
     p->render_frame_rate = RENDER_FRAME_RATE_30;
     analyzer_configure(48000, 2);
