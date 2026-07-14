@@ -117,10 +117,13 @@ bool build_raylib(void)
         const char *input_path = temp_sprintf(RAYLIB_SRC_FOLDER"%s.c", raylib_modules[i]);
         const char *output_path = temp_sprintf("%s/%s.o", build_path, raylib_modules[i]);
         output_path = temp_sprintf("%s/%s.o", build_path, raylib_modules[i]);
+        const char *dependencies[2];
+        size_t dependency_count = raylib_module_dependencies(
+            raylib_modules[i], input_path, dependencies);
 
         da_append(&object_files, output_path);
 
-        if (needs_rebuild(output_path, &input_path, 1)) {
+        if (needs_rebuild(output_path, dependencies, dependency_count)) {
             cmd_append(&cmd, "cc",
                 "-ggdb", "-DPLATFORM_DESKTOP", "-D_GLFW_X11", "-fPIC", "-DSUPPORT_FILEFORMAT_FLAC=1",
                 "-I"RAYLIB_SRC_FOLDER"external/glfw/include",

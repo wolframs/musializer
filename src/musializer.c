@@ -140,7 +140,12 @@ int main(int argc, char **argv)
     // The default framebuffer is the preview path. Offline rendering uses a
     // deterministic supersampling resolve in plug.c, so both paths smooth the
     // same scene geometry without temporal jitter.
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN | FLAG_MSAA_4X_HINT);
+    // KDE/Wayland commonly exposes a logical window size and a larger physical
+    // framebuffer through XWayland. The HiDPI flag keeps UI coordinates
+    // logical while the framebuffer callback sizes the OpenGL viewport in
+    // physical pixels.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_ALWAYS_RUN |
+                   FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     size_t factor = 80;
     InitWindow(factor*16, factor*9, "Musializer");
     if (!IsWindowReady()) {

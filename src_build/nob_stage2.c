@@ -18,6 +18,20 @@ static const char *raylib_modules[] = {
     "utils",
 };
 
+static size_t raylib_module_dependencies(const char *module,
+                                          const char *primary_source,
+                                          const char **dependencies)
+{
+    size_t count = 0;
+    dependencies[count++] = primary_source;
+    if (strcmp(module, "rcore") == 0) {
+        // rcore.c textually includes the GLFW platform backend. Track it
+        // explicitly so window-system fixes cannot reuse a stale rcore object.
+        dependencies[count++] = RAYLIB_SRC_FOLDER"platforms/rcore_desktop_glfw.c";
+    }
+    return count;
+}
+
 typedef enum {
     BUILD_PROFILE_RELEASE,
     BUILD_PROFILE_DEBUG,
@@ -82,6 +96,7 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/analysis_candidate.c",
         "./src/editor_draft.c",
         "./src/event_timeline.c",
+        "./src/track_timeline.c",
         "./src/scene_event_merge.c",
         "./src/semantic_lane.c",
         "./src/lyrics.c",
@@ -124,6 +139,7 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/analysis_candidate.c",
         "./src/editor_draft.c",
         "./src/event_timeline.c",
+        "./src/track_timeline.c",
         "./src/scene_event_merge.c",
         "./src/semantic_lane.c",
         "./src/lyrics.c",
@@ -147,6 +163,8 @@ static const char *distribution_support_files[] = {
     "tools/install-linux-launcher.sh",
     "tools/musializer-launcher",
     "resources/logo/logo-256.png",
+    "resources/fonts/OFL.txt",
+    "resources/fonts/SpaceGrotesk-OFL.txt",
     "tools/ANALYSIS_ADAPTERS.md",
     "tools/MEASURED_ANALYSIS.md",
     "tools/analysis_io.py",
@@ -172,7 +190,7 @@ static bool copy_distribution_support(const char *root)
 {
     const char *directories[] = {
         "packaging", "packaging/linux", "tools", "prompts", "schemas",
-        "resources", "resources/logo"
+        "resources", "resources/logo", "resources/fonts"
     };
     for (size_t i = 0; i < NOB_ARRAY_LEN(directories); ++i) {
         if (!nob_mkdir_if_not_exists(
@@ -288,6 +306,7 @@ Resource resources[] = {
     { .file_path = "./resources/icons/render.png" },
     { .file_path = "./resources/icons/fullscreen.png" },
     { .file_path = "./resources/icons/microphone.png" },
+    { .file_path = "./resources/fonts/SpaceGrotesk-Regular.otf" },
     { .file_path = "./resources/fonts/Alegreya-Regular.ttf" },
 };
 

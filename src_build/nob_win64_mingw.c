@@ -148,10 +148,13 @@ bool build_raylib()
     for (size_t i = 0; i < ARRAY_LEN(raylib_modules); ++i) {
         const char *input_path = temp_sprintf(RAYLIB_SRC_FOLDER"%s.c", raylib_modules[i]);
         const char *output_path = temp_sprintf("%s/%s.o", build_path, raylib_modules[i]);
+        const char *dependencies[2];
+        size_t dependency_count = raylib_module_dependencies(
+            raylib_modules[i], input_path, dependencies);
 
         da_append(&object_files, output_path);
 
-        if (needs_rebuild(output_path, &input_path, 1)) {
+        if (needs_rebuild(output_path, dependencies, dependency_count)) {
             cmd_append(&cmd, MAYBE_PREFIXED("gcc"));
             cmd_append(&cmd, "-ggdb", "-DPLATFORM_DESKTOP", "-fPIC", "-DSUPPORT_FILEFORMAT_FLAC=1");
             cmd_append(&cmd, "-DPLATFORM_DESKTOP");

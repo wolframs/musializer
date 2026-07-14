@@ -111,6 +111,7 @@ static void ErrorCallback(int error, const char *description);                  
 
 // Window callbacks events
 static void WindowSizeCallback(GLFWwindow *window, int width, int height);                 // GLFW3 WindowSize Callback, runs when window is resized
+static void FramebufferSizeCallback(GLFWwindow *window, int width, int height);            // GLFW3 Framebuffer Size Callback, runs when framebuffer is resized
 static void WindowPosCallback(GLFWwindow* window, int x, int y);                     // GLFW3 WindowPos Callback, runs when window is moved
 static void WindowIconifyCallback(GLFWwindow *window, int iconified);                      // GLFW3 WindowIconify Callback, runs when window is minimized/restored
 static void WindowMaximizeCallback(GLFWwindow* window, int maximized);                     // GLFW3 Window Maximize Callback, runs when window is maximized
@@ -1630,6 +1631,13 @@ int InitPlatform(void)
     //----------------------------------------------------------------------------
     // Set window callback events
     glfwSetWindowSizeCallback(platform.handle, WindowSizeCallback);      // NOTE: Resizing not allowed by default!
+#if !defined(__APPLE__)
+    // raylib 5.5's Cocoa SetupViewport() already applies the Retina scale to
+    // logical window dimensions. Feeding it physical framebuffer dimensions
+    // would scale twice; retain the 5.5 Cocoa path until raylib is upgraded as
+    // a whole.
+    glfwSetFramebufferSizeCallback(platform.handle, FramebufferSizeCallback);
+#endif
     glfwSetWindowPosCallback(platform.handle, WindowPosCallback);
     glfwSetWindowMaximizeCallback(platform.handle, WindowMaximizeCallback);
     glfwSetWindowIconifyCallback(platform.handle, WindowIconifyCallback);
@@ -1711,21 +1719,84 @@ static void ErrorCallback(int error, const char *description)
 // NOTE: Window resizing not allowed by default
 static void WindowSizeCallback(GLFWwindow *window, int width, int height)
 {
-    // Reset viewport and projection matrix for new size
+#if defined(__APPLE__)
+    // Preserve raylib 5.5's logical-size Cocoa path; SetupViewport() performs
+    // the platform's Retina conversion internally.
     SetupViewport(width, height);
+    CORE.Window.currentFbo.width = width;
+    CORE.Window.currentFbo.height = height;
+    CORE.Window.resizedLastFrame = true;
+    if (!IsWindowFullscreen()) {
+        CORE.Window.screen.width = width;
+        CORE.Window.screen.height = height;
+    }
+    (void)window;
+#else
+    // Window dimensions are logical screen coordinates. OpenGL viewports need
+    // physical framebuffer pixels, which can differ under KDE/Wayland,
+    // XWayland, Retina, or Windows display scaling. FramebufferSizeCallback()
+    // owns render sizing; retaining this callback lets GLFW deliver the paired
+    // framebuffer event without accidentally restoring a logical viewport.
+    (void)window;
+    (void)width;
+    (void)height;
+#endif
+}
 
+// GLFW3 Framebuffer size callback, runs when the physical framebuffer changes.
+// Backported from raylib's post-5.5 window-system redesign. GLFW explicitly
+// requires framebuffer dimensions—not logical window dimensions—for glViewport.
+static void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
+{
+    (void)window;
+
+    // Minimization reports a zero-sized framebuffer. Keep the last usable
+    // projection so restoring the window cannot inherit invalid dimensions.
+    if ((width <= 0) || (height <= 0)) return;
+
+    SetupViewport(width, height);
+    // SetupViewport() in raylib 5.5 updates the OpenGL viewport and the CORE
+    // render size, but not rlgl's framebuffer dimensions. Scene-local scissor
+    // and 3D viewport code queries rlgl, so keep all three size authorities in
+    // sync across maximize/fullscreen transitions.
+    rlSetFramebufferWidth(width);
+    rlSetFramebufferHeight(height);
     CORE.Window.currentFbo.width = width;
     CORE.Window.currentFbo.height = height;
     CORE.Window.resizedLastFrame = true;
 
-    if (IsWindowFullscreen()) return;
+    if (IsWindowFullscreen())
+    {
+        CORE.Window.screen.width = width;
+        CORE.Window.screen.height = height;
+        CORE.Window.screenScale = MatrixScale(1.0f, 1.0f, 1.0f);
+        SetMouseScale(1.0f, 1.0f);
+    }
+    else if ((CORE.Window.flags & FLAG_WINDOW_HIGHDPI) > 0)
+    {
+        Vector2 scale = GetWindowScaleDPI();
+        if (scale.x <= 0.0f) scale.x = 1.0f;
+        if (scale.y <= 0.0f) scale.y = 1.0f;
 
-    // Set current screen size
+        CORE.Window.screen.width = (int)((float)width/scale.x);
+        CORE.Window.screen.height = (int)((float)height/scale.y);
+        CORE.Window.screenScale = MatrixScale(scale.x, scale.y, 1.0f);
 
-    CORE.Window.screen.width = width;
-    CORE.Window.screen.height = height;
+#if !defined(__APPLE__) && !defined(_GLFW_WAYLAND)
+        // macOS and native Wayland already report pointer positions in logical
+        // coordinates. X11/XWayland and Windows need the inverse scale.
+        SetMouseScale(1.0f/scale.x, 1.0f/scale.y);
+#endif
+    }
+    else
+    {
+        CORE.Window.screen.width = width;
+        CORE.Window.screen.height = height;
+        CORE.Window.screenScale = MatrixScale(1.0f, 1.0f, 1.0f);
+        SetMouseScale(1.0f, 1.0f);
+    }
 
-    // NOTE: Postprocessing texture is not scaled to new size
+    // NOTE: Postprocessing textures remain the caller's responsibility.
 }
 static void WindowPosCallback(GLFWwindow* window, int x, int y)
 {
@@ -1735,7 +1806,13 @@ static void WindowPosCallback(GLFWwindow* window, int x, int y)
 }
 static void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)
 {
+    if (scalex <= 0.0f) scalex = 1.0f;
+    if (scaley <= 0.0f) scaley = 1.0f;
     CORE.Window.screenScale = MatrixScale(scalex, scaley, 1.0f);
+#if !defined(__APPLE__) && !defined(_GLFW_WAYLAND)
+    SetMouseScale(1.0f/scalex, 1.0f/scaley);
+#endif
+    (void)window;
 }
 
 // GLFW3 WindowIconify Callback, runs when window is minimized/restored

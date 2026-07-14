@@ -700,6 +700,40 @@ failure-path test.
   a semantic inspector. These are product roadmap items rather than hidden
   correctness debts in the current single-scene MP4 workflow.
 
+### 2026-07-14 - Readable interface type and scaled-window viewport repair
+
+- Replaced raylib's bitmap default throughout the editor with bundled Space
+  Grotesk, retaining Alegreya for lyric captions and scene glyph work. The
+  Swiss record-label hierarchy remains, but compact controls and instructional
+  copy now use a proportional grotesk designed for non-display readability.
+- Added the Space Grotesk OFL notice and began packaging both bundled font
+  licenses alongside distributions.
+- Enabled raylib's HiDPI window mode and backported its post-5.5 framebuffer
+  resize callback. GLFW window sizes remain logical UI coordinates while the
+  OpenGL viewport follows physical framebuffer pixels, fixing the lower-left,
+  half-sized render seen when maximizing under scaled KDE/XWayland.
+- Added product regression checks for framebuffer callback ownership, HiDPI
+  configuration, the bundled UI font, default-font fallback isolation, and
+  packaged license coverage.
+
+### 2026-07-14 - Waveform transport and scene-wide scaled fullscreen
+
+- Turned the lower editor strip into a bounded transport surface: every loaded
+  track receives a normalized 2,048-bin waveform preview, timeline clicks can
+  be dragged, and exact start, tenth-second, one-second, and ten-second buttons
+  complement Ctrl/ordinary/Shift arrow-key seeking.
+- Reduced the playhead from a ten-pixel panel-spanning bar to a two-pixel
+  hairline clipped to the waveform lane, so it no longer crosses authoring or
+  assistance controls.
+- Kept waveform reduction and seek/clamp arithmetic independent of raylib and
+  added headless boundary tests for stereo envelopes, silence, non-finite PCM,
+  exact deltas, invalid geometry, and track-end clamping.
+- Completed the scaled-window repair by synchronizing raylib 5.5's internal
+  rlgl framebuffer dimensions during physical framebuffer resize. The newer
+  scissored and 3D scenes query that state, while Spectrum and Pulse Field draw
+  directly in logical 2D coordinates; all seven now share the same resize
+  contract.
+
 ## Milestones
 
 ### M0 - Preserve the baseline

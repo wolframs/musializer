@@ -33,6 +33,8 @@ class DistributionManifestTests(unittest.TestCase):
             "tools/install-linux-launcher.sh",
             "tools/musializer-launcher",
             "resources/logo/logo-256.png",
+            "resources/fonts/OFL.txt",
+            "resources/fonts/SpaceGrotesk-OFL.txt",
         }
         expected.update(
             path.relative_to(ROOT).as_posix()
@@ -57,6 +59,49 @@ class DistributionManifestTests(unittest.TestCase):
         )
         for unsafe in ("-ffast-math", "-Ofast", "/fp:fast"):
             self.assertNotIn(unsafe, recipes)
+
+    def test_scaled_windows_use_physical_framebuffer_viewport(self):
+        host = (ROOT / "src" / "musializer.c").read_text(encoding="utf-8")
+        glfw = (
+            ROOT / "thirdparty/raylib-5.5/src/platforms/rcore_desktop_glfw.c"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FLAG_WINDOW_HIGHDPI", host)
+        self.assertIn("glfwSetFramebufferSizeCallback", glfw)
+        build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        self.assertIn("raylib_module_dependencies", build)
+        self.assertIn('platforms/rcore_desktop_glfw.c', build)
+        callback = re.search(
+            r"static void FramebufferSizeCallback\([^;]+?\)\s*\{.*?\n\}",
+            glfw,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(callback)
+        self.assertIn("SetupViewport(width, height)", callback.group(0))
+        self.assertIn("rlSetFramebufferWidth(width)", callback.group(0))
+        self.assertIn("rlSetFramebufferHeight(height)", callback.group(0))
+        self.assertIn("CORE.Window.screenScale = MatrixScale", callback.group(0))
+
+    def test_timeline_waveform_and_precise_seek_are_built_for_every_target(self):
+        build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        self.assertEqual(build.count('"./src/track_timeline.c"'), 2)
+        self.assertIn("track_timeline_build_waveform", plug)
+        self.assertIn("track_timeline_seek_from_x", plug)
+        self.assertIn('"-0.1 s"', plug)
+        self.assertIn('"+0.1 s"', plug)
+        self.assertIn("2.0f, COLOR_TIMELINE_CURSOR", plug)
+
+    def test_ui_uses_bundled_readable_font_with_license(self):
+        build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        self.assertIn("resources/fonts/SpaceGrotesk-Regular.otf", build)
+        self.assertIn("resources/fonts/SpaceGrotesk-OFL.txt", build)
+        self.assertIn("SpaceGrotesk-Regular.otf", plug)
+        self.assertIn("static Font ui_font(void)", plug)
+        self.assertEqual(plug.count("GetFontDefault()"), 1)
 
     def test_export_keeps_exact_video_frames_and_color_contract_cross_platform(self):
         for filename in ("ffmpeg_posix.c", "ffmpeg_windows.c"):

@@ -23,6 +23,7 @@
 #include "scene_event_merge.h"
 #include "scene_switch.h"
 #include "sha256.h"
+#include "track_timeline.h"
 #include "ui_notice.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
@@ -93,7 +94,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 12
+#define PLUG_STATE_VERSION 14
 
 #define COLOR_ACCENT                  GetColor(0x002FA7FF)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -140,6 +141,7 @@ typedef struct {
     uint64_t scene_seed;
     uint64_t scene_instance_id;
     Render_Export_Config render_config;
+    Track_Timeline_Waveform timeline_waveform;
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;
@@ -215,6 +217,7 @@ typedef struct {
     // Visualizer
     Tracks tracks;
     int current_track;
+    Font ui_font;
     Font font;
     Shader circle;
     int circle_radius_location;
@@ -313,6 +316,20 @@ typedef struct {
 } Plug;
 
 static Plug *p = NULL;
+
+static Font ui_font(void)
+{
+    if (p != NULL && IsFontValid(p->ui_font)) return p->ui_font;
+    return GetFontDefault();
+}
+
+static bool ui_font_codepoint(int codepoint)
+{
+    return (codepoint >= 0x20 && codepoint <= 0x024F) ||
+           (codepoint >= 0x2000 && codepoint <= 0x206F) ||
+           (codepoint >= 0x20A0 && codepoint <= 0x20CF) ||
+           (codepoint >= 0x2100 && codepoint <= 0x214F);
+}
 
 static void analyzer_configure(uint32_t sample_rate, uint32_t channels)
 {
@@ -503,6 +520,28 @@ static float scene_clock_delta(double time_seconds)
     return (float)elapsed;
 }
 
+static void load_timeline_waveform(Track *track)
+{
+    if (track == NULL || track->file_path == NULL) return;
+    memset(&track->timeline_waveform, 0, sizeof(track->timeline_waveform));
+
+    Wave wave = LoadWave(track->file_path);
+    if (!IsWaveValid(wave)) {
+        TraceLog(LOG_WARNING, "TIMELINE: waveform preview could not decode %s",
+                 track->file_path);
+        return;
+    }
+    float *samples = LoadWaveSamples(wave);
+    if (samples != NULL) {
+        track->timeline_waveform.count = track_timeline_build_waveform(
+            samples, (size_t)wave.frameCount, (size_t)wave.channels,
+            track->timeline_waveform.bins,
+            NOB_ARRAY_LEN(track->timeline_waveform.bins));
+        UnloadWaveSamples(samples);
+    }
+    UnloadWave(wave);
+}
+
 MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
 {
     if (file_path == NULL || file_path[0] == '\0') return false;
@@ -547,6 +586,7 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     new_track->scene_seed = initial_scene_seed;
     new_track->scene_instance_id = 1;
     new_track->render_config = p->render_config;
+    load_timeline_waveform(new_track);
     if (p->ascii_columns > 0 && p->ascii_rows > 0) {
         memcpy(new_track->ascii_cells, p->ascii_cells,
                p->ascii_columns*p->ascii_rows*sizeof(p->ascii_cells[0]));
@@ -1003,7 +1043,7 @@ static void end_tooltip_frame(void)
     float fontSize = 30;
     float spacing = 0.0;
     Vector2 margin = {20.0, 10.0};
-    Vector2 text_size = MeasureTextEx(GetFontDefault(), p->tooltip_buffer, fontSize, spacing);
+    Vector2 text_size = MeasureTextEx(ui_font(), p->tooltip_buffer, fontSize, spacing);
 
     Rectangle tooltip_boundary = {
         .width = text_size.x + margin.x*2.0,
@@ -1018,7 +1058,7 @@ static void end_tooltip_frame(void)
         .x = tooltip_boundary.x + tooltip_boundary.width/2 - text_size.x/2,
         .y = tooltip_boundary.y + tooltip_boundary.height/2 - text_size.y/2,
     };
-    DrawTextEx(GetFontDefault(), p->tooltip_buffer, position, fontSize, spacing,
+    DrawTextEx(ui_font(), p->tooltip_buffer, position, fontSize, spacing,
                COLOR_TOOLTIP_FOREGROUND);
 }
 
@@ -1065,13 +1105,13 @@ static int text_button(uint64_t id, Rectangle boundary, const char *label, bool 
     DrawRectangleLinesEx(boundary, 1.0f,
                          selected ? COLOR_TRACK_BUTTON_SELECTED : COLOR_UI_RULE);
     float font_size = fminf(boundary.height*0.52f, 22.0f);
-    Vector2 size = MeasureTextEx(GetFontDefault(), label, font_size, 0.0f);
+    Vector2 size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
     float available_width = boundary.width - 12.0f;
     if (size.x > available_width && size.x > 0.0f) {
         font_size *= available_width/size.x;
-        size = MeasureTextEx(GetFontDefault(), label, font_size, 0.0f);
+        size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
     }
-    DrawTextEx(GetFontDefault(), label,
+    DrawTextEx(ui_font(), label,
                (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
                          boundary.y + (boundary.height - size.y)*0.5f},
                font_size, 0.0f, selected ? WHITE : COLOR_UI_INK);
@@ -1225,11 +1265,11 @@ static void lyric_time_row(Rectangle boundary, const char *label, double *value,
                            double duration, uint64_t id_base)
 {
     const float gap = 4.0f;
-    DrawTextEx(GetFontDefault(), label, (Vector2){boundary.x, boundary.y + 8.0f},
+    DrawTextEx(ui_font(), label, (Vector2){boundary.x, boundary.y + 8.0f},
                16.0f, 1.0f, COLOR_UI_MUTED);
     char timestamp[32];
     format_timestamp(*value, timestamp, sizeof(timestamp));
-    DrawTextEx(GetFontDefault(), timestamp, (Vector2){boundary.x + 58.0f, boundary.y + 7.0f},
+    DrawTextEx(ui_font(), timestamp, (Vector2){boundary.x + 58.0f, boundary.y + 7.0f},
                18.0f, 1.0f, COLOR_UI_INK);
     Rectangle minus = {boundary.x + 154.0f, boundary.y, 42.0f, boundary.height};
     Rectangle plus = {minus.x + minus.width + gap, boundary.y, 42.0f, boundary.height};
@@ -1283,7 +1323,7 @@ static void draw_lyric_lane(Rectangle lane, Track *track, float track_length)
         DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
                    1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
         if (lane.height >= 28.0f && i + 1 < track->scene_switches.count) {
-            DrawTextEx(GetFontDefault(), scene_stable_name((Scene_Id)cue->scene_index),
+            DrawTextEx(ui_font(), scene_stable_name((Scene_Id)cue->scene_index),
                        (Vector2){x + 3.0f, lane.y + 7.0f}, 12.0f, 1.0f,
                        COLOR_UI_MUTED);
         }
@@ -1386,13 +1426,13 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
         list.height,
     };
 
-    DrawTextEx(GetFontDefault(), "LYRIC CUES", (Vector2){list.x, list.y},
+    DrawTextEx(ui_font(), "LYRIC CUES", (Vector2){list.x, list.y},
                18.0f, 1.0f, signal);
     char cue_count[48];
     snprintf(cue_count, sizeof(cue_count), "%zu / %u", track->lyrics.count,
              (unsigned)LYRICS_CUE_CAPACITY);
-    Vector2 count_size = MeasureTextEx(GetFontDefault(), cue_count, 15.0f, 1.0f);
-    DrawTextEx(GetFontDefault(), cue_count,
+    Vector2 count_size = MeasureTextEx(ui_font(), cue_count, 15.0f, 1.0f);
+    DrawTextEx(ui_font(), cue_count,
                (Vector2){list.x + list.width - count_size.x, list.y + 2.0f},
                15.0f, 1.0f, COLOR_UI_MUTED);
 
@@ -1425,7 +1465,7 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
     }
     p->lyric_list_first = first;
     if (track->lyrics.count == 0) {
-        DrawTextEx(GetFontDefault(), "No lyric cues. Add one at the playhead.",
+        DrawTextEx(ui_font(), "No lyric cues. Add one at the playhead.",
                    (Vector2){list.x, list.y + 38.0f}, 16.0f, 1.0f,
                    COLOR_UI_MUTED);
     }
@@ -1445,12 +1485,12 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
                                    (int)row_boundary.height, signal);
         char time[24];
         format_timestamp(cue->start_seconds, time, sizeof(time));
-        DrawTextEx(GetFontDefault(), time,
+        DrawTextEx(ui_font(), time,
                    (Vector2){row_boundary.x + 8.0f, row_boundary.y + 5.0f},
                    15.0f, 1.0f, COLOR_UI_MUTED);
         BeginScissorMode((int)(row_boundary.x + 90.0f), (int)row_boundary.y,
                          (int)(row_boundary.width - 94.0f), (int)row_boundary.height);
-        DrawTextEx(GetFontDefault(), cue->text,
+        DrawTextEx(ui_font(), cue->text,
                    (Vector2){row_boundary.x + 94.0f, row_boundary.y + 5.0f},
                    15.0f, 1.0f, COLOR_UI_INK);
         EndScissorMode();
@@ -1472,7 +1512,7 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
         DrawRectangleRec(scrollbar, COLOR_ACCENT);
     }
 
-    DrawTextEx(GetFontDefault(), p->lyric_draft_new ? "NEW CUE" : "SELECTED CUE",
+    DrawTextEx(ui_font(), p->lyric_draft_new ? "NEW CUE" : "SELECTED CUE",
                (Vector2){form.x, form.y}, 18.0f, 1.0f, signal);
     Rectangle add = {form.x + form.width - 92.0f, form.y - 3.0f, 92.0f, 34.0f};
     Rectangle import_button = {add.x - 83.0f, add.y, 77.0f, add.height};
@@ -1504,7 +1544,7 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
 
     bool has_draft = p->lyric_draft_new || p->selected_lyric_id != 0;
     if (!has_draft) {
-        DrawTextEx(GetFontDefault(), "Select a cue or add one at the current playhead.",
+        DrawTextEx(ui_font(), "Select a cue or add one at the current playhead.",
                    (Vector2){form.x, form.y + 42.0f}, 16.0f, 1.0f,
                    COLOR_UI_MUTED);
         return;
@@ -1531,11 +1571,11 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
     Color text_color = p->lyric_draft_text[0] != '\0' ? COLOR_UI_INK : COLOR_UI_MUTED;
     BeginScissorMode((int)text_field.x + 7, (int)text_field.y,
                      (int)text_field.width - 14, (int)text_field.height);
-    DrawTextEx(GetFontDefault(), display_text,
+    DrawTextEx(ui_font(), display_text,
                (Vector2){text_field.x + 8.0f, text_field.y + 9.0f},
                17.0f, 1.0f, text_color);
     if (p->lyric_text_active && ((int)(GetTime()*2.0) & 1) == 0) {
-        Vector2 measured = MeasureTextEx(GetFontDefault(), p->lyric_draft_text, 17.0f, 1.0f);
+        Vector2 measured = MeasureTextEx(ui_font(), p->lyric_draft_text, 17.0f, 1.0f);
         DrawLineEx((Vector2){text_field.x + 9.0f + measured.x, text_field.y + 8.0f},
                    (Vector2){text_field.x + 9.0f + measured.x, text_field.y + 29.0f},
                    1.0f, signal);
@@ -1563,7 +1603,7 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
             mark_project_dirty(track);
         }
     }
-    DrawTextEx(GetFontDefault(), "Ctrl+Enter applies the edit",
+    DrawTextEx(ui_font(), "Ctrl+Enter applies the edit",
                (Vector2){form.x, apply.y + apply.height + 7.0f}, 14.0f, 1.0f,
                COLOR_UI_MUTED);
     if (p->lyric_text_active &&
@@ -1618,10 +1658,10 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     const float gap = 8.0f;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
-    DrawTextEx(GetFontDefault(), "ASSISTED ANALYSIS",
+    DrawTextEx(ui_font(), "ASSISTED ANALYSIS",
                (Vector2){boundary.x + padding, boundary.y + padding},
                19.0f, 1.0f, signal);
-    DrawTextEx(GetFontDefault(),
+    DrawTextEx(ui_font(),
                "Every result is validated and staged. Nothing replaces editor content until you apply it.",
                (Vector2){boundary.x + padding, boundary.y + 36.0f},
                15.0f, 1.0f, COLOR_UI_MUTED);
@@ -1646,7 +1686,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                         (p->assist_confirmation_pending && p->assist_mode == modes[i]);
         int state = text_button(UINT64_C(0x4153534953540000) + i,
                                 button_boundary, labels[i], selected);
-        DrawTextEx(GetFontDefault(), badges[i],
+        DrawTextEx(ui_font(), badges[i],
                    (Vector2){button_boundary.x + 3.0f, button_boundary.y + 42.0f},
                    11.0f, 1.0f, busy ? ColorAlpha(COLOR_UI_MUTED, 0.55f) : COLOR_UI_MUTED);
         if ((state & BS_CLICKED) && helpers_available && !busy) {
@@ -1692,7 +1732,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     } else {
         snprintf(status, sizeof(status), "Helper found. Run the product doctor for capability preflight.");
     }
-    DrawTextEx(GetFontDefault(), status, (Vector2){boundary.x + padding, status_y},
+    DrawTextEx(ui_font(), status, (Vector2){boundary.x + padding, status_y},
                16.0f, 1.0f, busy ? signal : COLOR_UI_INK);
 
     float action_y = status_y + 28.0f;
@@ -1709,7 +1749,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
             privacy = "Runs local analysis and sends transcript evidence to Codex and track audio to OpenRouter MiMo.";
             start_label = "Start full assist";
         }
-        DrawTextEx(GetFontDefault(), privacy, (Vector2){boundary.x + padding, action_y},
+        DrawTextEx(ui_font(), privacy, (Vector2){boundary.x + padding, action_y},
                    14.0f, 1.0f, COLOR_UI_MUTED);
         Rectangle start = {boundary.x + padding, action_y + 24.0f, 190.0f, 36.0f};
         Rectangle cancel = {start.x + start.width + gap, start.y, 94.0f, start.height};
@@ -1729,7 +1769,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         if (text_button(UINT64_C(0x4153534953545354), cancel, "Cancel job", false) & BS_CLICKED) {
             cancel_assist_job();
         }
-        DrawTextEx(GetFontDefault(), "Playback remains available while the helper runs.",
+        DrawTextEx(ui_font(), "Playback remains available while the helper runs.",
                    (Vector2){cancel.x + cancel.width + gap, cancel.y + 9.0f},
                    14.0f, 1.0f, COLOR_UI_MUTED);
     } else if (p->assist_candidate != NULL) {
@@ -1741,7 +1781,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                  "%zu lyrics (%zu uncertain)  |  %zu scene sections  |  %zu feeling cues",
                  candidate->lyrics.count, candidate->uncertain_lyric_count,
                  candidate->sections.count, candidate->semantic_events.count);
-        DrawTextEx(GetFontDefault(), summary, (Vector2){boundary.x + padding, action_y},
+        DrawTextEx(ui_font(), summary, (Vector2){boundary.x + padding, action_y},
                    14.0f, 1.0f, COLOR_UI_MUTED);
         char replacement[320];
         snprintf(replacement, sizeof(replacement),
@@ -1758,7 +1798,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                  (candidate->available_lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0 ?
                     candidate->semantic_events.count :
                     (candidate_track != NULL ? candidate_track->semantic_events.count : 0));
-        DrawTextEx(GetFontDefault(), replacement,
+        DrawTextEx(ui_font(), replacement,
                    (Vector2){boundary.x + padding, action_y + 21.0f},
                    13.0f, 1.0f,
                    p->assist_apply_confirmation_pending ? COLOR_ACCENT : COLOR_UI_MUTED);
@@ -1767,7 +1807,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
             char first_lyric[180];
             snprintf(first_lyric, sizeof(first_lyric), "First staged lyric: %.140s",
                      candidate->lyrics.cues[0].text);
-            DrawTextEx(GetFontDefault(), first_lyric,
+            DrawTextEx(ui_font(), first_lyric,
                        (Vector2){boundary.x + padding, action_y + 41.0f},
                        13.0f, 1.0f, COLOR_UI_INK);
         }
@@ -1822,16 +1862,16 @@ static void draw_export_panel(Rectangle boundary, Track *track)
     const Color signal = COLOR_ACCENT;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
-    DrawTextEx(GetFontDefault(), "EXPORT",
+    DrawTextEx(ui_font(), "EXPORT",
                (Vector2){boundary.x + padding, boundary.y + padding},
                19.0f, 1.0f, signal);
-    DrawTextEx(GetFontDefault(),
+    DrawTextEx(ui_font(),
                "One deterministic scene path. The destination is replaced only after the encoder succeeds.",
                (Vector2){boundary.x + padding, boundary.y + 36.0f},
                15.0f, 1.0f, COLOR_UI_MUTED);
 
     float y = boundary.y + 62.0f;
-    DrawTextEx(GetFontDefault(), "SIZE", (Vector2){boundary.x + padding, y + 10.0f},
+    DrawTextEx(ui_font(), "SIZE", (Vector2){boundary.x + padding, y + 10.0f},
                13.0f, 1.0f, COLOR_UI_MUTED);
     float x = boundary.x + 68.0f;
     const float size_width = 76.0f;
@@ -1849,7 +1889,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
         x += size_width + gap;
     }
 
-    DrawTextEx(GetFontDefault(), "FPS", (Vector2){x + 8.0f, y + 10.0f},
+    DrawTextEx(ui_font(), "FPS", (Vector2){x + 8.0f, y + 10.0f},
                13.0f, 1.0f, COLOR_UI_MUTED);
     x += 48.0f;
     for (int i = 0; i < RENDER_FRAME_RATE_COUNT; ++i) {
@@ -1867,7 +1907,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
     }
 
     y += 46.0f;
-    DrawTextEx(GetFontDefault(), "QUALITY", (Vector2){boundary.x + padding, y + 10.0f},
+    DrawTextEx(ui_font(), "QUALITY", (Vector2){boundary.x + padding, y + 10.0f},
                13.0f, 1.0f, COLOR_UI_MUTED);
     x = boundary.x + 86.0f;
     for (int i = 0; i < RENDER_QUALITY_COUNT; ++i) {
@@ -1894,7 +1934,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
              (unsigned long long)approximate_frames,
              track->scene_switches.enabled ? "automatic scene plan" :
                                              scene_name(track->base_scene));
-    DrawTextEx(GetFontDefault(), summary,
+    DrawTextEx(ui_font(), summary,
                (Vector2){boundary.x + padding, y + 50.0f},
                15.0f, 1.0f, COLOR_UI_INK);
     const char *quality_detail = p->render_config.quality == RENDER_QUALITY_BALANCED ?
@@ -1902,7 +1942,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
         p->render_config.quality == RENDER_QUALITY_HIGH ?
         "High uses 2x spatial supersampling and CRF 16." :
         "Master uses 2x spatial supersampling and CRF 12.";
-    DrawTextEx(GetFontDefault(), quality_detail,
+    DrawTextEx(ui_font(), quality_detail,
                (Vector2){boundary.x + padding, y + 73.0f},
                14.0f, 1.0f, COLOR_UI_MUTED);
 
@@ -1920,6 +1960,83 @@ static void draw_export_panel(Rectangle boundary, Track *track)
     }
 }
 
+static void seek_track_to(Track *track, double seconds)
+{
+    if (track == NULL) return;
+    double duration = track->duration_seconds;
+    double target = track_timeline_seek_relative(0.0, seconds, duration);
+    SeekMusicStream(track->music, (float)target);
+    p->scene_clock_initialized = false;
+    scene_switch_reset(&track->scene_switches);
+}
+
+static void seek_track_by(Track *track, double delta_seconds)
+{
+    if (track == NULL) return;
+    double target = track_timeline_seek_relative(
+        GetMusicTimePlayed(track->music), delta_seconds,
+        track->duration_seconds);
+    seek_track_to(track, target);
+}
+
+static void draw_track_waveform(Rectangle boundary, const Track *track)
+{
+    DrawRectangleRec(boundary, COLOR_UI_RAISED);
+    DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
+    float center = boundary.y + boundary.height*0.5f;
+    DrawLineEx((Vector2){boundary.x, center},
+               (Vector2){boundary.x + boundary.width, center},
+               1.0f, ColorAlpha(COLOR_UI_MUTED, 0.28f));
+
+    size_t bin_count = track->timeline_waveform.count;
+    if (bin_count == 0 || boundary.width < 1.0f || boundary.height < 4.0f) {
+        const char *message = "Waveform unavailable";
+        Vector2 size = MeasureTextEx(ui_font(), message, 12.0f, 1.0f);
+        DrawTextEx(ui_font(), message,
+                   (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
+                             center - size.y*0.5f},
+                   12.0f, 1.0f, COLOR_UI_MUTED);
+        return;
+    }
+
+    size_t columns = (size_t)floorf(boundary.width);
+    if (columns > 4096u) columns = 4096u;
+    float amplitude = fmaxf(1.0f, boundary.height*0.43f);
+    Color waveform = ColorAlpha(COLOR_ACCENT, 0.58f);
+    for (size_t column = 0; column < columns; ++column) {
+        size_t first = column*bin_count/columns;
+        size_t end = (column + 1u)*bin_count/columns;
+        if (end <= first) end = first + 1u;
+        if (end > bin_count) end = bin_count;
+        float minimum = 0.0f;
+        float maximum = 0.0f;
+        for (size_t i = first; i < end; ++i) {
+            if (track->timeline_waveform.bins[i].minimum < minimum) {
+                minimum = track->timeline_waveform.bins[i].minimum;
+            }
+            if (track->timeline_waveform.bins[i].maximum > maximum) {
+                maximum = track->timeline_waveform.bins[i].maximum;
+            }
+        }
+        float x = boundary.x + ((float)column + 0.5f)*boundary.width/(float)columns;
+        DrawLineEx((Vector2){x, center - maximum*amplitude},
+                   (Vector2){x, center - minimum*amplitude},
+                   1.0f, waveform);
+    }
+}
+
+static void update_transport_shortcuts(Track *track)
+{
+    if (track == NULL || p->lyric_text_active) return;
+    int direction = IsKeyPressed(KEY_LEFT) ? -1 :
+                    IsKeyPressed(KEY_RIGHT) ? 1 : 0;
+    if (direction == 0) return;
+    bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    double step = control ? 0.1 : shift ? 10.0 : 1.0;
+    seek_track_by(track, (double)direction*step);
+}
+
 static void timeline(Rectangle timeline_boundary, Track *track)
 {
     DrawRectangleRec(timeline_boundary, COLOR_TIMELINE_BACKGROUND);
@@ -1929,6 +2046,7 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     if (len <= 0.0f) return;
 
     const float controls_height = 38.0f;
+    const float transport_height = 32.0f;
     const float margin = 6.0f;
     const float event_button_width = 74.0f;
     Rectangle controls = {
@@ -1942,7 +2060,6 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
         EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
     };
-    bool over_controls = CheckCollisionPointRec(GetMousePosition(), controls);
     float control_x = controls.x;
     for (size_t i = 0; i < 6; ++i) {
         Rectangle boundary = {control_x, controls.y, event_button_width, controls.height};
@@ -2020,33 +2137,76 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     format_timestamp(played, played_time, sizeof(played_time));
     format_timestamp(len, total_time, sizeof(total_time));
     snprintf(timecode, sizeof(timecode), "%s / %s", played_time, total_time);
-    Vector2 timecode_size = MeasureTextEx(GetFontDefault(), timecode, 22.0f, 1.0f);
-    DrawTextEx(GetFontDefault(), timecode,
+    Vector2 timecode_size = MeasureTextEx(ui_font(), timecode, 22.0f, 1.0f);
+    DrawTextEx(ui_font(), timecode,
                (Vector2){timeline_boundary.x + timeline_boundary.width -
                          timecode_size.x - margin,
                          timeline_boundary.y + 13.0f},
                22.0f, 1.0f, COLOR_ACCENT);
 
-    const float lane_top = timeline_boundary.y + controls_height + margin*2.0f;
+    Rectangle transport = {
+        timeline_boundary.x + margin,
+        timeline_boundary.y + controls_height + margin*2.0f,
+        timeline_boundary.width - margin*2.0f,
+        transport_height,
+    };
+    const char *seek_labels[] = {
+        "Start", "-10 s", "-1 s", "-0.1 s", "+0.1 s", "+1 s", "+10 s",
+    };
+    const double seek_deltas[] = {0.0, -10.0, -1.0, -0.1, 0.1, 1.0, 10.0};
+    float seek_x = transport.x;
+    for (size_t i = 0; i < NOB_ARRAY_LEN(seek_labels); ++i) {
+        float width = i == 0 ? 62.0f : 58.0f;
+        Rectangle button = {seek_x, transport.y, width, transport.height};
+        if (text_button(UINT64_C(0x5345454B00000000) + i, button,
+                        seek_labels[i], false) & BS_CLICKED) {
+            if (i == 0) seek_track_to(track, 0.0);
+            else seek_track_by(track, seek_deltas[i]);
+            played = GetMusicTimePlayed(track->music);
+        }
+        seek_x += width + margin;
+    }
+    const char *shortcut = "Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s";
+    Vector2 shortcut_size = MeasureTextEx(ui_font(), shortcut, 12.0f, 1.0f);
+    if (seek_x + margin + shortcut_size.x < transport.x + transport.width) {
+        DrawTextEx(ui_font(), shortcut,
+                   (Vector2){seek_x + margin,
+                             transport.y + (transport.height - shortcut_size.y)*0.5f},
+                   12.0f, 1.0f, COLOR_UI_MUTED);
+    }
+
     const bool expanded_panel = p->lyrics_editor_open || p->assist_panel_open ||
                                 p->export_panel_open;
-    const float lane_height = expanded_panel ? 30.0f :
-                              timeline_boundary.height - controls_height - margin*2.0f;
-    Rectangle lyric_lane = {
-        timeline_boundary.x, lane_top, timeline_boundary.width, fmaxf(18.0f, lane_height),
+    const float lane_top = transport.y + transport.height + margin;
+    const float lane_height = expanded_panel ? 58.0f :
+                              timeline_boundary.y + timeline_boundary.height -
+                                  lane_top - margin;
+    Rectangle waveform_lane = {
+        timeline_boundary.x + margin, lane_top,
+        timeline_boundary.width - margin*2.0f, fmaxf(24.0f, lane_height),
     };
+    Rectangle lyric_lane = {
+        waveform_lane.x,
+        waveform_lane.y + fmaxf(0.0f, waveform_lane.height - 22.0f),
+        waveform_lane.width,
+        fminf(22.0f, waveform_lane.height),
+    };
+
+    BeginScissorMode((int)waveform_lane.x, (int)waveform_lane.y,
+                     (int)waveform_lane.width, (int)waveform_lane.height);
+    draw_track_waveform(waveform_lane, track);
 
     double tick_step = len > 600.0f ? 60.0 : len > 180.0f ? 30.0 : 10.0;
     for (double seconds = 0.0; seconds < len; seconds += tick_step) {
-        float tick_x = timeline_boundary.x + (float)(seconds/len)*timeline_boundary.width;
-        DrawLineEx((Vector2){tick_x, lane_top},
-                   (Vector2){tick_x, timeline_boundary.y + timeline_boundary.height},
+        float tick_x = waveform_lane.x + (float)(seconds/len)*waveform_lane.width;
+        DrawLineEx((Vector2){tick_x, waveform_lane.y},
+                   (Vector2){tick_x, waveform_lane.y + waveform_lane.height},
                    1.0f, COLOR_UI_RULE);
-        if (!expanded_panel && seconds > 0.0) {
+        if (seconds > 0.0 && waveform_lane.height >= 48.0f) {
             char tick_label[24];
             format_timestamp(seconds, tick_label, sizeof(tick_label));
-            DrawTextEx(GetFontDefault(), tick_label,
-                       (Vector2){tick_x + 4.0f, lane_top + 6.0f},
+            DrawTextEx(ui_font(), tick_label,
+                       (Vector2){tick_x + 4.0f, waveform_lane.y + 4.0f},
                        12.0f, 1.0f, COLOR_UI_MUTED);
         }
     }
@@ -2056,68 +2216,68 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         const Event_Record *event = &events.events[i];
         float t = (float)(event->timestamp_seconds/len);
         if (t < 0.0f || t > 1.0f) continue;
-        float marker_x = timeline_boundary.x + t*timeline_boundary.width;
+        float marker_x = waveform_lane.x + t*waveform_lane.width;
         Color color = event_type_color(event->type);
-        DrawLineEx((Vector2){marker_x, lane_top},
-                   (Vector2){marker_x, timeline_boundary.y + timeline_boundary.height},
+        DrawLineEx((Vector2){marker_x, waveform_lane.y},
+                   (Vector2){marker_x, waveform_lane.y + waveform_lane.height},
                    3.0f, ColorAlpha(color, 0.75f));
-        DrawCircleV((Vector2){marker_x, lane_top},
+        DrawCircleV((Vector2){marker_x, waveform_lane.y},
                     5.0f, color);
     }
 
     draw_lyric_lane(lyric_lane, track, len);
+    float x = waveform_lane.x + played/len*waveform_lane.width;
+    DrawLineEx((Vector2){x, waveform_lane.y},
+               (Vector2){x, waveform_lane.y + waveform_lane.height},
+               2.0f, COLOR_TIMELINE_CURSOR);
+    EndScissorMode();
+
     if (p->lyrics_editor_open) {
         Rectangle editor = {
             timeline_boundary.x + margin,
-            lyric_lane.y + lyric_lane.height + margin,
+            waveform_lane.y + waveform_lane.height + margin,
             timeline_boundary.width - margin*2.0f,
             timeline_boundary.y + timeline_boundary.height -
-                (lyric_lane.y + lyric_lane.height + margin) - margin,
+                (waveform_lane.y + waveform_lane.height + margin) - margin,
         };
         if (editor.height > 80.0f) draw_lyrics_editor(editor, track, played);
     } else if (p->assist_panel_open) {
         Rectangle panel = {
             timeline_boundary.x + margin,
-            lyric_lane.y + lyric_lane.height + margin,
+            waveform_lane.y + waveform_lane.height + margin,
             timeline_boundary.width - margin*2.0f,
             timeline_boundary.y + timeline_boundary.height -
-                (lyric_lane.y + lyric_lane.height + margin) - margin,
+                (waveform_lane.y + waveform_lane.height + margin) - margin,
         };
         if (panel.height > 80.0f) draw_assist_panel(panel, track);
     } else if (p->export_panel_open) {
         Rectangle panel = {
             timeline_boundary.x + margin,
-            lyric_lane.y + lyric_lane.height + margin,
+            waveform_lane.y + waveform_lane.height + margin,
             timeline_boundary.width - margin*2.0f,
             timeline_boundary.y + timeline_boundary.height -
-                (lyric_lane.y + lyric_lane.height + margin) - margin,
+                (waveform_lane.y + waveform_lane.height + margin) - margin,
         };
         if (panel.height > 80.0f) draw_export_panel(panel, track);
     }
 
-    float x = timeline_boundary.x + played/len*timeline_boundary.width;
-    Vector2 startPos = {
-        .x = x,
-        .y = timeline_boundary.y
-    };
-    Vector2 endPos = {
-        .x = x,
-        .y = timeline_boundary.y + timeline_boundary.height
-    };
-    DrawLineEx(startPos, endPos, 10, COLOR_TIMELINE_CURSOR);
-
     Vector2 mouse = GetMousePosition();
-    bool over_editor = expanded_panel && mouse.y > lyric_lane.y + lyric_lane.height;
-    if (CheckCollisionPointRec(mouse, timeline_boundary) && !over_controls && !over_editor) {
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            float t = (mouse.x - timeline_boundary.x)/timeline_boundary.width;
-            SeekMusicStream(track->music, t*len);
+    const uint64_t drag_id = UINT64_C(0x5345454B44524147);
+    if (p->active_button_id == 0 && CheckCollisionPointRec(mouse, waveform_lane) &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        p->active_button_id = drag_id;
+    }
+    if (p->active_button_id == drag_id) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            double target = track_timeline_seek_from_x(
+                GetMusicTimePlayed(track->music), mouse.x, waveform_lane.x,
+                waveform_lane.width, len);
+            seek_track_to(track, target);
         }
-
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) p->active_button_id = 0;
     }
 
     // TODO: enable the user to render a specific region instead of the whole song.
-    // TODO: visualize sound wave on the timeline
 }
 
 static int button_with_id(uint64_t id, Rectangle boundary)
@@ -3043,7 +3203,7 @@ static int button_with_location(const char *file, int line, Rectangle boundary)
 // max_width support and without newlines
 void track_label(Font font, const char *text, Vector2 position, float fontSize, Color tint)
 {
-    if (font.texture.id == 0) font = GetFontDefault();  // Security check in case of not valid font
+    if (font.texture.id == 0) font = ui_font();  // Security check in case of not valid font
 
     float spacing = 0;
 
@@ -3081,7 +3241,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
 {
     DrawRectangleRec(panel_boundary, COLOR_TRACK_PANEL_BACKGROUND);
     const float header_height = 96.0f;
-    DrawTextEx(GetFontDefault(), "TRACK PROJECTS",
+    DrawTextEx(ui_font(), "TRACK PROJECTS",
                (Vector2){panel_boundary.x + 10.0f, panel_boundary.y + 16.0f},
                18.0f, 1.0f, COLOR_UI_INK);
     Track *active_track = current_track();
@@ -3092,8 +3252,8 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
                               active_track->project_autosave_failed ? "Save failed" :
                               workspace_dirty ? "Unsaved" : "Saved" :
                               "No project file";
-    Vector2 status_size = MeasureTextEx(GetFontDefault(), save_status, 13.0f, 1.0f);
-    DrawTextEx(GetFontDefault(), save_status,
+    Vector2 status_size = MeasureTextEx(ui_font(), save_status, 13.0f, 1.0f);
+    DrawTextEx(ui_font(), save_status,
                (Vector2){panel_boundary.x + panel_boundary.width - status_size.x - 10.0f,
                          panel_boundary.y + 18.0f},
                13.0f, 1.0f,
@@ -3238,7 +3398,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
         const char *text = GetFileName(p->tracks.items[i].file_path);
         float fontSize = item_boundary.height*0.5;
         float text_padding = item_boundary.width*0.05;
-        Vector2 size = MeasureTextEx(GetFontDefault(), text, fontSize, 0);
+        Vector2 size = MeasureTextEx(ui_font(), text, fontSize, 0);
         Vector2 position = {
             .x = item_boundary.x + text_padding,
             .y = item_boundary.y + item_boundary.height*0.5 - size.y*0.5,
@@ -3274,11 +3434,11 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
                 }
                 position.x += px_shift; // <-- Apply the shift
             }
-            track_label(GetFontDefault(), text, position, fontSize, label_color);
+            track_label(ui_font(), text, position, fontSize, label_color);
             EndScissorMode();
 
         } else { // <-- No need for ScissorMode
-            track_label(GetFontDefault(), text, position, fontSize, label_color);
+            track_label(ui_font(), text, position, fontSize, label_color);
         }
     }
 
@@ -3337,7 +3497,7 @@ static void scene_browser(Rectangle boundary)
     const float padding = 8.0f;
     const float header_height = 27.0f;
     float header_font = 18.0f;
-    DrawTextEx(GetFontDefault(), "SCENES", (Vector2){boundary.x + padding, boundary.y + 5.0f},
+    DrawTextEx(ui_font(), "SCENES", (Vector2){boundary.x + padding, boundary.y + 5.0f},
                header_font, 0.0f, COLOR_UI_INK);
     char status[64];
     Track *track = current_track();
@@ -3347,8 +3507,8 @@ static void scene_browser(Rectangle boundary)
     } else {
         snprintf(status, sizeof(status), "%zu events", combined_scene_events().count);
     }
-    Vector2 status_size = MeasureTextEx(GetFontDefault(), status, 14.0f, 0.0f);
-    DrawTextEx(GetFontDefault(), status,
+    Vector2 status_size = MeasureTextEx(ui_font(), status, 14.0f, 0.0f);
+    DrawTextEx(ui_font(), status,
                (Vector2){boundary.x + boundary.width - status_size.x - padding,
                          boundary.y + 8.0f},
                14.0f, 0.0f, COLOR_UI_MUTED);
@@ -3666,19 +3826,19 @@ static void notice_tray(Rectangle preview_boundary)
         DrawRectangleRec(card, (Color){247, 247, 248, 248});
         DrawRectangleLinesEx(card, 1.0f, (Color){20, 20, 20, 255});
         DrawRectangle((int)card.x, (int)card.y, 5, (int)card.height, COLOR_ACCENT);
-        DrawTextEx(GetFontDefault(), notice_severity_label(notice->severity),
+        DrawTextEx(ui_font(), notice_severity_label(notice->severity),
                    (Vector2){card.x + 16.0f, card.y + 11.0f}, 14.0f, 1.0f,
                    COLOR_ACCENT);
-        DrawTextEx(GetFontDefault(), notice->title,
+        DrawTextEx(ui_font(), notice->title,
                    (Vector2){card.x + 82.0f, card.y + 9.0f}, 18.0f, 1.0f,
                    (Color){20, 20, 20, 255});
         BeginScissorMode((int)card.x + 16, (int)card.y + 34,
                          (int)card.width - 102, (int)card.height - 40);
-        DrawTextEx(GetFontDefault(), notice->detail,
+        DrawTextEx(ui_font(), notice->detail,
                    (Vector2){card.x + 16.0f, card.y + 38.0f}, 15.0f, 1.0f,
                    (Color){70, 70, 72, 255});
         if (notice->path[0] != '\0') {
-            DrawTextEx(GetFontDefault(), notice->path,
+            DrawTextEx(ui_font(), notice->path,
                        (Vector2){card.x + 16.0f, card.y + 62.0f}, 13.0f, 1.0f,
                        (Color){92, 92, 96, 255});
         }
@@ -3689,7 +3849,7 @@ static void notice_tray(Rectangle preview_boundary)
         int state = button_with_id(UINT64_C(0x4E4F544943450000) ^ notice->id, dismiss);
         DrawRectangleLinesEx(dismiss, state & BS_HOVEROVER ? 2.0f : 1.0f,
                              (Color){20, 20, 20, 255});
-        DrawTextEx(GetFontDefault(), "Dismiss",
+        DrawTextEx(ui_font(), "Dismiss",
                    (Vector2){dismiss.x + 8.0f, dismiss.y + 5.0f}, 13.0f, 1.0f,
                    (Color){20, 20, 20, 255});
         if (state & BS_CLICKED) dismiss_id = notice->id;
@@ -4349,6 +4509,7 @@ static void preview_screen(void)
             p->fullscreen = !p->fullscreen;
         }
 
+        update_transport_shortcuts(track);
         double scene_time = GetMusicTimePlayed(track->music);
         float scene_dt = scene_clock_delta(scene_time);
         AudioSpectrumView spectrum = fft_analyze(scene_dt);
@@ -4401,7 +4562,7 @@ static void preview_screen(void)
             float tracks_panel_width = 320.0f;
             float timeline_height = (p->lyrics_editor_open || p->assist_panel_open ||
                                      p->export_panel_open) ?
-                                    330.0f : 150.0f;
+                                    330.0f : 180.0f;
             if (timeline_height > h - toolbar_height - 180.0f) {
                 timeline_height = fmaxf(150.0f, h - toolbar_height - 180.0f);
             }
@@ -4461,18 +4622,18 @@ static void preview_screen(void)
         DrawRectangle(0, 0, w, h, COLOR_UI_SURFACE);
         DrawLine(32, 72, w - 32, 72, COLOR_UI_RULE);
         DrawLine((int)(w*0.72f), 32, (int)(w*0.72f), h - 32, COLOR_UI_RULE);
-        DrawTextEx(GetFontDefault(), "MUSIALIZER", (Vector2){32.0f, 30.0f},
+        DrawTextEx(ui_font(), "MUSIALIZER", (Vector2){32.0f, 30.0f},
                    24.0f, 2.0f, COLOR_UI_INK);
-        DrawTextEx(GetFontDefault(), "01", (Vector2){w - 150.0f, 82.0f},
+        DrawTextEx(ui_font(), "01", (Vector2){w - 150.0f, 82.0f},
                    84.0f, 1.0f, COLOR_ACCENT);
 
         float left = fmaxf(48.0f, w*0.10f);
         float top = fmaxf(120.0f, h*0.20f);
-        DrawTextEx(GetFontDefault(), "Turn one track into a",
+        DrawTextEx(ui_font(), "Turn one track into a",
                    (Vector2){left, top}, 38.0f, 1.0f, COLOR_UI_INK);
-        DrawTextEx(GetFontDefault(), "finished visual score.",
+        DrawTextEx(ui_font(), "finished visual score.",
                    (Vector2){left, top + 46.0f}, 38.0f, 1.0f, COLOR_UI_INK);
-        DrawTextEx(GetFontDefault(),
+        DrawTextEx(ui_font(),
                    "Open an audio file, choose a scene, refine timing, then export a deterministic MP4.",
                    (Vector2){left, top + 112.0f}, 17.0f, 1.0f, COLOR_UI_MUTED);
 
@@ -4495,7 +4656,7 @@ static void preview_screen(void)
                         "Open project", false) & BS_CLICKED) {
             (void)open_project_dialog();
         }
-        DrawTextEx(GetFontDefault(), "or drop audio anywhere in this window",
+        DrawTextEx(ui_font(), "or drop audio anywhere in this window",
                    (Vector2){open.x, open.y + open.height + 14.0f},
                    15.0f, 1.0f, COLOR_UI_MUTED);
 
@@ -4507,12 +4668,12 @@ static void preview_screen(void)
                                "Review settings and export"};
         for (size_t i = 0; i < 3; ++i) {
             float x = left + i*fminf(250.0f, (w*0.60f)/3.0f);
-            DrawTextEx(GetFontDefault(), numbers[i], (Vector2){x, steps_y},
+            DrawTextEx(ui_font(), numbers[i], (Vector2){x, steps_y},
                        28.0f, 1.0f, COLOR_ACCENT);
-            DrawTextEx(GetFontDefault(), steps[i], (Vector2){x, steps_y + 40.0f},
+            DrawTextEx(ui_font(), steps[i], (Vector2){x, steps_y + 40.0f},
                        15.0f, 1.0f, COLOR_UI_INK);
         }
-        DrawTextEx(GetFontDefault(), "WAV  OGG  MP3  QOA  XM  MOD  FLAC",
+        DrawTextEx(ui_font(), "WAV  OGG  MP3  QOA  XM  MOD  FLAC",
                    (Vector2){32.0f, h - 48.0f}, 14.0f, 2.0f, COLOR_UI_MUTED);
 
         notice_tray((Rectangle){0, 0, (float)w, (float)h});
@@ -4628,8 +4789,8 @@ static void rendering_screen(void)
     if (progress > 1.0) progress = 1.0;
     double remaining = progress > 0.001 ? elapsed*(1.0 - progress)/progress : 0.0;
     const char *label = p->render_finishing ? "Finishing encoder" : "Exporting video";
-    Vector2 title_size = MeasureTextEx(GetFontDefault(), label, 34.0f, 1.0f);
-    DrawTextEx(GetFontDefault(), label,
+    Vector2 title_size = MeasureTextEx(ui_font(), label, 34.0f, 1.0f);
+    DrawTextEx(ui_font(), label,
                (Vector2){w/2.0f - title_size.x/2.0f, h/2.0f - 92.0f},
                34.0f, 1.0f, WHITE);
 
@@ -4645,8 +4806,8 @@ static void rendering_screen(void)
                  (unsigned)(elapsed/60.0), (unsigned)fmod(elapsed, 60.0),
                  (unsigned)(remaining/60.0), (unsigned)fmod(remaining, 60.0));
     }
-    Vector2 detail_size = MeasureTextEx(GetFontDefault(), detail, 18.0f, 1.0f);
-    DrawTextEx(GetFontDefault(), detail,
+    Vector2 detail_size = MeasureTextEx(ui_font(), detail, 18.0f, 1.0f);
+    DrawTextEx(ui_font(), detail,
                (Vector2){w/2.0f - detail_size.x/2.0f, h/2.0f - 43.0f},
                18.0f, 1.0f, ColorAlpha(WHITE, 0.72f));
 
@@ -4657,7 +4818,7 @@ static void rendering_screen(void)
                      COLOR_ACCENT);
     DrawRectangleLinesEx(bar_box, 1.0f, WHITE);
     BeginScissorMode((int)bar_box.x, (int)bar_box.y + 27, (int)bar_box.width, 24);
-    DrawTextEx(GetFontDefault(), p->render_output_path,
+    DrawTextEx(ui_font(), p->render_output_path,
                (Vector2){bar_box.x, bar_box.y + 29.0f},
                14.0f, 1.0f, ColorAlpha(WHITE, 0.52f));
     EndScissorMode();
@@ -4740,6 +4901,35 @@ static void load_assets(void)
     size_t data_size = 0;
     void *data = NULL;
 
+    const char *ui_font_path = "./resources/fonts/SpaceGrotesk-Regular.otf";
+    data = plug_load_resource(ui_font_path, &data_size);
+    if (data != NULL && data_size <= INT_MAX) {
+        int curated[CAPTION_FONT_CODEPOINT_LIMIT];
+        int ui_codepoints[CAPTION_FONT_CODEPOINT_LIMIT];
+        size_t curated_count = 0;
+        size_t ui_count = 0;
+        if (caption_font_codepoints(curated, NOB_ARRAY_LEN(curated),
+                                    &curated_count) == CAPTION_FONT_OK) {
+            for (size_t i = 0; i < curated_count; ++i) {
+                if (ui_font_codepoint(curated[i])) {
+                    ui_codepoints[ui_count++] = curated[i];
+                }
+            }
+        }
+        p->ui_font = LoadFontFromMemory(
+            GetFileExtension(ui_font_path), data, (int)data_size, FONT_SIZE,
+            ui_count > 0 ? ui_codepoints : NULL, (int)ui_count);
+    }
+    if (IsFontValid(p->ui_font)) {
+        GenTextureMipmaps(&p->ui_font.texture);
+        SetTextureFilter(p->ui_font.texture, TEXTURE_FILTER_BILINEAR);
+    } else {
+        TraceLog(LOG_WARNING,
+                 "FONT: Space Grotesk UI face unavailable; using raylib default");
+        memset(&p->ui_font, 0, sizeof(p->ui_font));
+    }
+    plug_free_resource(data);
+
     const char *alegreya_path = "./resources/fonts/Alegreya-Regular.ttf";
     data = plug_load_resource(alegreya_path, &data_size);
         int codepoints[CAPTION_FONT_CODEPOINT_LIMIT];
@@ -4787,11 +4977,13 @@ static void load_assets(void)
 
 static void unload_assets(void)
 {
+    if (IsFontValid(p->ui_font)) UnloadFont(p->ui_font);
     UnloadFont(p->font);
     UnloadShader(p->circle);
     for (UI_Icon icon = 0; icon < COUNT_UI_ICONS; ++icon) {
         UnloadTexture(p->icon_textures[icon]);
     }
+    memset(&p->ui_font, 0, sizeof(p->ui_font));
     memset(&p->font, 0, sizeof(p->font));
     memset(&p->circle, 0, sizeof(p->circle));
     memset(p->icon_textures, 0, sizeof(p->icon_textures));

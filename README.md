@@ -27,6 +27,8 @@ The upstream demo below remains a lovely snapshot of where it began.
   ASCII Field, Song Atlas, Spectral Terrarium, and Constellation.
 - Import an image as ASCII art, author timeline events, and edit timed lyrics in
   the application.
+- Navigate with a whole-track waveform, draggable hairline playhead, exact
+  tenth/one/ten-second seek controls, and matching keyboard steps.
 - Generate local measured section suggestions, transcribe lyrics with Whisper,
   review those timings with headless Codex, and optionally ask Xiaomi MiMo V2.5
   through OpenRouter for a semantic description of how the music feels.
@@ -314,3 +316,7 @@ Musializer is released under the [MIT License](LICENSE). The original project
 and copyright belong to Alexey "tsoding" Kutepov and Musializer contributors;
 this fork retains that license and attribution. The upstream source remains at
 [github.com/tsoding/musializer](https://github.com/tsoding/musializer).
+
+The bundled Space Grotesk interface face and Alegreya caption face are released
+under the SIL Open Font License 1.1. Their copyright and license notices are in
+[`resources/fonts`](resources/fonts).

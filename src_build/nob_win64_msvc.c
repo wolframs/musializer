@@ -141,10 +141,13 @@ bool build_raylib(void)
     for (size_t i = 0; i < NOB_ARRAY_LEN(raylib_modules); ++i) {
         const char *input_path = nob_temp_sprintf(RAYLIB_SRC_FOLDER"%s.c", raylib_modules[i]);
         const char *output_path = nob_temp_sprintf("%s/%s.obj", build_path, raylib_modules[i]);
+        const char *dependencies[2];
+        size_t dependency_count = raylib_module_dependencies(
+            raylib_modules[i], input_path, dependencies);
 
         nob_da_append(&object_files, output_path);
 
-        if (nob_needs_rebuild(output_path, &input_path, 1)) {
+        if (nob_needs_rebuild(output_path, dependencies, dependency_count)) {
             cmd.count = 0;
             nob_cmd_append(&cmd, "cl.exe", "/DPLATFORM_DESKTOP", "/DSUPPORT_FILEFORMAT_FLAC=1");
             if (build_uses_hotreload()) {
