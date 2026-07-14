@@ -104,6 +104,17 @@ Musi_Project_Validation musi_project_validate(const Musi_Project *project)
         project->audio.channels == 0 || project->audio.channels > 64) {
         return validation(MUSI_PROJECT_ERROR_AUDIO, 0, 0);
     }
+    const Musi_Ascii_Image_Asset *ascii = &project->ascii_image;
+    if ((!ascii->present &&
+         (ascii->path[0] != '\0' || ascii->sha256[0] != '\0' ||
+          ascii->columns != 0 || ascii->rows != 0)) ||
+        (ascii->present &&
+         (!bounded_string(ascii->path, sizeof(ascii->path), false) ||
+          !sha256_string(ascii->sha256) || ascii->columns == 0 ||
+          ascii->columns > ASCII_GRID_MAX_COLUMNS || ascii->rows == 0 ||
+          ascii->rows > ASCII_GRID_MAX_ROWS))) {
+        return validation(MUSI_PROJECT_ERROR_ASCII_IMAGE, 0, 0);
+    }
     if (project->output.width < 16 || project->output.width > 16384 ||
         project->output.height < 16 || project->output.height > 16384 ||
         project->output.fps_denominator == 0 || project->output.fps_denominator > 1001 ||
@@ -236,6 +247,14 @@ Musi_Project_Validation musi_project_validate(const Musi_Project *project)
             !isfinite(cue->strength) || cue->strength < 0.0f || cue->strength > 1.0f) {
             return validation(MUSI_PROJECT_ERROR_SCENE_SWITCH, i, 0);
         }
+        if (cue->setting_count > SCENE_SETTINGS_MAX_CONTROLS) {
+            return validation(MUSI_PROJECT_ERROR_SCENE_SWITCH, i, 0);
+        }
+        for (j = 0; j < cue->setting_count; ++j) {
+            if (!isfinite(cue->settings[j])) {
+                return validation(MUSI_PROJECT_ERROR_SCENE_SWITCH, i, j);
+            }
+        }
         for (j = 0; j < i; ++j) if (project->scene_switches.cues[j].id == cue->id) {
             return validation(MUSI_PROJECT_ERROR_DUPLICATE_ID, i, j);
         }
@@ -245,6 +264,29 @@ Musi_Project_Validation musi_project_validate(const Musi_Project *project)
         fabs(switch_cursor - project->audio.duration_seconds) > 0.001) {
         return validation(MUSI_PROJECT_ERROR_SCENE_SWITCH,
                           project->scene_switches.count - 1, 0);
+    }
+    if (project->scene_preset_count > MUSI_PROJECT_MAX_SCENE_PRESETS) {
+        return validation(MUSI_PROJECT_ERROR_SCENE_PRESET, 0, 0);
+    }
+    for (i = 0; i < project->scene_preset_count; ++i) {
+        const Musi_Scene_Preset *preset = &project->scene_presets[i];
+        if (preset->id == 0 ||
+            !stable_name(preset->scene_name, sizeof(preset->scene_name)) ||
+            !bounded_string(preset->name, sizeof(preset->name), false) ||
+            preset->setting_count == 0 ||
+            preset->setting_count > SCENE_SETTINGS_MAX_CONTROLS) {
+            return validation(MUSI_PROJECT_ERROR_SCENE_PRESET, i, 0);
+        }
+        for (j = 0; j < preset->setting_count; ++j) {
+            if (!isfinite(preset->settings[j])) {
+                return validation(MUSI_PROJECT_ERROR_SCENE_PRESET, i, j);
+            }
+        }
+        for (j = 0; j < i; ++j) {
+            if (project->scene_presets[j].id == preset->id) {
+                return validation(MUSI_PROJECT_ERROR_DUPLICATE_ID, i, j);
+            }
+        }
     }
     if (event_timeline_validate(&project->manual_events) != EVENT_TIMELINE_OK) {
         return validation(MUSI_PROJECT_ERROR_MANUAL_EVENT, 0, 0);
@@ -276,10 +318,10 @@ const char *musi_project_error_string(Musi_Project_Error error)
 {
     static const char *const names[] = {
         "valid", "null project", "unsupported schema version", "invalid metadata",
-        "invalid audio asset", "invalid output settings", "capacity/count violation",
+        "invalid audio asset", "invalid ASCII image asset", "invalid output settings", "capacity/count violation",
         "invalid scene", "invalid parameter mapping", "invalid cue", "cues are unsorted",
         "cues overlap", "invalid analysis lane", "duplicate stable id",
-        "invalid lyrics", "invalid scene-switch suggestions", "invalid manual event",
+        "invalid lyrics", "invalid scene-switch suggestions", "invalid scene preset", "invalid manual event",
         "invalid semantic event"
     };
     if (!enum_in_range((int) error, (int) (sizeof(names) / sizeof(names[0])))) {
@@ -292,7 +334,8 @@ Musi_Project_Editor_Support musi_project_editor_support(
     const Musi_Project *project)
 {
     if (project == NULL) return MUSI_PROJECT_EDITOR_ERROR_NULL;
-    if (project->audio.mode != MUSI_ASSET_REFERENCED) {
+    if (project->audio.mode != MUSI_ASSET_REFERENCED &&
+        project->audio.mode != MUSI_ASSET_IMPORTED) {
         return MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE;
     }
     if (fabs(project->output.start_seconds) > 0.000001 ||
@@ -326,7 +369,7 @@ const char *musi_project_editor_support_string(Musi_Project_Editor_Support suppo
     static const char *const names[] = {
         "supported",
         "null project",
-        "imported/bundled audio assets are not supported by this editor yet",
+        "the audio asset mode is not supported by this editor",
         "partial render ranges are not supported by this editor yet",
         "only integer-frame-rate H.264 MP4 output is supported by this editor",
         "only one scene is supported by this editor yet",

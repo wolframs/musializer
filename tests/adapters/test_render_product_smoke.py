@@ -64,7 +64,17 @@ class RenderProductSmokeTests(unittest.TestCase):
                              source_hash)
 
             document = json.loads(project.read_text(encoding="utf-8"))
-            self.assertEqual(document["audio"]["path"], audio.name)
+            bundled_audio = Path(document["audio"]["path"])
+            self.assertEqual(document["audio"]["mode"], "imported")
+            self.assertEqual(
+                bundled_audio,
+                Path("proof.assets") / "audio" / f"{source_hash}.mp3",
+            )
+            self.assertEqual(
+                hashlib.sha256((directory / bundled_audio).read_bytes()).hexdigest(),
+                source_hash,
+            )
+            self.assertIsNone(document["ascii_image"])
             expected_frames = math.ceil(document["audio"]["duration_seconds"]*24)
             probe = subprocess.run(
                 [

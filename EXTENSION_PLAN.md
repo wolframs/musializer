@@ -688,11 +688,11 @@ failure-path test.
   bounded three-line UTF-8 wrapping with visible ellipsis, and supersample-aware
   fixed-pixel composition. A real mixed-script High-quality render verified the
   caption and bundled atlas.
-- Made project audio references destination-aware: verified descendants are
-  normalized relative to `.musi`, with canonical absolute fallback. Populated
-  ASCII grids now block save regardless of the selected scene until **Clear
-  image** explicitly discards them. The Linux installer registers `.musi` with
-  shared MIME info and packages its desktop integration assets.
+- At that milestone, project audio references were destination-aware: verified
+  descendants were normalized relative to `.musi`, with canonical absolute
+  fallback, and populated ASCII grids blocked save. The later portable-bundle
+  milestone below supersedes both limitations. The Linux installer registers
+  `.musi` with shared MIME info and packages its desktop integration assets.
 - Added a capability-aware product doctor, hardened portable distribution
   allowlists, launcher preflight/escaping tests, cross-target recipe checks,
   and a documented product-readiness matrix. No credential is packaged.
@@ -811,8 +811,8 @@ failure-path test.
 - Added bounded, descriptor-driven controls for all seven scenes. Spectrum,
   ASCII Field, Spectral Terrarium, and Constellation expose three or four
   focused controls; Pulse Field and Orbital Lattice expose five. Song Atlas
-  exposes eight controls for terrain, camera, contours, hue, motion, and
-  Filled/Wireframe surface style.
+  exposes ten controls for terrain, camera, contours, hue, sampling detail,
+  motion, and Filled/Wireframe surface style.
 - Added a right-side inspector with exact numeric readouts, drag sliders,
   per-scene Reset, and dirty-state/autosave integration. **Tune** expands the
   window by 340 logical pixels when the current monitor has room; otherwise a
@@ -834,6 +834,89 @@ failure-path test.
 - Validation passed the warning-clean debug application build, 154/154 C tests
   in release and ASan+UBSan profiles, all eight focused scene-quality/UI
   contract tests, and the complete 56/56 Python adapter/product suite.
+
+### 2026-07-14 - Scene presets and parameterized cues
+
+- Added an eight-slot preset library for every scene. Presets capture a complete
+  validated scene-specific snapshot and can be loaded, updated, or deleted from
+  the Tune inspector; they persist in the owning `.musi` project.
+- Replaced the misleading generic **+ Cue** action with **+ Scene**. A scene cue
+  now splits or replaces the contiguous scene plan at the playhead and captures
+  the selected scene plus its current tuning values atomically.
+- Preview, seeking, generated scene plans, project reload, and offline export
+  now resolve cue-owned tuning snapshots through the shared renderer. Editing
+  controls while an automatic cue is active updates that cue instead of
+  silently changing the track-wide defaults.
+- Removed the accidental Constellation selection performed by generic timeline
+  events, retained deterministic hard cuts at scene boundaries, and made every
+  scene cue label eligible for display in the timeline lane.
+- Validation passed 158/158 C tests in debug, release, and ASan/UBSan profiles;
+  the complete 57-test Python product suite; all four application build
+  profiles; and the portable distribution build. A six-second 640x360 High
+  render produced 144 H.264 High/yuv420p BT.709 frames plus a six-second AAC
+  stream. Reopening its saved parameterized scene plan reproduced every decoded
+  video frame byte-for-byte by `framemd5`.
+
+### 2026-07-14 - Song Atlas sampling detail and hue motion
+
+- Tripled the bounded whole-song time analysis from 192 to 576 slices while
+  preserving the original physical terrain scale and approximate smoothing
+  time constants. The new integer **Sampling detail** setting renders 192,
+  384, or all 576 rows at 1x, 2x, and 3x respectively; it does not multiply the
+  fixed 28 frequency bands, so the highest setting is a true 3x geometry load.
+- Added an optional **Hue motion** toggle beside the manual hue setting. Music
+  mode deterministically combines the current whole-song energy and spectral
+  flux with the render clock, keeping preview, seeking, cue playback, and
+  offline export repeatable without claiming an unavailable BPM estimate.
+- Both settings participate in scene defaults, numbered presets, scene-cue
+  snapshots, project validation, and offline export. Legacy eight-setting Song
+  Atlas snapshots remain valid and acquire 1x detail plus manual hue defaults.
+- Validation passed 160/160 C tests in debug, release, and ASan+UBSan profiles;
+  the complete 57-test Python product suite; all four application build
+  profiles; and the portable distribution build with its updated project
+  schema. Matched 1x, 3x, and 3x music-hue renders each produced 144 H.264
+  High/yuv420p BT.709 frames plus six-second AAC audio. Repeating the
+  music-reactive render with the same release binary reproduced every decoded
+  video frame byte-for-byte by `framemd5`.
+
+### 2026-07-14 - Portable asset bundles and loose-end hardening
+
+- Project Save and Save As now import audio and optional ASCII source imagery
+  into content-addressed sibling directories under
+  `<project-stem>.assets/{audio,images}`. Stored references are strict relative
+  descendants with SHA-256 identity; matching immutable objects are reused,
+  conflicts and symlink escapes fail closed, and the `.musi` file is published
+  only after every required object is present.
+- Reopening an imported project verifies both assets before changing editor
+  state, rebuilds the deterministic ASCII grid, and rejects changed dimensions.
+  Original v1 projects without `ascii_image` continue to open; legacy
+  referenced-audio resolution remains available only for those references.
+- Made transport capability explicit for tracker formats that raylib cannot
+  seek reliably. Timeline drags now pause once and commit a single seek on
+  release; the seek transaction invalidates decoder buffers, refills them, and
+  resets FFT and scene clocks before playback resumes.
+- Made accepted Assist content and its provenance one staged operation. The UI
+  no longer mutates lyrics/scenes/semantics if its evidence file cannot be
+  hashed or represented, and project publication reports parent-directory
+  durability failures truthfully.
+- Split Assist cache validity by measured, Whisper, Codex, and MiMo stage. A
+  sections-only run cannot consume cached MiMo semantics, while a changed model,
+  prompt, routing, or analyzer fingerprint invalidates only the affected stage
+  and its downstream evidence.
+- Rebased Constellation motion deterministically across seeks and made live Song
+  Atlas detail increase sample density without stretching the terrain's
+  physical depth. Whole-track Atlas analysis is now lazy in preview, pauses and
+  refills active playback around its one-time preparation, and reuses the
+  already-decoded canonical PCM during export instead of adding startup work to
+  every imported track.
+- Validation passed 164/164 C tests independently in debug, release, and
+  ASan/UBSan profiles; the complete 65-test Python product suite; all four
+  application build profiles; and the portable distribution build and archive
+  allowlist inspection. A six-second compressed-audio ASCII project was saved,
+  moved with only its sibling bundle, and reopened into a second 640x360/24 fps
+  H.264 High/yuv420p BT.709 plus AAC render. Its 146 decoded video frames (the
+  MP3 includes decoder padding) matched the pre-move render byte-for-byte by
+  `framemd5`.
 
 ## Milestones
 

@@ -6,7 +6,9 @@
 #include <stdint.h>
 
 #define SONG_ATLAS_BAND_COUNT 28
-#define SONG_ATLAS_MAX_SLICES 192
+#define SONG_ATLAS_BASE_SLICES 192
+#define SONG_ATLAS_MAX_DETAIL 3
+#define SONG_ATLAS_MAX_SLICES (SONG_ATLAS_BASE_SLICES*SONG_ATLAS_MAX_DETAIL)
 
 typedef struct {
     float bands[SONG_ATLAS_BAND_COUNT];
@@ -29,6 +31,13 @@ size_t song_atlas_map_build(const float *samples,
                             size_t channel_count,
                             uint32_t sample_rate,
                             Song_Atlas_Map *map);
+
+size_t song_atlas_map_slice_count(size_t frame_count, uint32_t sample_rate);
+size_t song_atlas_map_render_sample_count(size_t available,
+                                          size_t detail_level);
+size_t song_atlas_map_render_sample_index(size_t first, size_t available,
+                                          size_t sample_count, size_t sample);
+float song_atlas_map_render_distance(float source_distance);
 
 bool song_atlas_map_valid(const Song_Atlas_Map *map);
 

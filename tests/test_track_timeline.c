@@ -53,3 +53,12 @@ TEST(track_timeline_pointer_seek_maps_and_clamps_to_waveform)
     EXPECT_NEAR(track_timeline_seek_from_x(7.0, 150.0, 100.0, 0.0, 60.0),
                 7.0, 0.0);
 }
+
+TEST(track_timeline_seek_capability_matches_decoder_contract)
+{
+    EXPECT_TRUE(track_timeline_path_is_seekable("song.wav"));
+    EXPECT_TRUE(track_timeline_path_is_seekable("album/live.FLAC"));
+    EXPECT_FALSE(track_timeline_path_is_seekable("tracker.XM"));
+    EXPECT_FALSE(track_timeline_path_is_seekable("tracker.mod"));
+    EXPECT_FALSE(track_timeline_path_is_seekable(NULL));
+}

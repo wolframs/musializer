@@ -89,9 +89,65 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertEqual(build.count('"./src/track_timeline.c"'), 2)
         self.assertIn("track_timeline_build_waveform", plug)
         self.assertIn("track_timeline_seek_from_x", plug)
+        self.assertIn("track_timeline_path_is_seekable", plug)
         self.assertIn('"-0.1 s"', plug)
         self.assertIn('"+0.1 s"', plug)
         self.assertIn("2.0f, COLOR_TIMELINE_CURSOR", plug)
+        seek = re.search(
+            r"static void seek_track_to\([^;]+?\)\s*\{.*?\n\}",
+            plug,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(seek)
+        seek_body = seek.group(0)
+        ordered = [
+            "StopMusicStream(track->music)",
+            "SeekMusicStream(track->music",
+            "UpdateMusicStream(track->music)",
+            "PlayMusicStream(track->music)",
+            "fft_clean()",
+        ]
+        positions = [seek_body.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("if (!was_playing) PauseMusicStream(track->music)", seek_body)
+        self.assertIn("p->timeline_scrubbing = true", plug)
+        scrub_start = plug.index(
+            "const uint64_t drag_id = UINT64_C(0x5345454B44524147)"
+        )
+        scrub_end = plug.index("// TODO: enable the user to render", scrub_start)
+        scrub = plug[scrub_start:scrub_end]
+        release = scrub.index("if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))")
+        committed_seek = scrub.index("seek_track_to(track, target)", release)
+        self.assertLess(release, committed_seek)
+
+    def test_assist_content_and_provenance_commit_as_one_operation(self):
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        apply_start = plug.index("static bool apply_assist_candidate(void)\n{")
+        apply_end = plug.index("static void discard_assist_candidate", apply_start)
+        apply = plug[apply_start:apply_end]
+        self.assertLess(
+            apply.index("stage_candidate_analysis_lanes("),
+            apply.index("apply_candidate_to_track("),
+        )
+        self.assertLess(
+            apply.index("apply_candidate_to_track("),
+            apply.index("memcpy(track->analysis_lanes, staged"),
+        )
+        self.assertNotIn("track_set_analysis_lane", plug)
+
+    def test_project_save_bundles_audio_and_ascii_sources_before_publication(self):
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        save_start = plug.index("static bool save_project_to_path(")
+        save_end = plug.index("static bool save_project_as(", save_start)
+        save = plug[save_start:save_end]
+        self.assertGreaterEqual(save.count("musi_project_bundle_asset("), 2)
+        self.assertLess(
+            save.index("musi_project_bundle_asset("),
+            save.index("musi_project_atomic_write("),
+        )
+        self.assertNotIn("not project-portable yet", save)
+        self.assertIn("MUSI_ASSET_IMPORTED", plug)
+        self.assertIn("musi_project_resolve_bundled_asset_path", plug)
 
     def test_assist_state_policy_is_wired_into_every_product_target(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
@@ -157,6 +213,28 @@ class DistributionManifestTests(unittest.TestCase):
                         body.index("load_timeline_waveform(new_track)"))
         self.assertLess(body.index("load_timeline_waveform(new_track)"),
                         body.index("ResumeMusicStream(active_track->music)"))
+
+    def test_song_atlas_analysis_is_lazy_in_preview_and_reuses_export_pcm(self):
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        waveform_start = plug.index("static void load_timeline_waveform(")
+        waveform_end = plug.index("static bool ensure_song_atlas_map(",
+                                  waveform_start)
+        self.assertNotIn("song_atlas_map_build(",
+                         plug[waveform_start:waveform_end])
+
+        lazy_start = waveform_end
+        lazy_end = plug.index("static bool track_uses_song_atlas(", lazy_start)
+        lazy = plug[lazy_start:lazy_end]
+        self.assertIn("PauseMusicStream(track->music)", lazy)
+        self.assertIn("song_atlas_map_build(", lazy)
+        self.assertIn("UpdateMusicStream(track->music)", lazy)
+        self.assertIn("ResumeMusicStream(track->music)", lazy)
+
+        render_start = plug.index("static bool start_rendering_track_to(")
+        render_end = plug.index("static void start_rendering_track(", render_start)
+        render = plug[render_start:render_end]
+        self.assertLess(render.index("LoadWaveSamples(wave)"),
+                        render.index("song_atlas_map_build("))
 
     def test_ui_uses_bundled_readable_font_with_license(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")

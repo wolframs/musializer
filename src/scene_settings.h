@@ -5,10 +5,11 @@
 #include <stddef.h>
 
 #include "project.h"
+#include "scene_settings_values.h"
 
 enum {
-    SCENE_SETTINGS_SCENE_COUNT = 7,
-    SCENE_SETTINGS_MAX_CONTROLS = 8,
+    SCENE_SETTINGS_PRESETS_PER_SCENE = 8,
+    SCENE_SETTINGS_PRESET_NAME_CAPACITY = 129,
 };
 
 typedef enum Scene_Setting_Kind {
@@ -26,7 +27,8 @@ enum { ASCII_SETTING_MOTION, ASCII_SETTING_CYCLING, ASCII_SETTING_SCANLINES,
        ASCII_SETTING_SPLIT };
 enum { ATLAS_SETTING_HEIGHT, ATLAS_SETTING_WIDTH, ATLAS_SETTING_DEPTH,
        ATLAS_SETTING_CAMERA, ATLAS_SETTING_CONTOURS, ATLAS_SETTING_COLOR,
-       ATLAS_SETTING_SPEED, ATLAS_SETTING_WIREFRAME };
+       ATLAS_SETTING_SPEED, ATLAS_SETTING_WIREFRAME,
+       ATLAS_SETTING_DETAIL, ATLAS_SETTING_HUE_MOTION };
 enum { TERRARIUM_SETTING_MOTION, TERRARIUM_SETTING_GROWTH,
        TERRARIUM_SETTING_PARTICLES };
 enum { CONSTELLATION_SETTING_MOTION, CONSTELLATION_SETTING_SCALE,
@@ -46,6 +48,19 @@ typedef struct Scene_Settings {
     float values[SCENE_SETTINGS_SCENE_COUNT][SCENE_SETTINGS_MAX_CONTROLS];
 } Scene_Settings;
 
+typedef struct Scene_Settings_Preset {
+    uint64_t id;
+    char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
+    Scene_Settings_Snapshot snapshot;
+} Scene_Settings_Preset;
+
+typedef struct Scene_Settings_Preset_Library {
+    uint64_t next_id;
+    size_t counts[SCENE_SETTINGS_SCENE_COUNT];
+    Scene_Settings_Preset items[SCENE_SETTINGS_SCENE_COUNT]
+                               [SCENE_SETTINGS_PRESETS_PER_SCENE];
+} Scene_Settings_Preset_Library;
+
 typedef struct Scene_Settings_Ui_Layout {
     float inspector_width;
     float workspace_width;
@@ -62,6 +77,28 @@ float scene_settings_get(const Scene_Settings *settings,
 bool scene_settings_set(Scene_Settings *settings, size_t scene_index,
                         size_t setting_index, float value);
 bool scene_settings_reset_scene(Scene_Settings *settings, size_t scene_index);
+bool scene_settings_capture(const Scene_Settings *settings, size_t scene_index,
+                            Scene_Settings_Snapshot *snapshot);
+bool scene_settings_snapshot_valid(size_t scene_index,
+                                   const Scene_Settings_Snapshot *snapshot);
+bool scene_settings_apply_snapshot(Scene_Settings *settings, size_t scene_index,
+                                   const Scene_Settings_Snapshot *snapshot);
+
+void scene_settings_preset_library_init(Scene_Settings_Preset_Library *library);
+bool scene_settings_preset_library_valid(
+    const Scene_Settings_Preset_Library *library);
+bool scene_settings_preset_save(Scene_Settings_Preset_Library *library,
+                                size_t scene_index, const char *name,
+                                const Scene_Settings *settings,
+                                size_t *preset_index);
+bool scene_settings_preset_replace(Scene_Settings_Preset_Library *library,
+                                   size_t scene_index, size_t preset_index,
+                                   const Scene_Settings *settings);
+bool scene_settings_preset_apply(const Scene_Settings_Preset_Library *library,
+                                 size_t scene_index, size_t preset_index,
+                                 Scene_Settings *settings);
+bool scene_settings_preset_remove(Scene_Settings_Preset_Library *library,
+                                  size_t scene_index, size_t preset_index);
 
 /* The v1 editor stores presets as canonical constant parameter mappings. */
 bool scene_settings_mapping_supported(const Musi_Parameter_Mapping *mapping);

@@ -5,6 +5,7 @@
 #endif
 
 #include "project_io.h"
+#include "sha256.h"
 #include "test_support.h"
 #include <float.h>
 #include <locale.h>
@@ -29,6 +30,7 @@ static Musi_Project fixture(void)
     strcpy(p.metadata.modified_utc,"2026-07-12T11:00:00Z");strcpy(p.metadata.application_version,"0.2");
     p.audio.mode=MUSI_ASSET_REFERENCED;strcpy(p.audio.path,"audio\\kitty.mp3");hash(p.audio.sha256,'a');
     p.audio.duration_seconds=10.5;p.audio.sample_rate=48000;p.audio.channels=2;
+    p.ascii_image.present=true;strcpy(p.ascii_image.path,"show.assets/images/face.png");hash(p.ascii_image.sha256,'c');p.ascii_image.columns=96;p.ascii_image.rows=54;
     p.lyrics.duration_seconds=10.5;
     p.output.width=1920;p.output.height=1080;p.output.fps_numerator=30000;p.output.fps_denominator=1001;
     /* validator currently caps numerator at 1000 */ p.output.fps_numerator=60;
@@ -50,6 +52,9 @@ static Musi_Project fixture(void)
     p.scene_switches.enabled=true;p.scene_switches.count=2;
     p.scene_switches.cues[0]=(Musi_Scene_Switch_Suggestion){.id=51,.start_seconds=0,.end_seconds=5,.strength=.25f};strcpy(p.scene_switches.cues[0].scene_name,"spectrum");
     p.scene_switches.cues[1]=(Musi_Scene_Switch_Suggestion){.id=52,.start_seconds=5,.end_seconds=10.5,.strength=.9f};strcpy(p.scene_switches.cues[1].scene_name,"atlas");
+    p.scene_switches.cues[0].setting_count=3;p.scene_switches.cues[0].settings[0]=1.1f;p.scene_switches.cues[0].settings[1]=.8f;p.scene_switches.cues[0].settings[2]=1.0f;
+    p.scene_switches.cues[1].setting_count=8;p.scene_switches.cues[1].settings[0]=1.2f;p.scene_switches.cues[1].settings[1]=2.4f;p.scene_switches.cues[1].settings[7]=1.0f;
+    p.scene_preset_count=1;p.scene_presets[0]=(Musi_Scene_Preset){.id=81,.setting_count=8,.settings={1.2f,2.4f,1.0f,1.3f,1.0f,20.0f,.8f,1.0f}};strcpy(p.scene_presets[0].scene_name,"atlas");strcpy(p.scene_presets[0].name,"Wide wireframe");
     p.semantic_events.count=2;
     p.semantic_events.events[0]=(Event_Record){.timestamp_seconds=0,.id=71,.type=EVENT_TYPE_SEMANTIC,.value_count=4,.values={.25f,.5f,-.2f,.9f}};
     p.semantic_events.events[1]=(Event_Record){.timestamp_seconds=5,.id=72,.type=EVENT_TYPE_SEMANTIC,.value_count=4,.values={.75f,.8f,.4f,1}};
@@ -505,6 +510,87 @@ TEST(project_io_stores_safe_descendants_relative_with_absolute_fallback)
     (void)rmdir(deep_directory);
     (void)rmdir(asset_directory);
     (void)rmdir(outside_directory);
+    (void)rmdir(project_directory);
+    (void)rmdir(root);
+}
+
+TEST(project_io_bundles_content_addressed_assets_and_rejects_escape_or_collision)
+{
+    char root[256];
+    REQUIRE_TRUE(project_io_test_mkdir(root, sizeof(root)));
+    char project_directory[320];
+    char project_path[384];
+    char source[320];
+    snprintf(project_directory, sizeof(project_directory), "%s/project", root);
+    snprintf(project_path, sizeof(project_path), "%s/show.musi", project_directory);
+    snprintf(source, sizeof(source), "%s/source.MP3", root);
+    REQUIRE_TRUE(mkdir(project_directory, 0700) == 0);
+    REQUIRE_TRUE(project_io_test_write(source, "immutable audio bytes"));
+    char identity[SHA256_HEX_SIZE];
+    REQUIRE_TRUE(sha256_file_hex(source, identity));
+
+    char stored[512];
+    char runtime[512];
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_AUDIO, source, identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_OK);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "show.assets/audio/%s.mp3", identity);
+    EXPECT_TRUE(strcmp(stored, expected) == 0);
+    EXPECT_TRUE(project_io_test_read_equals(runtime, "immutable audio bytes"));
+
+    char resolved[512];
+    EXPECT_TRUE(musi_project_resolve_bundled_asset_path(
+        project_path, stored, resolved, sizeof(resolved)) ==
+        MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE);
+    EXPECT_TRUE(musi_project_existing_files_alias(resolved, runtime));
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_AUDIO, source, identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_OK);
+
+    char escape[512];
+    snprintf(escape, sizeof(escape), "%s/show.assets/audio/escape.mp3",
+             project_directory);
+    REQUIRE_TRUE(symlink(source, escape) == 0);
+    EXPECT_TRUE(musi_project_resolve_bundled_asset_path(
+        project_path, "show.assets/audio/escape.mp3", resolved,
+        sizeof(resolved)) == MUSI_PROJECT_PATH_ERROR_NOT_FOUND);
+    EXPECT_TRUE(musi_project_resolve_bundled_asset_path(
+        project_path, "../source.MP3", resolved, sizeof(resolved)) ==
+        MUSI_PROJECT_PATH_ERROR_NOT_FOUND);
+
+    REQUIRE_TRUE(unlink(runtime) == 0);
+    REQUIRE_TRUE(project_io_test_write(runtime, "different bytes"));
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_AUDIO, source, identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_ERROR_COLLISION);
+
+    char category_directory[448];
+    char bundle_directory[416];
+    snprintf(category_directory, sizeof(category_directory),
+             "%s/show.assets/audio", project_directory);
+    snprintf(bundle_directory, sizeof(bundle_directory),
+             "%s/show.assets", project_directory);
+    (void)unlink(escape);
+    (void)unlink(runtime);
+    REQUIRE_TRUE(rmdir(category_directory) == 0);
+    REQUIRE_TRUE(rmdir(bundle_directory) == 0);
+
+    char outside_bundle[416];
+    snprintf(outside_bundle, sizeof(outside_bundle), "%s/outside-bundle", root);
+    REQUIRE_TRUE(mkdir(outside_bundle, 0700) == 0);
+    REQUIRE_TRUE(symlink(outside_bundle, bundle_directory) == 0);
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_AUDIO, source, identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_ERROR_DIRECTORY);
+    REQUIRE_TRUE(unlink(bundle_directory) == 0);
+    REQUIRE_TRUE(rmdir(outside_bundle) == 0);
+
+    (void)unlink(source);
     (void)rmdir(project_directory);
     (void)rmdir(root);
 }

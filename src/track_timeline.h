@@ -1,6 +1,7 @@
 #ifndef MUSIALIZER_TRACK_TIMELINE_H_
 #define MUSIALIZER_TRACK_TIMELINE_H_
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #define TRACK_TIMELINE_MAX_BINS 2048
@@ -33,5 +34,9 @@ double track_timeline_seek_from_x(double current_seconds,
                                   double left,
                                   double width,
                                   double duration_seconds);
+
+// Raylib cannot seek tracker-module streams. Keep transport affordances
+// truthful for those extensions while preserving all decoded audio formats.
+bool track_timeline_path_is_seekable(const char *path);
 
 #endif // MUSIALIZER_TRACK_TIMELINE_H_

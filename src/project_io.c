@@ -8,8 +8,10 @@
 #endif
 
 #include "project_io.h"
+#include "sha256.h"
 #include <locale.h>
 #include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,7 +96,9 @@ static void project_write(Writer*w,const Musi_Project*p)
     lit(w,"},\"audio\":{\"mode\":");string(w,musi_asset_mode_name(p->audio.mode));lit(w,",\"path\":");string(w,p->audio.path);
     lit(w,",\"sha256\":");string(w,p->audio.sha256);lit(w,",\"duration_seconds\":");real(w,p->audio.duration_seconds);
     lit(w,",\"sample_rate\":");u64(w,p->audio.sample_rate);lit(w,",\"channels\":");u64(w,p->audio.channels);
-    lit(w,"},\"output\":{\"width\":");u64(w,p->output.width);lit(w,",\"height\":");u64(w,p->output.height);
+    lit(w,"},\"ascii_image\":");
+    if(p->ascii_image.present){lit(w,"{\"path\":");string(w,p->ascii_image.path);lit(w,",\"sha256\":");string(w,p->ascii_image.sha256);lit(w,",\"columns\":");u64(w,p->ascii_image.columns);lit(w,",\"rows\":");u64(w,p->ascii_image.rows);lit(w,"}");}else lit(w,"null");
+    lit(w,",\"output\":{\"width\":");u64(w,p->output.width);lit(w,",\"height\":");u64(w,p->output.height);
     lit(w,",\"fps_numerator\":");u64(w,p->output.fps_numerator);lit(w,",\"fps_denominator\":");u64(w,p->output.fps_denominator);
     lit(w,",\"start_seconds\":");real(w,p->output.start_seconds);lit(w,",\"end_seconds\":");real(w,p->output.end_seconds);
     lit(w,",\"format\":");string(w,musi_output_format_name(p->output.format));lit(w,",\"quality\":");string(w,musi_output_quality_name(p->output.quality));lit(w,"},\"deterministic_seed\":");u64(w,p->deterministic_seed);
@@ -118,8 +122,9 @@ static void project_write(Writer*w,const Musi_Project*p)
     lit(w,"],\"lyrics\":{\"next_id\":");u64(w,p->lyrics.next_id);lit(w,",\"cues\":[");
     for(size_t i=0;i<p->lyrics.count;++i){const Lyric_Cue*c=&p->lyrics.cues[i];if(i)lit(w,",");lit(w,"{\"id\":");u64(w,c->id);lit(w,",\"start_seconds\":");real(w,c->start_seconds);lit(w,",\"end_seconds\":");real(w,c->end_seconds);lit(w,",\"text\":");string(w,c->text);lit(w,"}");}
     lit(w,"]},\"scene_switches\":{\"enabled\":");lit(w,p->scene_switches.enabled?"true":"false");lit(w,",\"cues\":[");
-    for(size_t i=0;i<p->scene_switches.count;++i){const Musi_Scene_Switch_Suggestion*c=&p->scene_switches.cues[i];if(i)lit(w,",");lit(w,"{\"id\":");u64(w,c->id);lit(w,",\"start_seconds\":");real(w,c->start_seconds);lit(w,",\"end_seconds\":");real(w,c->end_seconds);lit(w,",\"scene_name\":");string(w,c->scene_name);lit(w,",\"strength\":");real(w,c->strength);lit(w,"}");}
-    lit(w,"]},\"semantic_events\":");events_write(w,&p->semantic_events);
+    for(size_t i=0;i<p->scene_switches.count;++i){const Musi_Scene_Switch_Suggestion*c=&p->scene_switches.cues[i];if(i)lit(w,",");lit(w,"{\"id\":");u64(w,c->id);lit(w,",\"start_seconds\":");real(w,c->start_seconds);lit(w,",\"end_seconds\":");real(w,c->end_seconds);lit(w,",\"scene_name\":");string(w,c->scene_name);lit(w,",\"strength\":");real(w,c->strength);lit(w,",\"settings\":[");for(size_t j=0;j<c->setting_count;++j){if(j)lit(w,",");real(w,c->settings[j]);}lit(w,"]}");}
+    lit(w,"]},\"scene_presets\":[");for(size_t i=0;i<p->scene_preset_count;++i){const Musi_Scene_Preset*s=&p->scene_presets[i];if(i)lit(w,",");lit(w,"{\"id\":");u64(w,s->id);lit(w,",\"scene_name\":");string(w,s->scene_name);lit(w,",\"name\":");string(w,s->name);lit(w,",\"settings\":[");for(size_t j=0;j<s->setting_count;++j){if(j)lit(w,",");real(w,s->settings[j]);}lit(w,"]}");}
+    lit(w,"],\"semantic_events\":");events_write(w,&p->semantic_events);
     lit(w,",\"manual_events\":");events_write(w,&p->manual_events);lit(w,"}");
 }
 
@@ -179,6 +184,8 @@ static bool parse_metadata(Parser*x,Musi_Project_Metadata*m)
 {static const char*names[]={"project_id","title","author","created_utc","modified_utc","application_version"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,6);if(f<0)UNKNOWN();SEEN(f);char*o=f==0?m->project_id:f==1?m->title:f==2?m->author:f==3?m->created_utc:f==4?m->modified_utc:m->application_version;size_t cap=f==0?sizeof(m->project_id):f==1||f==2?sizeof(m->title):f==3||f==4?sizeof(m->created_utc):sizeof(m->application_version);if(!jstring(x,o,cap))return false;}if((mask&0x23)!=0x23){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_audio(Parser*x,Musi_Audio_Asset*a)
 {static const char*names[]={"mode","path","sha256","duration_seconds","sample_rate","channels"};uint64_t mask=0,v;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,6);if(f<0)UNKNOWN();SEEN(f);int e;switch(f){case 0:if(!enum_string(x,modes,2,&e))return false;a->mode=e;break;case 1:if(!jstring(x,a->path,sizeof(a->path)))return false;break;case 2:if(!jstring(x,a->sha256,sizeof(a->sha256)))return false;break;case 3:if(!jdouble(x,&a->duration_seconds))return false;break;case 4:if(!ju64(x,&v)||v>UINT32_MAX){x->error=MUSI_PROJECT_IO_ERROR_NUMBER;return false;}a->sample_rate=(uint32_t)v;break;case 5:if(!ju64(x,&v)||v>UINT16_MAX){x->error=MUSI_PROJECT_IO_ERROR_NUMBER;return false;}a->channels=(uint16_t)v;break;}}if(mask!=0x3f){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
+static bool parse_ascii_image(Parser*x,Musi_Ascii_Image_Asset*a)
+{ws(x);if(x->end-x->p>=4&&!memcmp(x->p,"null",4)){x->p+=4;return true;}static const char*names[]={"path","sha256","columns","rows"};uint64_t mask=0,v;bool first=true;char k[80];if(!take(x,'{'))return false;a->present=true;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,4);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!jstring(x,a->path,sizeof(a->path)))return false;}else if(f==1){if(!jstring(x,a->sha256,sizeof(a->sha256)))return false;}else if(f==2){if(!ju64(x,&v)||v>UINT32_MAX){x->error=MUSI_PROJECT_IO_ERROR_NUMBER;return false;}a->columns=(uint32_t)v;}else{if(!ju64(x,&v)||v>UINT32_MAX){x->error=MUSI_PROJECT_IO_ERROR_NUMBER;return false;}a->rows=(uint32_t)v;}}if(mask!=15){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_output(Parser*x,Musi_Output_Settings*o)
 {static const char*names[]={"width","height","fps_numerator","fps_denominator","start_seconds","end_seconds","format","quality"};uint64_t mask=0,v;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,8);if(f<0)UNKNOWN();SEEN(f);int e;if(f<4){if(!ju64(x,&v)||v>UINT32_MAX){x->error=MUSI_PROJECT_IO_ERROR_NUMBER;return false;}if(f==0)o->width=v;else if(f==1)o->height=v;else if(f==2)o->fps_numerator=v;else o->fps_denominator=v;}else if(f==4){if(!jdouble(x,&o->start_seconds))return false;}else if(f==5){if(!jdouble(x,&o->end_seconds))return false;}else if(f==6){if(!enum_string(x,formats,5,&e))return false;o->format=e;}else{if(!enum_string(x,qualities,3,&e))return false;o->quality=e;}}if((mask&UINT64_C(0x7f))!=UINT64_C(0x7f)){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_provenance(Parser*x,Musi_Analysis_Provenance*p)
@@ -190,8 +197,10 @@ static bool parse_lyric(Parser*x,Lyric_Cue*c)
 {static const char*names[]={"id","start_seconds","end_seconds","text"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,4);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&c->id))return false;}else if(f==1){if(!jdouble(x,&c->start_seconds))return false;}else if(f==2){if(!jdouble(x,&c->end_seconds))return false;}else if(!jstring(x,c->text,sizeof(c->text)))return false;}if(mask!=15){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_lyrics(Parser*x,Lyrics_Document*d)
 {static const char*names[]={"next_id","cues"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,2);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&d->next_id))return false;}else{if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(d->count&&!take(x,','))return false;if(d->count>=LYRICS_CUE_CAPACITY){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_lyric(x,&d->cues[d->count++]))return false;}}}if(mask!=3){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
+static bool parse_float_array(Parser*x,float*values,size_t capacity,size_t*count)
+{if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(*count&&!take(x,','))return false;if(*count>=capacity){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}double value;if(!jdouble(x,&value)||value>FLT_MAX||value<-FLT_MAX)return false;values[(*count)++]=(float)value;}return true;}
 static bool parse_switch(Parser*x,Musi_Scene_Switch_Suggestion*c)
-{static const char*names[]={"id","start_seconds","end_seconds","scene_name","strength"};uint64_t mask=0;bool first=true;char k[80];double strength;if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,5);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&c->id))return false;}else if(f==1){if(!jdouble(x,&c->start_seconds))return false;}else if(f==2){if(!jdouble(x,&c->end_seconds))return false;}else if(f==3){if(!jstring(x,c->scene_name,sizeof(c->scene_name)))return false;}else{if(!jdouble(x,&strength)||strength>FLT_MAX||strength<-FLT_MAX)return false;c->strength=(float)strength;}}if(mask!=31){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
+{static const char*names[]={"id","start_seconds","end_seconds","scene_name","strength","settings"};uint64_t mask=0;bool first=true;char k[80];double strength;if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,6);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&c->id))return false;}else if(f==1){if(!jdouble(x,&c->start_seconds))return false;}else if(f==2){if(!jdouble(x,&c->end_seconds))return false;}else if(f==3){if(!jstring(x,c->scene_name,sizeof(c->scene_name)))return false;}else if(f==4){if(!jdouble(x,&strength)||strength>FLT_MAX||strength<-FLT_MAX)return false;c->strength=(float)strength;}else if(!parse_float_array(x,c->settings,SCENE_SETTINGS_MAX_CONTROLS,&c->setting_count))return false;}if((mask&31)!=31){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_switches(Parser*x,Musi_Scene_Switch_Suggestions*s)
 {static const char*names[]={"enabled","cues"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,2);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!jbool(x,&s->enabled))return false;}else{if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(s->count&&!take(x,','))return false;if(s->count>=SCENE_SWITCH_CAPACITY){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_switch(x,&s->cues[s->count++]))return false;}}}if(mask!=3){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 static bool parse_event(Parser*x,Event_Record*e)
@@ -199,8 +208,11 @@ static bool parse_event(Parser*x,Event_Record*e)
 static bool parse_events(Parser*x,Event_Timeline*timeline)
 {if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(timeline->count&&!take(x,','))return false;if(timeline->count>=EVENT_TIMELINE_CAPACITY){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_event(x,&timeline->events[timeline->count++]))return false;}return true;}
 
+static bool parse_scene_preset(Parser*x,Musi_Scene_Preset*s)
+{static const char*names[]={"id","scene_name","name","settings"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,4);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&s->id))return false;}else if(f==1){if(!jstring(x,s->scene_name,sizeof(s->scene_name)))return false;}else if(f==2){if(!jstring(x,s->name,sizeof(s->name)))return false;}else if(!parse_float_array(x,s->settings,SCENE_SETTINGS_MAX_CONTROLS,&s->setting_count))return false;}if(mask!=15){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
+
 static bool parse_project(Parser*x,Musi_Project*p)
-{static const char*names[]={"schema_version","metadata","audio","output","deterministic_seed","scenes","cues","analysis_lanes","lyrics","scene_switches","manual_events","semantic_events"};uint64_t mask=0;bool first=true;char k[80],version[64];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,12);if(f<0)UNKNOWN();SEEN(f);switch(f){case 0:if(!jstring(x,version,sizeof(version)))return false;if(strcmp(version,"musializer.project/v1")){x->error=MUSI_PROJECT_IO_ERROR_SCHEMA;return false;}p->schema_version=MUSI_PROJECT_SCHEMA_VERSION;break;case 1:if(!parse_metadata(x,&p->metadata))return false;break;case 2:if(!parse_audio(x,&p->audio))return false;break;case 3:if(!parse_output(x,&p->output))return false;break;case 4:if(!ju64(x,&p->deterministic_seed))return false;break;case 5:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_count&&!take(x,','))return false;if(p->scene_count>=MUSI_PROJECT_MAX_SCENES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene(x,&p->scenes[p->scene_count++]))return false;}break;case 6:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->cue_count&&!take(x,','))return false;if(p->cue_count>=MUSI_PROJECT_MAX_CUES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_cue(x,&p->cues[p->cue_count++]))return false;}break;case 7:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->analysis_lane_count&&!take(x,','))return false;if(p->analysis_lane_count>=MUSI_PROJECT_MAX_ANALYSIS_LANES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_lane(x,&p->analysis_lanes[p->analysis_lane_count++]))return false;}break;case 8:if(!parse_lyrics(x,&p->lyrics))return false;break;case 9:if(!parse_switches(x,&p->scene_switches))return false;break;case 10:if(!parse_events(x,&p->manual_events))return false;break;case 11:if(!parse_events(x,&p->semantic_events))return false;break;}}
+{static const char*names[]={"schema_version","metadata","audio","output","deterministic_seed","scenes","cues","analysis_lanes","lyrics","scene_switches","manual_events","semantic_events","scene_presets","ascii_image"};uint64_t mask=0;bool first=true;char k[80],version[64];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,14);if(f<0)UNKNOWN();SEEN(f);switch(f){case 0:if(!jstring(x,version,sizeof(version)))return false;if(strcmp(version,"musializer.project/v1")){x->error=MUSI_PROJECT_IO_ERROR_SCHEMA;return false;}p->schema_version=MUSI_PROJECT_SCHEMA_VERSION;break;case 1:if(!parse_metadata(x,&p->metadata))return false;break;case 2:if(!parse_audio(x,&p->audio))return false;break;case 3:if(!parse_output(x,&p->output))return false;break;case 4:if(!ju64(x,&p->deterministic_seed))return false;break;case 5:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_count&&!take(x,','))return false;if(p->scene_count>=MUSI_PROJECT_MAX_SCENES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene(x,&p->scenes[p->scene_count++]))return false;}break;case 6:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->cue_count&&!take(x,','))return false;if(p->cue_count>=MUSI_PROJECT_MAX_CUES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_cue(x,&p->cues[p->cue_count++]))return false;}break;case 7:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->analysis_lane_count&&!take(x,','))return false;if(p->analysis_lane_count>=MUSI_PROJECT_MAX_ANALYSIS_LANES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_lane(x,&p->analysis_lanes[p->analysis_lane_count++]))return false;}break;case 8:if(!parse_lyrics(x,&p->lyrics))return false;break;case 9:if(!parse_switches(x,&p->scene_switches))return false;break;case 10:if(!parse_events(x,&p->manual_events))return false;break;case 11:if(!parse_events(x,&p->semantic_events))return false;break;case 12:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_preset_count&&!take(x,','))return false;if(p->scene_preset_count>=MUSI_PROJECT_MAX_SCENE_PRESETS){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene_preset(x,&p->scene_presets[p->scene_preset_count++]))return false;}break;case 13:if(!parse_ascii_image(x,&p->ascii_image))return false;break;}}
  if((mask&UINT64_C(0xff))!=UINT64_C(0xff)){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}p->lyrics.duration_seconds=p->audio.duration_seconds;return true;}
 
 Musi_Project_Io_Result musi_project_json_serialize(const Musi_Project*p,char*out,size_t cap,size_t*required)
@@ -679,6 +691,48 @@ Musi_Project_Stored_Path_Result musi_project_asset_path_for_storage(
     return result;
 }
 
+Musi_Project_Path_Result musi_project_resolve_bundled_asset_path(
+    const char *project_path, const char *asset_path,
+    char *resolved, size_t capacity)
+{
+    if (project_path == NULL || project_path[0] == '\0' ||
+        asset_path == NULL || resolved == NULL || capacity == 0) {
+        return MUSI_PROJECT_PATH_ERROR_NULL;
+    }
+    if (!project_relative_path_is_unambiguous(asset_path)) {
+        return MUSI_PROJECT_PATH_ERROR_NOT_FOUND;
+    }
+    size_t temporary_capacity = strlen(project_path) + strlen(asset_path) + 4u;
+    char *temporary = malloc(temporary_capacity);
+    if (temporary == NULL) return MUSI_PROJECT_PATH_ERROR_TOO_LONG;
+    Musi_Project_Path_Result result = musi_project_resolve_asset_path(
+        project_path, asset_path, temporary, temporary_capacity);
+    if (result != MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE) {
+        free(temporary);
+        return result == MUSI_PROJECT_PATH_ERROR_TOO_LONG ? result :
+               MUSI_PROJECT_PATH_ERROR_NOT_FOUND;
+    }
+    char *canonical_asset = project_canonicalize_existing_file_alloc(temporary);
+    char *directory = project_directory_copy(project_path);
+    char *canonical_directory = directory == NULL ? NULL :
+        project_canonicalize_existing_directory_alloc(directory);
+    char *relative = canonical_asset == NULL || canonical_directory == NULL ? NULL :
+        project_relative_descendant_path(canonical_directory, canonical_asset);
+    if (relative == NULL || strcmp(relative, asset_path) != 0) {
+        result = MUSI_PROJECT_PATH_ERROR_NOT_FOUND;
+    } else {
+        result = project_copy_resolved_path(
+            canonical_asset, MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE,
+            resolved, capacity);
+    }
+    free(relative);
+    free(canonical_directory);
+    free(directory);
+    free(canonical_asset);
+    free(temporary);
+    return result;
+}
+
 const char *musi_project_stored_path_result_string(
     Musi_Project_Stored_Path_Result result)
 {
@@ -802,7 +856,7 @@ static uint64_t project_next_transaction_nonce(void)
 }
 
 #ifndef _WIN32
-static void project_sync_parent_directory(const char *destination)
+static bool project_sync_parent_directory(const char *destination)
 {
     const char *separator = project_last_separator(destination);
     size_t length = separator == NULL ? 1u :
@@ -814,7 +868,7 @@ static void project_sync_parent_directory(const char *destination)
         length = 1;
     }
     char *directory = malloc(length + 1u);
-    if (directory == NULL) return;
+    if (directory == NULL) return false;
     memcpy(directory, source, length);
     directory[length] = '\0';
 
@@ -825,14 +879,21 @@ static void project_sync_parent_directory(const char *destination)
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
 #endif
-    int directory_fd = open(directory, flags);
+    int directory_fd;
+    do {
+        directory_fd = open(directory, flags);
+    } while (directory_fd < 0 && errno == EINTR);
+    bool ok = directory_fd >= 0;
     if (directory_fd >= 0) {
-        // Some filesystems reject directory fsync with EINVAL/ENOTSUP.  The
-        // data file is already durable and atomically published in that case.
-        (void)fsync(directory_fd);
-        (void)close(directory_fd);
+        while (fsync(directory_fd) != 0) {
+            if (errno == EINTR) continue;
+            ok = false;
+            break;
+        }
+        if (close(directory_fd) != 0) ok = false;
     }
     free(directory);
+    return ok;
 }
 #endif
 
@@ -975,15 +1036,344 @@ Musi_Project_File_Result musi_project_atomic_write(
         rename(temporary, destination) != 0) {
         result = MUSI_PROJECT_FILE_ERROR_PUBLISH;
     }
-    if (result == MUSI_PROJECT_FILE_OK) {
-        project_sync_parent_directory(destination);
-    } else {
+    if (result == MUSI_PROJECT_FILE_OK &&
+        !project_sync_parent_directory(destination)) {
+        result = MUSI_PROJECT_FILE_ERROR_DURABILITY;
+    }
+    if (result != MUSI_PROJECT_FILE_OK &&
+        result != MUSI_PROJECT_FILE_ERROR_DURABILITY) {
         (void)unlink(temporary);
     }
 #endif
 
     free(temporary);
     return result;
+}
+
+static bool project_sha256_text_valid(const char *value)
+{
+    if (value == NULL) return false;
+    for (size_t index = 0; index < 64; ++index) {
+        char character = value[index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) return false;
+    }
+    return value[64] == '\0';
+}
+
+static bool project_ensure_directory(const char *path)
+{
+#ifdef _WIN32
+    wchar_t *wide = project_utf8_to_wide(path);
+    if (wide == NULL) return false;
+    bool ok = CreateDirectoryW(wide, NULL) != 0;
+    if (!ok && GetLastError() == ERROR_ALREADY_EXISTS) {
+        DWORD attributes = GetFileAttributesW(wide);
+        ok = attributes != INVALID_FILE_ATTRIBUTES &&
+             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+             (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+    }
+    free(wide);
+    return ok;
+#else
+    if (mkdir(path, 0777) == 0) return true;
+    if (errno != EEXIST) return false;
+    struct stat status;
+    return lstat(path, &status) == 0 && S_ISDIR(status.st_mode);
+#endif
+}
+
+static size_t project_safe_extension(const char *path, char output[18])
+{
+    const char *name = project_last_separator(path);
+    name = name == NULL ? path : name + 1;
+    const char *dot = strrchr(name, '.');
+    if (dot == NULL || dot == name) return 0;
+    size_t length = strlen(dot);
+    if (length < 2 || length >= 18) return 0;
+    output[0] = '.';
+    for (size_t index = 1; index < length; ++index) {
+        char character = dot[index];
+        if (character >= 'A' && character <= 'Z') {
+            character = (char)(character - 'A' + 'a');
+        }
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9'))) return 0;
+        output[index] = character;
+    }
+    output[length] = '\0';
+    return length;
+}
+
+static bool project_bundle_paths(
+    const char *project_path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *sha256,
+    char *stored_path, size_t stored_capacity,
+    char *runtime_path, size_t runtime_capacity,
+    char **root_directory, char **category_directory)
+{
+    const char *separator = project_last_separator(project_path);
+    const char *filename = separator == NULL ? project_path : separator + 1;
+    const char *dot = strrchr(filename, '.');
+    if (dot == NULL || dot == filename) return false;
+    size_t stem_length = (size_t)(dot - filename);
+    if (stem_length > INT_MAX) return false;
+    const char *category_name = category == MUSI_PROJECT_ASSET_AUDIO ?
+                                "audio" : "images";
+    char extension[18] = {0};
+    (void)project_safe_extension(source_path, extension);
+    int stored_length = snprintf(
+        stored_path, stored_capacity, "%.*s.assets/%s/%s%s",
+        (int)stem_length, filename, category_name, sha256, extension);
+    if (stored_length <= 0 || (size_t)stored_length >= stored_capacity) return false;
+
+    size_t directory_length = separator == NULL ? 1u :
+                              (size_t)(separator - project_path);
+    const char *directory = separator == NULL ? "." : project_path;
+    if (separator != NULL && directory_length == 0) directory_length = 1;
+    bool has_separator = directory_length > 0 &&
+        project_path_character_is_separator(directory[directory_length - 1]);
+    int runtime_length = snprintf(
+        runtime_path, runtime_capacity, "%.*s%s%s",
+        (int)directory_length, directory, has_separator ? "" : "/", stored_path);
+    if (runtime_length <= 0 || (size_t)runtime_length >= runtime_capacity) return false;
+
+    size_t root_length = directory_length + (has_separator ? 0u : 1u) +
+                         stem_length + strlen(".assets");
+    size_t category_length = root_length + 1u + strlen(category_name);
+    char *root = malloc(root_length + 1u);
+    char *child = malloc(category_length + 1u);
+    if (root == NULL || child == NULL) {
+        free(root);
+        free(child);
+        return false;
+    }
+    snprintf(root, root_length + 1u, "%.*s%s%.*s.assets",
+             (int)directory_length, directory, has_separator ? "" : "/",
+             (int)stem_length, filename);
+    snprintf(child, category_length + 1u, "%s/%s", root, category_name);
+    *root_directory = root;
+    *category_directory = child;
+    return true;
+}
+
+static bool project_hash_matches(const char *path, const char *expected)
+{
+    char actual[SHA256_HEX_SIZE];
+    return sha256_file_hex(path, actual) && strcmp(actual, expected) == 0;
+}
+
+static Musi_Project_Bundle_Result project_copy_asset_transaction(
+    const char *source, const char *destination, const char *expected_sha256)
+{
+    if (project_regular_file_exists(destination)) {
+        return project_hash_matches(destination, expected_sha256) ?
+               MUSI_PROJECT_BUNDLE_OK : MUSI_PROJECT_BUNDLE_ERROR_COLLISION;
+    }
+    size_t destination_length = strlen(destination);
+    if (destination_length > SIZE_MAX - 96u) return MUSI_PROJECT_BUNDLE_ERROR_PATH;
+    size_t temporary_capacity = destination_length + 96u;
+    char *temporary = malloc(temporary_capacity);
+    if (temporary == NULL) return MUSI_PROJECT_BUNDLE_ERROR_PATH;
+    temporary[0] = '\0';
+    Musi_Project_Bundle_Result result = MUSI_PROJECT_BUNDLE_ERROR_COPY;
+
+#ifdef _WIN32
+    wchar_t *wide_source = project_utf8_to_wide(source);
+    wchar_t *wide_destination = project_utf8_to_wide(destination);
+    wchar_t *wide_temporary = NULL;
+    bool copied = false;
+    if (wide_source == NULL || wide_destination == NULL) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_PATH;
+    }
+    for (unsigned attempt = 0;
+         wide_source != NULL && wide_destination != NULL &&
+         attempt < 256u && !copied;
+         ++attempt) {
+        if (!musi_project_temporary_path(
+                destination, musi_project_process_id(),
+                project_next_transaction_nonce(), temporary,
+                temporary_capacity)) break;
+        free(wide_temporary);
+        wide_temporary = project_utf8_to_wide(temporary);
+        if (wide_temporary == NULL) break;
+        copied = CopyFileW(wide_source, wide_temporary, TRUE) != 0;
+        if (!copied && GetLastError() != ERROR_FILE_EXISTS) break;
+    }
+    if (!copied && result != MUSI_PROJECT_BUNDLE_ERROR_PATH) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_COPY;
+    } else if (copied) {
+        HANDLE file = CreateFileW(wide_temporary, GENERIC_READ | GENERIC_WRITE,
+                                  0, NULL, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                                  NULL);
+        if (file == INVALID_HANDLE_VALUE || !FlushFileBuffers(file)) {
+            result = MUSI_PROJECT_BUNDLE_ERROR_SYNC;
+        } else if (!CloseHandle(file)) {
+            file = INVALID_HANDLE_VALUE;
+            result = MUSI_PROJECT_BUNDLE_ERROR_SYNC;
+        } else if (!project_hash_matches(temporary, expected_sha256)) {
+            file = INVALID_HANDLE_VALUE;
+            result = MUSI_PROJECT_BUNDLE_ERROR_IDENTITY;
+        } else if (MoveFileExW(wide_temporary, wide_destination,
+                               MOVEFILE_WRITE_THROUGH)) {
+            file = INVALID_HANDLE_VALUE;
+            result = MUSI_PROJECT_BUNDLE_OK;
+        } else {
+            file = INVALID_HANDLE_VALUE;
+            result = project_regular_file_exists(destination) ?
+                     (project_hash_matches(destination, expected_sha256) ?
+                      MUSI_PROJECT_BUNDLE_OK :
+                      MUSI_PROJECT_BUNDLE_ERROR_COLLISION) :
+                     MUSI_PROJECT_BUNDLE_ERROR_PUBLISH;
+        }
+        if (file != INVALID_HANDLE_VALUE) (void)CloseHandle(file);
+    }
+    if (wide_temporary != NULL) (void)DeleteFileW(wide_temporary);
+    free(wide_temporary);
+    free(wide_destination);
+    free(wide_source);
+#else
+    int input = -1;
+    int output = -1;
+    do {
+        input = open(source, O_RDONLY
+#ifdef O_CLOEXEC
+                     | O_CLOEXEC
+#endif
+        );
+    } while (input < 0 && errno == EINTR);
+    if (input < 0) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+        goto bundle_posix_cleanup;
+    }
+    for (unsigned attempt = 0; attempt < 256u; ++attempt) {
+        if (!musi_project_temporary_path(
+                destination, musi_project_process_id(),
+                project_next_transaction_nonce(), temporary,
+                temporary_capacity)) break;
+        output = open(temporary, O_WRONLY | O_CREAT | O_EXCL
+#ifdef O_CLOEXEC
+                      | O_CLOEXEC
+#endif
+                      , 0666);
+        if (output >= 0 || errno != EEXIST) break;
+    }
+    if (output < 0) goto bundle_posix_cleanup;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) goto bundle_posix_cleanup;
+        if (count == 0) break;
+        size_t offset = 0;
+        while (offset < (size_t)count) {
+            ssize_t written = write(output, buffer + offset,
+                                    (size_t)count - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) goto bundle_posix_cleanup;
+            offset += (size_t)written;
+        }
+    }
+    while (fsync(output) != 0) {
+        if (errno == EINTR) continue;
+        result = MUSI_PROJECT_BUNDLE_ERROR_SYNC;
+        goto bundle_posix_cleanup;
+    }
+    if (close(output) != 0) {
+        output = -1;
+        result = MUSI_PROJECT_BUNDLE_ERROR_SYNC;
+        goto bundle_posix_cleanup;
+    }
+    output = -1;
+    if (close(input) != 0) {
+        input = -1;
+        result = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+        goto bundle_posix_cleanup;
+    }
+    input = -1;
+    if (!project_hash_matches(temporary, expected_sha256)) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_IDENTITY;
+        goto bundle_posix_cleanup;
+    }
+    if (link(temporary, destination) != 0) {
+        if (errno == EEXIST) {
+            result = project_hash_matches(destination, expected_sha256) ?
+                     MUSI_PROJECT_BUNDLE_OK :
+                     MUSI_PROJECT_BUNDLE_ERROR_COLLISION;
+        } else {
+            result = MUSI_PROJECT_BUNDLE_ERROR_PUBLISH;
+        }
+        goto bundle_posix_cleanup;
+    }
+    if (!project_sync_parent_directory(destination)) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_SYNC;
+        goto bundle_posix_cleanup;
+    }
+    result = MUSI_PROJECT_BUNDLE_OK;
+bundle_posix_cleanup:
+    if (output >= 0) (void)close(output);
+    if (input >= 0) (void)close(input);
+    if (temporary[0] != '\0') (void)unlink(temporary);
+#endif
+    free(temporary);
+    return result;
+}
+
+Musi_Project_Bundle_Result musi_project_bundle_asset(
+    const char *project_path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *expected_sha256,
+    char *stored_path, size_t stored_capacity,
+    char *runtime_path, size_t runtime_capacity)
+{
+    if (project_path == NULL || project_path[0] == '\0' ||
+        source_path == NULL || source_path[0] == '\0' ||
+        !project_sha256_text_valid(expected_sha256) || stored_path == NULL ||
+        stored_capacity == 0 || runtime_path == NULL || runtime_capacity == 0 ||
+        (category != MUSI_PROJECT_ASSET_AUDIO &&
+         category != MUSI_PROJECT_ASSET_IMAGE)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_ARGUMENT;
+    }
+    if (!project_regular_file_exists(source_path) ||
+        !project_hash_matches(source_path, expected_sha256)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+    }
+    char *root = NULL;
+    char *child = NULL;
+    if (!project_bundle_paths(
+            project_path, category, source_path, expected_sha256,
+            stored_path, stored_capacity, runtime_path, runtime_capacity,
+            &root, &child)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_PATH;
+    }
+    Musi_Project_Bundle_Result result = MUSI_PROJECT_BUNDLE_OK;
+    if (!project_ensure_directory(root) || !project_ensure_directory(child)) {
+        result = MUSI_PROJECT_BUNDLE_ERROR_DIRECTORY;
+    } else {
+        result = project_copy_asset_transaction(
+            source_path, runtime_path, expected_sha256);
+    }
+    free(child);
+    free(root);
+    return result;
+}
+
+const char *musi_project_bundle_result_string(Musi_Project_Bundle_Result result)
+{
+    static const char *names[] = {
+        "ok",
+        "invalid bundle argument",
+        "asset bundle path is too long or malformed",
+        "asset bundle directory could not be created",
+        "source asset is missing or changed identity",
+        "asset could not be copied completely",
+        "asset copy could not be made durable",
+        "copied asset did not match its expected SHA-256",
+        "content-addressed destination contains different data",
+        "asset could not be published",
+    };
+    return result >= 0 && (size_t)result < sizeof(names)/sizeof(names[0]) ?
+           names[result] : "unknown project bundle result";
 }
 
 const char *musi_project_file_result_string(Musi_Project_File_Result result)
@@ -998,6 +1388,7 @@ const char *musi_project_file_result_string(Musi_Project_File_Result result)
         "could not flush the project to storage",
         "could not close the project transaction",
         "could not atomically publish the project",
+        "project was published but parent-directory durability was not confirmed",
     };
     return result >= 0 && (size_t)result < sizeof(names)/sizeof(names[0])
                ? names[result] : "unknown project file result";

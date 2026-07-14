@@ -91,14 +91,10 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 
 #define FONT_SIZE 64
 #define SAMPLE_RING_CAPACITY (1u << 14)
-#define ASCII_GRID_MAX_COLUMNS 96
-#define ASCII_GRID_MAX_ROWS 54
-#define ASCII_GRID_MAX_CELLS (ASCII_GRID_MAX_COLUMNS*ASCII_GRID_MAX_ROWS)
-
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 19
+#define PLUG_STATE_VERSION 23
 
 #define COLOR_ACCENT                  GetColor(0x002FA7FF)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -136,21 +132,31 @@ typedef struct {
     char *file_path;
     Music music;
     double duration_seconds;
+    bool transport_seekable;
     Lyrics_Document lyrics;
     Scene_Switch_Timeline scene_switches;
     Event_Timeline semantic_events;
     Event_Timeline manual_events;
     uint64_t next_manual_event_id;
     Scene_Id base_scene;
+    Scene_Id previous_base_scene;
+    bool scene_selection_pending;
     uint64_t scene_seed;
     uint64_t scene_instance_id;
     Render_Export_Config render_config;
     Track_Timeline_Waveform timeline_waveform;
     Song_Atlas_Map song_atlas_map;
+    bool song_atlas_map_attempted;
     Scene_Settings scene_settings;
+    Scene_Settings playback_scene_settings;
+    bool cue_settings_active;
+    Scene_Settings_Preset_Library scene_presets;
+    size_t selected_scene_preset[SCENE_SETTINGS_SCENE_COUNT];
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;
+    char ascii_image_path[PLUG_RELOAD_PATH_CAPACITY];
+    char ascii_image_sha256[SHA256_HEX_SIZE];
     char project_path[PLUG_RELOAD_PATH_CAPACITY];
     Musi_Project_Metadata project_metadata;
     bool project_metadata_initialized;
@@ -185,6 +191,8 @@ typedef enum {
 } UI_Icon;
 
 static_assert(COUNT_UI_ICONS == 5, "Amount of icons changed");
+static_assert((int)COUNT_SCENES == (int)SCENE_SETTINGS_SCENE_COUNT,
+              "Scene settings registry must match the scene registry");
 static const char *icon_file_paths[COUNT_UI_ICONS] = {
     [UI_ICON_FULLSCREEN] = "./resources/icons/fullscreen.png",
     [UI_ICON_VOLUME]     = "./resources/icons/volume.png",
@@ -240,6 +248,9 @@ typedef struct {
     AudioAnalyzer analyzer;
     SampleRing sample_ring;
     SampleFrame sample_ring_storage[SAMPLE_RING_CAPACITY];
+    bool timeline_scrubbing;
+    bool timeline_scrub_restore_playing;
+    double timeline_scrub_seconds;
 
     // Scene engine
     Scene_Instance scene;
@@ -256,6 +267,8 @@ typedef struct {
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;
+    char ascii_image_path[PLUG_RELOAD_PATH_CAPACITY];
+    char ascii_image_sha256[SHA256_HEX_SIZE];
     Event_Timeline event_timeline;
     Event_Timeline event_undo;
     bool event_undo_available;
@@ -501,6 +514,7 @@ static void start_preview_track(Track *track)
     p->scene_frame_index = 0;
     p->scene_clock_initialized = false;
     scene_switch_reset(&track->scene_switches);
+    track->cue_settings_active = false;
     // Fill both processed halves before the device starts consuming them. This
     // avoids making the first rendered frame race an initially silent stream.
     UpdateMusicStream(track->music);
@@ -529,6 +543,7 @@ static void load_timeline_waveform(Track *track)
     if (track == NULL || track->file_path == NULL) return;
     memset(&track->timeline_waveform, 0, sizeof(track->timeline_waveform));
     memset(&track->song_atlas_map, 0, sizeof(track->song_atlas_map));
+    track->song_atlas_map_attempted = false;
 
     Wave wave = LoadWave(track->file_path);
     if (!IsWaveValid(wave)) {
@@ -542,15 +557,48 @@ static void load_timeline_waveform(Track *track)
             samples, (size_t)wave.frameCount, (size_t)wave.channels,
             track->timeline_waveform.bins,
             NOB_ARRAY_LEN(track->timeline_waveform.bins));
-        if (song_atlas_map_build(
-                samples, (size_t)wave.frameCount, (size_t)wave.channels,
-                wave.sampleRate, &track->song_atlas_map) == 0) {
-            TraceLog(LOG_WARNING, "ATLAS: whole-song map could not be prepared for %s",
-                     track->file_path);
-        }
         UnloadWaveSamples(samples);
     }
     UnloadWave(wave);
+}
+
+static bool ensure_song_atlas_map(Track *track)
+{
+    if (track == NULL) return false;
+    if (song_atlas_map_valid(&track->song_atlas_map)) return true;
+    if (track->song_atlas_map_attempted) return false;
+    track->song_atlas_map_attempted = true;
+
+    bool resume_preview = IsMusicStreamPlaying(track->music);
+    if (resume_preview) PauseMusicStream(track->music);
+    Wave wave = LoadWave(track->file_path);
+    float *samples = IsWaveValid(wave) ? LoadWaveSamples(wave) : NULL;
+    bool prepared = samples != NULL && song_atlas_map_build(
+        samples, (size_t)wave.frameCount, (size_t)wave.channels,
+        wave.sampleRate, &track->song_atlas_map) > 0;
+    if (samples != NULL) UnloadWaveSamples(samples);
+    if (IsWaveValid(wave)) UnloadWave(wave);
+    if (resume_preview) {
+        UpdateMusicStream(track->music);
+        ResumeMusicStream(track->music);
+    }
+    if (!prepared) {
+        TraceLog(LOG_WARNING, "ATLAS: whole-song map could not be prepared for %s",
+                 track->file_path);
+    }
+    return prepared;
+}
+
+static bool track_uses_song_atlas(const Track *track)
+{
+    if (track == NULL) return false;
+    if (track->base_scene == SCENE_SONG_ATLAS) return true;
+    if (!track->scene_switches.enabled) return false;
+    for (size_t index = 0; index < track->scene_switches.count; ++index) {
+        if (track->scene_switches.cues[index].scene_index ==
+            (uint32_t)SCENE_SONG_ATLAS) return true;
+    }
+    return false;
 }
 
 MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
@@ -598,6 +646,8 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     new_track->file_path = owned_path;
     new_track->music = music;
     new_track->duration_seconds = decoded_duration;
+    new_track->transport_seekable =
+        track_timeline_path_is_seekable(canonical_path);
     if (!sha256_file_hex(canonical_path, new_track->audio_sha256)) {
         // Saving can retry this non-fatal identity calculation, but doing it
         // before first playback normally keeps whole-file I/O out of autosave.
@@ -609,9 +659,12 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     event_timeline_init(&new_track->manual_events);
     new_track->next_manual_event_id = 1;
     new_track->base_scene = initial_scene;
+    new_track->previous_base_scene = initial_scene;
     new_track->scene_seed = initial_scene_seed;
     new_track->scene_instance_id = 1;
     scene_settings_init(&new_track->scene_settings);
+    new_track->playback_scene_settings = new_track->scene_settings;
+    scene_settings_preset_library_init(&new_track->scene_presets);
     new_track->render_config = p->render_config;
     load_timeline_waveform(new_track);
     if (resume_active_preview) {
@@ -623,8 +676,16 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
                p->ascii_columns*p->ascii_rows*sizeof(p->ascii_cells[0]));
         new_track->ascii_columns = p->ascii_columns;
         new_track->ascii_rows = p->ascii_rows;
+        snprintf(new_track->ascii_image_path,
+                 sizeof(new_track->ascii_image_path), "%s",
+                 p->ascii_image_path);
+        snprintf(new_track->ascii_image_sha256,
+                 sizeof(new_track->ascii_image_sha256), "%s",
+                 p->ascii_image_sha256);
         p->ascii_columns = 0;
         p->ascii_rows = 0;
+        p->ascii_image_path[0] = '\0';
+        p->ascii_image_sha256[0] = '\0';
     }
     p->tracks.count += 1;
 
@@ -643,46 +704,76 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     return true;
 }
 
-MUSIALIZER_PLUG bool plug_load_ascii_image(const char *file_path)
+static bool load_ascii_image_grid(const char *file_path, AsciiCell *destination,
+                                  size_t capacity, size_t *columns,
+                                  size_t *rows)
 {
-    if (file_path == NULL || file_path[0] == '\0') return false;
-
+    if (file_path == NULL || destination == NULL || columns == NULL ||
+        rows == NULL || capacity < ASCII_GRID_MAX_CELLS) return false;
     Image image = LoadImage(file_path);
     if (!IsImageValid(image)) return false;
     ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
 
-    size_t columns = 0;
-    size_t rows = 0;
+    size_t staged_columns = 0;
+    size_t staged_rows = 0;
     if (!ascii_art_fit_grid_dimensions(
             (size_t)image.width, (size_t)image.height,
             ASCII_GRID_MAX_COLUMNS, ASCII_GRID_MAX_ROWS,
-            &columns, &rows)) {
+            &staged_columns, &staged_rows)) {
         UnloadImage(image);
         return false;
     }
-
-    Track *track = current_track();
-    AsciiCell *destination = track != NULL ? track->ascii_cells : p->ascii_cells;
     bool converted = ascii_art_convert_rgba8(
         image.data,
         (size_t)image.width,
         (size_t)image.height,
-        columns,
-        rows,
+        staged_columns,
+        staged_rows,
         destination,
-        ASCII_GRID_MAX_CELLS);
+        capacity);
     UnloadImage(image);
     if (!converted) return false;
+    *columns = staged_columns;
+    *rows = staged_rows;
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_load_ascii_image(const char *file_path)
+{
+    if (file_path == NULL || file_path[0] == '\0') return false;
+
+    char canonical_path[PLUG_RELOAD_PATH_CAPACITY];
+    char image_sha256[SHA256_HEX_SIZE];
+    if (musi_project_canonicalize_existing_file(
+            file_path, canonical_path, sizeof(canonical_path)) !=
+            MUSI_PROJECT_PATH_RESOLVED_ABSOLUTE ||
+        !sha256_file_hex(canonical_path, image_sha256)) return false;
+
+    Track *track = current_track();
+    AsciiCell *destination = track != NULL ? track->ascii_cells : p->ascii_cells;
+    size_t columns = 0;
+    size_t rows = 0;
+    if (!load_ascii_image_grid(canonical_path, destination,
+                               ASCII_GRID_MAX_CELLS, &columns, &rows)) return false;
 
     if (track != NULL) {
         track->ascii_columns = columns;
         track->ascii_rows = rows;
+        snprintf(track->ascii_image_path, sizeof(track->ascii_image_path),
+                 "%s", canonical_path);
+        snprintf(track->ascii_image_sha256,
+                 sizeof(track->ascii_image_sha256), "%s", image_sha256);
         mark_project_dirty(track);
     } else {
         p->ascii_columns = columns;
         p->ascii_rows = rows;
+        snprintf(p->ascii_image_path, sizeof(p->ascii_image_path),
+                 "%s", canonical_path);
+        snprintf(p->ascii_image_sha256, sizeof(p->ascii_image_sha256),
+                 "%s", image_sha256);
     }
-    TraceLog(LOG_INFO, "ASCII: imported %s as %zux%zu glyphs", file_path, columns, rows);
+    TraceLog(LOG_INFO, "ASCII: imported %s as %zux%zu glyphs",
+             canonical_path, columns, rows);
     return true;
 }
 
@@ -713,6 +804,19 @@ static bool scene_id_from_name(const char *name, Scene_Id *result)
     return true;
 }
 
+static void track_select_base_scene(Track *track, Scene_Id scene)
+{
+    if (track == NULL) return;
+    if (track->base_scene != scene) {
+        track->previous_base_scene = track->base_scene;
+        track->scene_selection_pending = true;
+    }
+    track->base_scene = scene;
+    track->scene_switches.enabled = false;
+    scene_switch_reset(&track->scene_switches);
+    track->cue_settings_active = false;
+}
+
 MUSIALIZER_PLUG bool plug_select_scene(const char *name)
 {
     Scene_Id id;
@@ -722,9 +826,7 @@ MUSIALIZER_PLUG bool plug_select_scene(const char *name)
     bool selected = scene_instance_select(&p->scene, id, scene_seed_for_track(track));
     if (selected) {
         if (track != NULL) {
-            track->base_scene = id;
-            track->scene_switches.enabled = false;
-            scene_switch_reset(&track->scene_switches);
+            track_select_base_scene(track, id);
         }
         mark_project_dirty(track);
     }
@@ -750,11 +852,54 @@ static void apply_auto_scene_switch(Track *track, double time_seconds)
 {
     if (track == NULL) return;
     uint32_t scene_index = 0;
-    if (scene_switch_update(&track->scene_switches, time_seconds, &scene_index) !=
-        SCENE_SWITCH_OK) return;
+    Scene_Switch_Result result = scene_switch_update(
+        &track->scene_switches, time_seconds, &scene_index);
+    if (result != SCENE_SWITCH_OK) {
+        if (!track->scene_switches.enabled) track->cue_settings_active = false;
+        return;
+    }
     Scene_Id scene = (Scene_Id)scene_index;
-    if (scene < COUNT_SCENES && p->scene.id != scene) {
+    if (scene >= COUNT_SCENES ||
+        track->scene_switches.active_index >= track->scene_switches.count) return;
+    const Scene_Switch_Cue *cue =
+        &track->scene_switches.cues[track->scene_switches.active_index];
+    track->playback_scene_settings = track->scene_settings;
+    track->cue_settings_active = cue->settings.captured &&
+        scene_settings_apply_snapshot(
+            &track->playback_scene_settings, scene, &cue->settings);
+    if (p->scene.id != scene) {
         scene_instance_select(&p->scene, scene, track->scene_seed);
+    }
+}
+
+static Scene_Settings *track_effective_scene_settings(Track *track)
+{
+    if (track == NULL) return &p->scene_settings;
+    return track->cue_settings_active ? &track->playback_scene_settings :
+                                        &track->scene_settings;
+}
+
+static void capture_missing_scene_cue_settings(Track *track)
+{
+    if (track == NULL) return;
+    for (size_t index = 0; index < track->scene_switches.count; ++index) {
+        Scene_Switch_Cue *cue = &track->scene_switches.cues[index];
+        if (!cue->settings.captured) {
+            (void)scene_settings_capture(
+                &track->scene_settings, cue->scene_index, &cue->settings);
+        }
+    }
+}
+
+static void commit_active_cue_settings(Track *track, Scene_Id scene)
+{
+    if (track == NULL || !track->cue_settings_active ||
+        track->scene_switches.active_index >= track->scene_switches.count) return;
+    Scene_Switch_Cue *cue =
+        &track->scene_switches.cues[track->scene_switches.active_index];
+    if (cue->scene_index == (uint32_t)scene) {
+        (void)scene_settings_capture(
+            &track->playback_scene_settings, scene, &cue->settings);
     }
 }
 
@@ -833,7 +978,7 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         .time_seconds = time_seconds,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
-        .settings = track != NULL ? &track->scene_settings : &p->scene_settings,
+        .settings = track_effective_scene_settings(track),
         .semantic = semantic,
         .lyric = lyric,
         .events = combined_scene_events(),
@@ -915,6 +1060,9 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
 {
     Scene_Frame frame = make_scene_frame(spectrum, time_seconds, delta_seconds);
     Track *track = current_track();
+    if (track != NULL && p->scene.id == SCENE_SONG_ATLAS) {
+        (void)ensure_song_atlas_map(track);
+    }
     const AsciiCell *ascii_cells = track != NULL ? track->ascii_cells : p->ascii_cells;
     size_t ascii_columns = track != NULL ? track->ascii_columns : p->ascii_columns;
     size_t ascii_rows = track != NULL ? track->ascii_rows : p->ascii_rows;
@@ -933,7 +1081,7 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
         .ascii_columns = ascii_columns,
         .ascii_rows = ascii_rows,
         .song_atlas_map = track != NULL ? &track->song_atlas_map : NULL,
-        .settings = track != NULL ? &track->scene_settings : &p->scene_settings,
+        .settings = track_effective_scene_settings(track),
         .pixel_scale = pixel_scale,
     };
     scene_instance_update(&p->scene, &frame);
@@ -956,9 +1104,7 @@ static void update_scene_shortcuts(void)
     if (selected != COUNT_SCENES &&
         scene_instance_select(&p->scene, selected, scene_seed_for_track(track))) {
         if (track != NULL) {
-            track->base_scene = selected;
-            track->scene_switches.enabled = false;
-            scene_switch_reset(&track->scene_switches);
+            track_select_base_scene(track, selected);
         }
         mark_project_dirty(track);
     }
@@ -1129,8 +1275,11 @@ static bool save_project_as(Track *track);
 static bool save_project(Track *track, bool show_success);
 static bool open_project_dialog(void);
 static void poll_project_autosave(Track *track);
-static void track_set_analysis_lane(Track *track, Musi_Analysis_Lane_Kind kind,
-                                    const char *path, const char *model);
+static bool stage_candidate_analysis_lanes(
+    const Track *track, const Analysis_Candidate *candidate,
+    const char *path, bool imported_bridge,
+    Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES],
+    size_t *staged_count, char staged_audio_sha256[SHA256_HEX_SIZE]);
 
 static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
 {
@@ -1366,10 +1515,60 @@ static void record_timeline_event(Track *track, uint32_t type)
                     "The event is invalid or the 1024-event lane is full.", NULL, true);
         return;
     }
-    if (p->scene.id != SCENE_CONSTELLATION) {
-        scene_instance_select(&p->scene, SCENE_CONSTELLATION, track->scene_seed);
-        track->base_scene = SCENE_CONSTELLATION;
+}
+
+static void record_scene_cue(Track *track)
+{
+    if (track == NULL || p->scene.id >= COUNT_SCENES) return;
+    double time_seconds = GetMusicTimePlayed(track->music);
+    if (!isfinite(time_seconds) || time_seconds < 0.0 ||
+        time_seconds >= track->duration_seconds) {
+        notice_push(UI_NOTICE_WARNING, "Scene cue was not added",
+                    "Move the playhead before the end of the track.", NULL, false);
+        return;
     }
+    Scene_Settings_Snapshot snapshot;
+    Scene_Settings *settings = track_effective_scene_settings(track);
+    if (!scene_settings_capture(settings, p->scene.id, &snapshot)) {
+        notice_push(UI_NOTICE_ERROR, "Scene cue was not added",
+                    "The selected scene settings are invalid.", NULL, true);
+        return;
+    }
+    Scene_Switch_Timeline staged = track->scene_switches;
+    Scene_Switch_Result result = SCENE_SWITCH_OK;
+    if (staged.count == 0 && time_seconds > 0.001 &&
+        track->scene_selection_pending &&
+        track->previous_base_scene < COUNT_SCENES) {
+        Scene_Settings_Snapshot previous_snapshot;
+        if (!scene_settings_capture(&track->scene_settings,
+                                    track->previous_base_scene,
+                                    &previous_snapshot)) {
+            result = SCENE_SWITCH_ERROR_CUE;
+        } else {
+            result = scene_switch_cue_at(
+                &staged, 0.0, track->duration_seconds,
+                (uint32_t)track->previous_base_scene, COUNT_SCENES,
+                1.0f, &previous_snapshot);
+        }
+    }
+    if (result == SCENE_SWITCH_OK) {
+        result = scene_switch_cue_at(
+            &staged, time_seconds, track->duration_seconds,
+            (uint32_t)p->scene.id, COUNT_SCENES, 1.0f, &snapshot);
+    }
+    if (result != SCENE_SWITCH_OK) {
+        notice_push(UI_NOTICE_ERROR, "Scene cue was not added",
+                    scene_switch_result_string(result), NULL, true);
+        return;
+    }
+    track->scene_switches = staged;
+    track->scene_selection_pending = false;
+    track->cue_settings_active = false;
+    apply_auto_scene_switch(track, time_seconds);
+    mark_project_dirty(track);
+    notice_push(UI_NOTICE_SUCCESS, "Scene cue captured",
+                "The scene and its current tuning will load at this playhead position.",
+                NULL, false);
 }
 
 static void draw_lyric_lane(Rectangle lane, Track *track, float track_length)
@@ -1383,7 +1582,7 @@ static void draw_lyric_lane(Rectangle lane, Track *track, float track_length)
         float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
         DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
                    1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
-        if (lane.height >= 28.0f && i + 1 < track->scene_switches.count) {
+        if (lane.height >= 28.0f && x + 72.0f < lane.x + lane.width) {
             DrawTextEx(ui_font(), scene_stable_name((Scene_Id)cue->scene_index),
                        (Vector2){x + 3.0f, lane.y + 7.0f}, 12.0f, 1.0f,
                        COLOR_UI_MUTED);
@@ -1745,6 +1944,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
             track->scene_switches.enabled = !track->scene_switches.enabled;
             scene_switch_reset(&track->scene_switches);
             if (!track->scene_switches.enabled) {
+                track->cue_settings_active = false;
                 (void)scene_instance_select(&p->scene, track->base_scene,
                                             track->scene_seed);
             }
@@ -2088,17 +2288,25 @@ static void draw_export_panel(Rectangle boundary, Track *track)
 
 static void seek_track_to(Track *track, double seconds)
 {
-    if (track == NULL) return;
+    if (track == NULL || !track->transport_seekable) return;
     double duration = track->duration_seconds;
     double target = track_timeline_seek_relative(0.0, seconds, duration);
+    bool was_playing = IsMusicStreamPlaying(track->music);
+    if (!was_playing) ResumeMusicStream(track->music);
+    StopMusicStream(track->music);
     SeekMusicStream(track->music, (float)target);
+    UpdateMusicStream(track->music);
+    PlayMusicStream(track->music);
+    if (!was_playing) PauseMusicStream(track->music);
+    fft_clean();
     p->scene_clock_initialized = false;
     scene_switch_reset(&track->scene_switches);
+    track->cue_settings_active = false;
 }
 
 static void seek_track_by(Track *track, double delta_seconds)
 {
-    if (track == NULL) return;
+    if (track == NULL || !track->transport_seekable) return;
     double target = track_timeline_seek_relative(
         GetMusicTimePlayed(track->music), delta_seconds,
         track->duration_seconds);
@@ -2153,7 +2361,8 @@ static void draw_track_waveform(Rectangle boundary, const Track *track)
 
 static void update_transport_shortcuts(Track *track)
 {
-    if (track == NULL || p->lyric_text_active) return;
+    if (track == NULL || !track->transport_seekable ||
+        p->lyric_text_active) return;
     int direction = IsKeyPressed(KEY_LEFT) ? -1 :
                     IsKeyPressed(KEY_RIGHT) ? 1 : 0;
     if (direction == 0) return;
@@ -2167,7 +2376,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
 {
     DrawRectangleRec(timeline_boundary, COLOR_TIMELINE_BACKGROUND);
 
-    float played = GetMusicTimePlayed(track->music);
+    float played = p->timeline_scrubbing ? (float)p->timeline_scrub_seconds :
+                                           GetMusicTimePlayed(track->music);
     float len = GetMusicTimeLength(track->music);
     if (len <= 0.0f) return;
 
@@ -2181,7 +2391,7 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         event_button_width*6.0f + margin*6.0f + 112.0f,
         controls_height,
     };
-    const char *labels[6] = {"Lyrics", "Assist", "Export", "+ Feel", "+ Cue", "+ Custom"};
+    const char *labels[6] = {"Lyrics", "Assist", "Export", "+ Feel", "+ Scene", "+ Custom"};
     const uint32_t types[6] = {
         EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
         EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
@@ -2218,6 +2428,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
                     p->assist_panel_open = false;
                     p->lyric_text_active = false;
                 }
+            } else if (!blocked && i == 4) {
+                record_scene_cue(track);
             } else if (!blocked) {
                 record_timeline_event(track, types[i]);
             }
@@ -2284,15 +2496,21 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     for (size_t i = 0; i < NOB_ARRAY_LEN(seek_labels); ++i) {
         float width = i == 0 ? 62.0f : 58.0f;
         Rectangle button = {seek_x, transport.y, width, transport.height};
-        if (text_button(UINT64_C(0x5345454B00000000) + i, button,
-                        seek_labels[i], false) & BS_CLICKED) {
-            if (i == 0) seek_track_to(track, 0.0);
-            else seek_track_by(track, seek_deltas[i]);
-            played = GetMusicTimePlayed(track->music);
+        if (track->transport_seekable) {
+            if (text_button(UINT64_C(0x5345454B00000000) + i, button,
+                            seek_labels[i], false) & BS_CLICKED) {
+                if (i == 0) seek_track_to(track, 0.0);
+                else seek_track_by(track, seek_deltas[i]);
+                played = GetMusicTimePlayed(track->music);
+            }
+        } else {
+            disabled_text_button(button, seek_labels[i], false);
         }
         seek_x += width + margin;
     }
-    const char *shortcut = "Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s";
+    const char *shortcut = track->transport_seekable ?
+        "Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s" :
+        "Precise seeking is unavailable for module audio";
     Vector2 shortcut_size = MeasureTextEx(ui_font(), shortcut, 12.0f, 1.0f);
     if (seek_x + margin + shortcut_size.x < transport.x + transport.width) {
         DrawTextEx(ui_font(), shortcut,
@@ -2389,18 +2607,30 @@ static void timeline(Rectangle timeline_boundary, Track *track)
 
     Vector2 mouse = GetMousePosition();
     const uint64_t drag_id = UINT64_C(0x5345454B44524147);
-    if (p->active_button_id == 0 && CheckCollisionPointRec(mouse, waveform_lane) &&
+    if (track->transport_seekable && p->active_button_id == 0 &&
+        CheckCollisionPointRec(mouse, waveform_lane) &&
         IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         p->active_button_id = drag_id;
+        p->timeline_scrubbing = true;
+        p->timeline_scrub_restore_playing =
+            IsMusicStreamPlaying(track->music);
+        if (p->timeline_scrub_restore_playing) PauseMusicStream(track->music);
     }
     if (p->active_button_id == drag_id) {
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            double target = track_timeline_seek_from_x(
+            p->timeline_scrub_seconds = track_timeline_seek_from_x(
                 GetMusicTimePlayed(track->music), mouse.x, waveform_lane.x,
                 waveform_lane.width, len);
-            seek_track_to(track, target);
         }
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) p->active_button_id = 0;
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            bool restore_playing = p->timeline_scrub_restore_playing;
+            double target = p->timeline_scrub_seconds;
+            p->timeline_scrubbing = false;
+            p->timeline_scrub_restore_playing = false;
+            seek_track_to(track, target);
+            if (restore_playing) ResumeMusicStream(track->music);
+            p->active_button_id = 0;
+        }
     }
 
     // TODO: enable the user to render a specific region instead of the whole song.
@@ -2679,6 +2909,74 @@ static Analysis_Candidate *load_analysis_candidate_for_track(
     return candidate;
 }
 
+static bool stage_candidate_analysis_lanes(
+    const Track *track, const Analysis_Candidate *candidate,
+    const char *path, bool imported_bridge,
+    Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES],
+    size_t *staged_count, char staged_audio_sha256[SHA256_HEX_SIZE])
+{
+    if (track == NULL || candidate == NULL || path == NULL || path[0] == '\0' ||
+        staged == NULL || staged_count == NULL || staged_audio_sha256 == NULL ||
+        strlen(path) >= MUSI_PROJECT_PATH_CAPACITY ||
+        track->analysis_lane_count > MUSI_PROJECT_MAX_ANALYSIS_LANES) return false;
+    if (track->audio_sha256[0] != '\0') {
+        snprintf(staged_audio_sha256, SHA256_HEX_SIZE, "%s",
+                 track->audio_sha256);
+    } else if (!sha256_file_hex(track->file_path, staged_audio_sha256)) {
+        return false;
+    }
+    char artifact_sha256[SHA256_HEX_SIZE];
+    if (!sha256_file_hex(path, artifact_sha256)) return false;
+    memcpy(staged, track->analysis_lanes,
+           track->analysis_lane_count*sizeof(staged[0]));
+    *staged_count = track->analysis_lane_count;
+
+    struct Lane_Request {
+        uint32_t bit;
+        Musi_Analysis_Lane_Kind kind;
+        const char *model;
+    } requests[] = {
+        {ANALYSIS_CANDIDATE_LYRICS, MUSI_LANE_LYRIC_TIMING,
+         imported_bridge ? "imported-bridge" : "whisper-codex"},
+        {ANALYSIS_CANDIDATE_SECTIONS, MUSI_LANE_MEASURED_SIGNAL,
+         imported_bridge ? "imported-bridge" : "measured-sections"},
+        {ANALYSIS_CANDIDATE_SEMANTICS, MUSI_LANE_SEMANTIC_SCORE,
+         imported_bridge ? "imported-bridge" : "xiaomi-mimo-v2.5"},
+    };
+    for (size_t request = 0; request < NOB_ARRAY_LEN(requests); ++request) {
+        if ((candidate->available_lanes & requests[request].bit) == 0) continue;
+        size_t index = *staged_count;
+        for (size_t existing = 0; existing < *staged_count; ++existing) {
+            if (staged[existing].kind == requests[request].kind) {
+                index = existing;
+                break;
+            }
+        }
+        if (index == *staged_count) {
+            if (*staged_count >= MUSI_PROJECT_MAX_ANALYSIS_LANES) return false;
+            ++*staged_count;
+        }
+        Musi_Analysis_Lane_Reference *lane = &staged[index];
+        memset(lane, 0, sizeof(*lane));
+        lane->kind = requests[request].kind;
+        snprintf(lane->path, sizeof(lane->path), "%s", path);
+        snprintf(lane->sha256, sizeof(lane->sha256), "%s", artifact_sha256);
+        snprintf(lane->audio_sha256, sizeof(lane->audio_sha256), "%s",
+                 staged_audio_sha256);
+        snprintf(lane->provenance.adapter, sizeof(lane->provenance.adapter),
+                 "external-analysis");
+        snprintf(lane->provenance.adapter_version,
+                 sizeof(lane->provenance.adapter_version), "1");
+        snprintf(lane->provenance.schema_version,
+                 sizeof(lane->provenance.schema_version), "analysis-bridge-v1");
+        snprintf(lane->provenance.model, sizeof(lane->provenance.model), "%s",
+                 requests[request].model);
+        snprintf(lane->provenance.prompt_version,
+                 sizeof(lane->provenance.prompt_version), "v1");
+    }
+    return true;
+}
+
 static bool apply_candidate_to_track(Analysis_Candidate *candidate, size_t track_index)
 {
     if (candidate == NULL || track_index >= p->tracks.count) return false;
@@ -2721,6 +3019,12 @@ static bool apply_candidate_to_track(Analysis_Candidate *candidate, size_t track
                     analysis_candidate_result_string(applied), NULL, true);
         return false;
     }
+    if ((candidate->available_lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
+        capture_missing_scene_cue_settings(track);
+        track->cue_settings_active = false;
+        track->scene_selection_pending = false;
+        scene_switch_reset(&track->scene_switches);
+    }
     if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0 &&
         track_index == (size_t)p->current_track) {
         lyric_editor_clear_draft();
@@ -2743,21 +3047,24 @@ static bool apply_assist_candidate(void)
                     p->assist_bridge_path, true);
         return false;
     }
+    Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES];
+    size_t staged_count = 0;
+    char staged_audio_sha256[SHA256_HEX_SIZE];
+    if (!stage_candidate_analysis_lanes(
+            track, p->assist_candidate, p->assist_bridge_path, false,
+            staged, &staged_count, staged_audio_sha256)) {
+        notice_push(UI_NOTICE_ERROR, "Suggestions were not applied",
+                    "The evidence artifact or its bounded provenance could not be verified.",
+                    p->assist_bridge_path, true);
+        return false;
+    }
     if (!apply_candidate_to_track(p->assist_candidate,
                                   p->assist_candidate_track_index)) return false;
-    uint32_t lanes = p->assist_candidate->available_lanes;
-    if ((lanes & ANALYSIS_CANDIDATE_LYRICS) != 0) {
-        track_set_analysis_lane(track, MUSI_LANE_LYRIC_TIMING,
-                                p->assist_bridge_path, "whisper-codex");
-    }
-    if ((lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
-        track_set_analysis_lane(track, MUSI_LANE_MEASURED_SIGNAL,
-                                p->assist_bridge_path, "measured-sections");
-    }
-    if ((lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0) {
-        track_set_analysis_lane(track, MUSI_LANE_SEMANTIC_SCORE,
-                                p->assist_bridge_path, "xiaomi-mimo-v2.5");
-    }
+    memcpy(track->analysis_lanes, staged,
+           staged_count*sizeof(track->analysis_lanes[0]));
+    track->analysis_lane_count = staged_count;
+    snprintf(track->audio_sha256, sizeof(track->audio_sha256), "%s",
+             staged_audio_sha256);
     free(p->assist_candidate);
     p->assist_candidate = NULL;
     p->assist_confirmation_pending = false;
@@ -2797,21 +3104,25 @@ MUSIALIZER_PLUG bool plug_load_analysis_bridge(const char *file_path)
     Analysis_Candidate *candidate = load_analysis_candidate_for_track(
         file_path, (size_t)p->current_track, ASSIST_MODE_ALL);
     if (candidate == NULL) return false;
-    bool applied = apply_candidate_to_track(candidate, (size_t)p->current_track);
+    Track *track = current_track();
+    Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES];
+    size_t staged_count = 0;
+    char staged_audio_sha256[SHA256_HEX_SIZE];
+    bool provenance_valid = stage_candidate_analysis_lanes(
+        track, candidate, file_path, true, staged, &staged_count,
+        staged_audio_sha256);
+    bool applied = provenance_valid &&
+        apply_candidate_to_track(candidate, (size_t)p->current_track);
     if (applied) {
-        Track *track = current_track();
-        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_LYRIC_TIMING,
-                                    file_path, "imported-bridge");
-        }
-        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_SECTIONS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_MEASURED_SIGNAL,
-                                    file_path, "imported-bridge");
-        }
-        if ((candidate->available_lanes & ANALYSIS_CANDIDATE_SEMANTICS) != 0) {
-            track_set_analysis_lane(track, MUSI_LANE_SEMANTIC_SCORE,
-                                    file_path, "imported-bridge");
-        }
+        memcpy(track->analysis_lanes, staged,
+               staged_count*sizeof(track->analysis_lanes[0]));
+        track->analysis_lane_count = staged_count;
+        snprintf(track->audio_sha256, sizeof(track->audio_sha256), "%s",
+                 staged_audio_sha256);
+    } else if (!provenance_valid) {
+        notice_push(UI_NOTICE_ERROR, "Analysis bridge was not applied",
+                    "The bridge provenance path or identity is not project-safe.",
+                    file_path, true);
     }
     free(candidate);
     return applied;
@@ -2824,6 +3135,7 @@ MUSIALIZER_PLUG bool plug_set_auto_scenes(bool enabled)
     track->scene_switches.enabled = enabled;
     scene_switch_reset(&track->scene_switches);
     if (!enabled) {
+        track->cue_settings_active = false;
         (void)scene_instance_select(&p->scene, track->base_scene,
                                     track->scene_seed);
     }
@@ -3131,50 +3443,13 @@ static bool cancel_assist_job_blocking(void)
     return finished;
 }
 
-static void track_set_analysis_lane(Track *track, Musi_Analysis_Lane_Kind kind,
-                                    const char *path, const char *model)
-{
-    if (track == NULL || path == NULL || path[0] == '\0' ||
-        kind >= MUSI_LANE_KIND_COUNT) return;
-    if (track->audio_sha256[0] == '\0' &&
-        !sha256_file_hex(track->file_path, track->audio_sha256)) return;
-    char artifact_sha256[SHA256_HEX_SIZE];
-    if (!sha256_file_hex(path, artifact_sha256)) return;
-
-    size_t index = track->analysis_lane_count;
-    for (size_t i = 0; i < track->analysis_lane_count; ++i) {
-        if (track->analysis_lanes[i].kind == kind) {
-            index = i;
-            break;
-        }
-    }
-    if (index == track->analysis_lane_count) {
-        if (track->analysis_lane_count >= MUSI_PROJECT_MAX_ANALYSIS_LANES) return;
-        ++track->analysis_lane_count;
-    }
-    Musi_Analysis_Lane_Reference *lane = &track->analysis_lanes[index];
-    memset(lane, 0, sizeof(*lane));
-    lane->kind = kind;
-    snprintf(lane->path, sizeof(lane->path), "%s", path);
-    snprintf(lane->sha256, sizeof(lane->sha256), "%s", artifact_sha256);
-    snprintf(lane->audio_sha256, sizeof(lane->audio_sha256), "%s",
-             track->audio_sha256);
-    snprintf(lane->provenance.adapter, sizeof(lane->provenance.adapter),
-             "external-analysis");
-    snprintf(lane->provenance.adapter_version,
-             sizeof(lane->provenance.adapter_version), "1");
-    snprintf(lane->provenance.schema_version,
-             sizeof(lane->provenance.schema_version), "analysis-bridge-v1");
-    snprintf(lane->provenance.model, sizeof(lane->provenance.model), "%s",
-             model ? model : "");
-    snprintf(lane->provenance.prompt_version,
-             sizeof(lane->provenance.prompt_version), "v1");
-}
-
 static bool build_project(Track *track, const char *project_path,
+                          const char *stored_audio_path,
+                          const char *stored_ascii_image_path,
                           Musi_Project *project)
 {
     if (track == NULL || project_path == NULL || project_path[0] == '\0' ||
+        stored_audio_path == NULL || stored_audio_path[0] == '\0' ||
         project == NULL) return false;
     musi_project_init(project);
     if (track->audio_sha256[0] == '\0' &&
@@ -3193,18 +3468,30 @@ static bool build_project(Track *track, const char *project_path,
     snprintf(project->metadata.application_version,
              sizeof(project->metadata.application_version), "musializer-2026.07");
 
-    project->audio.mode = MUSI_ASSET_REFERENCED;
-    Musi_Project_Stored_Path_Result stored_path =
-        musi_project_asset_path_for_storage(
-            project_path, track->file_path, project->audio.path,
-            sizeof(project->audio.path));
-    if (stored_path != MUSI_PROJECT_STORED_PATH_RELATIVE &&
-        stored_path != MUSI_PROJECT_STORED_PATH_ABSOLUTE) return false;
+    project->audio.mode = MUSI_ASSET_IMPORTED;
+    if (snprintf(project->audio.path, sizeof(project->audio.path), "%s",
+                 stored_audio_path) >= (int)sizeof(project->audio.path)) return false;
     snprintf(project->audio.sha256, sizeof(project->audio.sha256), "%s",
              track->audio_sha256);
     project->audio.duration_seconds = duration;
     project->audio.sample_rate = track->music.stream.sampleRate;
     project->audio.channels = (uint16_t)track->music.stream.channels;
+
+    if (ascii_art_grid_is_populated(track->ascii_columns, track->ascii_rows)) {
+        if (stored_ascii_image_path == NULL ||
+            stored_ascii_image_path[0] == '\0' ||
+            track->ascii_image_sha256[0] == '\0') return false;
+        project->ascii_image.present = true;
+        if (snprintf(project->ascii_image.path,
+                     sizeof(project->ascii_image.path), "%s",
+                     stored_ascii_image_path) >=
+            (int)sizeof(project->ascii_image.path)) return false;
+        snprintf(project->ascii_image.sha256,
+                 sizeof(project->ascii_image.sha256), "%s",
+                 track->ascii_image_sha256);
+        project->ascii_image.columns = (uint32_t)track->ascii_columns;
+        project->ascii_image.rows = (uint32_t)track->ascii_rows;
+    }
 
     project->output.width = track->render_config.width;
     project->output.height = track->render_config.height;
@@ -3245,8 +3532,33 @@ static bool build_project(Track *track, const char *project_path,
         destination->start_seconds = source->start_seconds;
         destination->end_seconds = source->end_seconds;
         destination->strength = source->strength;
+        destination->setting_count = source->settings.captured ?
+                                     source->settings.count : 0;
+        if (destination->setting_count > 0) {
+            memcpy(destination->settings, source->settings.values,
+                   destination->setting_count*sizeof(destination->settings[0]));
+        }
         snprintf(destination->scene_name, sizeof(destination->scene_name), "%s",
                  scene_stable_name((Scene_Id)source->scene_index));
+    }
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        for (size_t index = 0; index < track->scene_presets.counts[scene]; ++index) {
+            if (project->scene_preset_count >= MUSI_PROJECT_MAX_SCENE_PRESETS) {
+                return false;
+            }
+            const Scene_Settings_Preset *source =
+                &track->scene_presets.items[scene][index];
+            Musi_Scene_Preset *destination =
+                &project->scene_presets[project->scene_preset_count++];
+            destination->id = source->id;
+            destination->setting_count = source->snapshot.count;
+            memcpy(destination->settings, source->snapshot.values,
+                   source->snapshot.count*sizeof(destination->settings[0]));
+            snprintf(destination->scene_name, sizeof(destination->scene_name),
+                     "%s", scene_stable_name((Scene_Id)scene));
+            snprintf(destination->name, sizeof(destination->name), "%s",
+                     source->name);
+        }
     }
     project->analysis_lane_count = track->analysis_lane_count;
     memcpy(project->analysis_lanes, track->analysis_lanes,
@@ -3276,15 +3588,40 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
                     path, true);
         return false;
     }
-    if (ascii_art_grid_is_populated(track->ascii_columns, track->ascii_rows)) {
-        notice_push(UI_NOTICE_ERROR, "Imported ASCII image is not project-portable yet",
-                    "Export video now, or use Clear image in the Scenes panel before saving. Empty ASCII scenes are safe to save.",
-                    path, true);
+    if (track->audio_sha256[0] == '\0' &&
+        !sha256_file_hex(track->file_path, track->audio_sha256)) return false;
+    char stored_audio[MUSI_PROJECT_PATH_CAPACITY];
+    char bundled_audio[PLUG_RELOAD_PATH_CAPACITY];
+    Musi_Project_Bundle_Result audio_bundle = musi_project_bundle_asset(
+        path, MUSI_PROJECT_ASSET_AUDIO, track->file_path, track->audio_sha256,
+        stored_audio, sizeof(stored_audio), bundled_audio, sizeof(bundled_audio));
+    if (audio_bundle != MUSI_PROJECT_BUNDLE_OK) {
+        notice_push(UI_NOTICE_ERROR, "Project audio could not be bundled",
+                    musi_project_bundle_result_string(audio_bundle), path, true);
         return false;
     }
+    char stored_image[MUSI_PROJECT_PATH_CAPACITY] = {0};
+    char bundled_image[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    if (ascii_art_grid_is_populated(track->ascii_columns, track->ascii_rows)) {
+        Musi_Project_Bundle_Result image_bundle = musi_project_bundle_asset(
+            path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
+            track->ascii_image_sha256, stored_image, sizeof(stored_image),
+            bundled_image, sizeof(bundled_image));
+        if (image_bundle != MUSI_PROJECT_BUNDLE_OK) {
+            notice_push(UI_NOTICE_ERROR, "ASCII image could not be bundled",
+                        musi_project_bundle_result_string(image_bundle), path, true);
+            return false;
+        }
+    }
+    char *durable_audio_path = strdup(bundled_audio);
+    if (durable_audio_path == NULL) return false;
     Musi_Project *project = malloc(sizeof(*project));
-    if (project == NULL) return false;
-    if (!build_project(track, path, project)) {
+    if (project == NULL) {
+        free(durable_audio_path);
+        return false;
+    }
+    if (!build_project(track, path, stored_audio, stored_image, project)) {
+        free(durable_audio_path);
         free(project);
         notice_push(UI_NOTICE_ERROR, "Project could not be built",
                     "A track path, authored lane, or output setting is outside the project contract.",
@@ -3296,11 +3633,13 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
         project, NULL, 0, &required);
     if (measured != MUSI_PROJECT_IO_ERROR_OUTPUT_TOO_SMALL ||
         required == 0 || required > INT_MAX) {
+        free(durable_audio_path);
         free(project);
         return false;
     }
     char *json = malloc(required);
     if (json == NULL) {
+        free(durable_audio_path);
         free(project);
         return false;
     }
@@ -3309,6 +3648,7 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
     Musi_Project_Metadata saved_metadata = project->metadata;
     free(project);
     if (encoded != MUSI_PROJECT_IO_OK) {
+        free(durable_audio_path);
         free(json);
         return false;
     }
@@ -3318,15 +3658,28 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
     free(json);
     if (file_result != MUSI_PROJECT_FILE_OK) {
         char detail[UI_NOTICE_DETAIL_CAPACITY];
-        snprintf(detail, sizeof(detail),
-                 "The previous project file was preserved: %s.",
-                 musi_project_file_result_string(file_result));
+        if (file_result == MUSI_PROJECT_FILE_ERROR_DURABILITY) {
+            snprintf(detail, sizeof(detail),
+                     "The file was published, but crash durability could not be confirmed: %s.",
+                     musi_project_file_result_string(file_result));
+        } else {
+            snprintf(detail, sizeof(detail),
+                     "The previous project file was preserved: %s.",
+                     musi_project_file_result_string(file_result));
+        }
+        free(durable_audio_path);
         track->project_autosave_failed = true;
         notice_push(UI_NOTICE_ERROR, "Project could not be saved",
                     detail, path, true);
         return false;
     }
 
+    free(track->file_path);
+    track->file_path = durable_audio_path;
+    if (bundled_image[0] != '\0') {
+        snprintf(track->ascii_image_path, sizeof(track->ascii_image_path),
+                 "%s", bundled_image);
+    }
     snprintf(track->project_path, sizeof(track->project_path), "%s", path);
     track->project_metadata = saved_metadata;
     track->project_metadata_initialized = true;
@@ -3334,7 +3687,7 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
     track->project_autosave_failed = false;
     if (show_success) {
         notice_push(UI_NOTICE_SUCCESS, "Project saved",
-                    "Lyrics, scene settings, events, suggestions, and output settings are durable.",
+                    "Audio, ASCII imagery, lyrics, scenes, events, and output settings are durable.",
                     path, false);
     }
     return true;
@@ -3450,6 +3803,20 @@ static bool open_project_path(const char *path)
             .scene_index = (uint32_t)cue_scene,
             .strength = project->scene_switches.cues[i].strength,
         };
+        if (project->scene_switches.cues[i].setting_count > 0) {
+            cues[i].settings.captured = true;
+            cues[i].settings.count = project->scene_switches.cues[i].setting_count;
+            memcpy(cues[i].settings.values,
+                   project->scene_switches.cues[i].settings,
+                   cues[i].settings.count*sizeof(cues[i].settings.values[0]));
+            if (!scene_settings_snapshot_valid(cue_scene, &cues[i].settings)) {
+                notice_push(UI_NOTICE_ERROR, "Project scene cue was rejected",
+                            "A captured tuning snapshot does not match its scene.",
+                            path, true);
+                free(project);
+                return false;
+            }
+        }
     }
     Scene_Switch_Timeline scene_switches;
     scene_switch_init(&scene_switches);
@@ -3464,6 +3831,48 @@ static bool open_project_path(const char *path)
         return false;
     }
     scene_switches.enabled = project->scene_switches.enabled;
+
+    Scene_Settings_Preset_Library preset_library;
+    scene_settings_preset_library_init(&preset_library);
+    for (size_t i = 0; i < project->scene_preset_count; ++i) {
+        const Musi_Scene_Preset *source = &project->scene_presets[i];
+        Scene_Id preset_scene;
+        if (!scene_id_from_name(source->scene_name, &preset_scene) ||
+            source->id == UINT64_MAX ||
+            preset_library.counts[preset_scene] >=
+                SCENE_SETTINGS_PRESETS_PER_SCENE) {
+            notice_push(UI_NOTICE_ERROR, "Project scene preset was rejected",
+                        "The preset scene, ID, or per-scene capacity is unsupported.",
+                        path, true);
+            free(project);
+            return false;
+        }
+        Scene_Settings_Preset *destination =
+            &preset_library.items[preset_scene]
+                                 [preset_library.counts[preset_scene]++];
+        destination->id = source->id;
+        snprintf(destination->name, sizeof(destination->name), "%s", source->name);
+        destination->snapshot.captured = true;
+        destination->snapshot.count = source->setting_count;
+        memcpy(destination->snapshot.values, source->settings,
+               source->setting_count*sizeof(source->settings[0]));
+        if (!scene_settings_snapshot_valid(preset_scene, &destination->snapshot)) {
+            notice_push(UI_NOTICE_ERROR, "Project scene preset was rejected",
+                        "The stored tuning values do not match their scene.",
+                        path, true);
+            free(project);
+            return false;
+        }
+        if (source->id >= preset_library.next_id) {
+            preset_library.next_id = source->id + 1;
+        }
+    }
+    if (!scene_settings_preset_library_valid(&preset_library)) {
+        notice_push(UI_NOTICE_ERROR, "Project scene presets were rejected",
+                    "Preset identifiers or names are invalid.", path, true);
+        free(project);
+        return false;
+    }
 
     Render_Export_Config render_config = {
         .width = project->output.width,
@@ -3483,8 +3892,11 @@ static bool open_project_path(const char *path)
 
     char audio_path[PLUG_RELOAD_PATH_CAPACITY];
     char audio_hash[SHA256_HEX_SIZE];
-    Musi_Project_Path_Result audio_resolution = musi_project_resolve_asset_path(
-        path, project->audio.path, audio_path, sizeof(audio_path));
+    Musi_Project_Path_Result audio_resolution = project->audio.mode ==
+        MUSI_ASSET_IMPORTED ? musi_project_resolve_bundled_asset_path(
+            path, project->audio.path, audio_path, sizeof(audio_path)) :
+        musi_project_resolve_asset_path(
+            path, project->audio.path, audio_path, sizeof(audio_path));
     if (!musi_project_path_result_is_success(audio_resolution) ||
         !sha256_file_hex(audio_path, audio_hash) ||
         strcmp(audio_hash, project->audio.sha256) != 0) {
@@ -3498,6 +3910,24 @@ static bool open_project_path(const char *path)
         notice_push(UI_NOTICE_WARNING, "Project used a legacy asset path",
                     "Audio was found in the launch directory because it was not beside the project. Move it beside the project or use an absolute path for portability.",
                     project->audio.path, true);
+    }
+
+    char ascii_image_path[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    char ascii_image_hash[SHA256_HEX_SIZE] = {0};
+    if (project->ascii_image.present) {
+        Musi_Project_Path_Result image_resolution =
+            musi_project_resolve_bundled_asset_path(
+                path, project->ascii_image.path, ascii_image_path,
+                sizeof(ascii_image_path));
+        if (image_resolution != MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE ||
+            !sha256_file_hex(ascii_image_path, ascii_image_hash) ||
+            strcmp(ascii_image_hash, project->ascii_image.sha256) != 0) {
+            notice_push(UI_NOTICE_ERROR, "Project ASCII image does not match",
+                        "The bundled image is missing, outside the project, or changed identity.",
+                        project->ascii_image.path, true);
+            free(project);
+            return false;
+        }
     }
 
     Music metadata_probe = LoadMusicStream(audio_path);
@@ -3521,12 +3951,33 @@ static bool open_project_path(const char *path)
         return false;
     }
 
+    AsciiCell *hydrated_ascii = NULL;
+    size_t hydrated_ascii_columns = 0;
+    size_t hydrated_ascii_rows = 0;
+    if (project->ascii_image.present) {
+        hydrated_ascii = calloc(ASCII_GRID_MAX_CELLS, sizeof(*hydrated_ascii));
+        if (hydrated_ascii == NULL ||
+            !load_ascii_image_grid(
+                ascii_image_path, hydrated_ascii, ASCII_GRID_MAX_CELLS,
+                &hydrated_ascii_columns, &hydrated_ascii_rows) ||
+            hydrated_ascii_columns != project->ascii_image.columns ||
+            hydrated_ascii_rows != project->ascii_image.rows) {
+            free(hydrated_ascii);
+            notice_push(UI_NOTICE_ERROR, "Project ASCII image could not be restored",
+                        "The verified image no longer converts to the saved grid dimensions.",
+                        ascii_image_path, true);
+            free(project);
+            return false;
+        }
+    }
+
     Scene_Instance hydrated_scene;
     if (!scene_instance_init(&hydrated_scene, scene_id,
                              project->deterministic_seed)) {
         notice_push(UI_NOTICE_ERROR, "Project scene could not be prepared",
                     "The scene did not have enough resources to restore its deterministic state.",
                     project->scenes[0].scene_type, true);
+        free(hydrated_ascii);
         free(project);
         return false;
     }
@@ -3537,6 +3988,7 @@ static bool open_project_path(const char *path)
         scene_instance_unload(&hydrated_scene);
         notice_push(UI_NOTICE_ERROR, "Project audio could not be loaded",
                     "The verified audio decoder rejected the file.", audio_path, true);
+        free(hydrated_ascii);
         free(project);
         return false;
     }
@@ -3550,9 +4002,26 @@ static bool open_project_path(const char *path)
     (void)event_timeline_replace(&track->manual_events, &project->manual_events);
     track->next_manual_event_id = timeline_next_id(&track->manual_events);
     track->base_scene = scene_id;
+    track->previous_base_scene = scene_id;
+    track->scene_selection_pending = false;
     track->scene_seed = project->deterministic_seed;
     track->scene_instance_id = project->scenes[0].instance_id;
     track->scene_settings = hydrated_settings;
+    track->playback_scene_settings = hydrated_settings;
+    track->scene_presets = preset_library;
+    if (hydrated_ascii != NULL) {
+        memcpy(track->ascii_cells, hydrated_ascii,
+               hydrated_ascii_columns*hydrated_ascii_rows*
+               sizeof(track->ascii_cells[0]));
+        track->ascii_columns = hydrated_ascii_columns;
+        track->ascii_rows = hydrated_ascii_rows;
+        snprintf(track->ascii_image_path, sizeof(track->ascii_image_path),
+                 "%s", ascii_image_path);
+        snprintf(track->ascii_image_sha256,
+                 sizeof(track->ascii_image_sha256), "%s", ascii_image_hash);
+    }
+    free(hydrated_ascii);
+    capture_missing_scene_cue_settings(track);
     track->project_metadata = project->metadata;
     track->project_metadata_initialized = true;
     track->analysis_lane_count = project->analysis_lane_count;
@@ -3997,8 +4466,9 @@ static bool scene_setting_slider(Rectangle boundary, Scene_Id scene_id,
     return changed;
 }
 
-static bool scene_setting_surface_toggle(Rectangle boundary, Scene_Id scene_id,
-                                         size_t setting_index, float *value)
+static bool scene_setting_toggle(Rectangle boundary, Scene_Id scene_id,
+                                 size_t setting_index, float *value,
+                                 const char *off_label, const char *on_label)
 {
     if (value == NULL || boundary.width <= 1.0f) return false;
     const uint64_t base = UINT64_C(0x534554544F470000) +
@@ -4010,12 +4480,12 @@ static bool scene_setting_surface_toggle(Rectangle boundary, Scene_Id scene_id,
     Rectangle wireframe = {filled.x + filled.width + gap, boundary.y,
                            filled.width, boundary.height};
     bool enabled = *value >= 0.5f;
-    if (text_button(base, filled, "Filled", !enabled) & BS_CLICKED) {
+    if (text_button(base, filled, off_label, !enabled) & BS_CLICKED) {
         if (!enabled) return false;
         *value = 0.0f;
         return true;
     }
-    if (text_button(base + 1U, wireframe, "Wireframe", enabled) & BS_CLICKED) {
+    if (text_button(base + 1U, wireframe, on_label, enabled) & BS_CLICKED) {
         if (enabled) return false;
         *value = 1.0f;
         return true;
@@ -4039,6 +4509,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                (Vector2){boundary.x + padding, boundary.y + 39.0f},
                24.0f, 0.0f, COLOR_UI_INK);
 
+    Scene_Settings *editable_settings = track_effective_scene_settings(track);
     float button_y = boundary.y + 72.0f;
     float button_width = (boundary.width - padding*2.0f - 8.0f)*0.5f;
     Rectangle reset = {boundary.x + padding, button_y, button_width, 30.0f};
@@ -4046,7 +4517,8 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                       button_width, 30.0f};
     if (text_button(UINT64_C(0x53455454494E4752), reset,
                     "Reset", false) & BS_CLICKED) {
-        if (scene_settings_reset_scene(&track->scene_settings, p->scene.id)) {
+        if (scene_settings_reset_scene(editable_settings, p->scene.id)) {
+            commit_active_cue_settings(track, p->scene.id);
             mark_project_dirty(track);
         }
     }
@@ -4059,7 +4531,95 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         p->scene_settings_scroll_scene = p->scene.id;
         p->scene_settings_scroll = 0.0f;
     }
-    const float content_top = button_y + 44.0f;
+    size_t scene_index = (size_t)p->scene.id;
+    size_t preset_count = track->scene_presets.counts[scene_index];
+    size_t *selected = &track->selected_scene_preset[scene_index];
+    if (preset_count == 0) *selected = 0;
+    else if (*selected >= preset_count) *selected = preset_count - 1;
+    float preset_y = button_y + 44.0f;
+    char preset_status[64];
+    snprintf(preset_status, sizeof(preset_status), "PRESETS  %zu / %u",
+             preset_count, SCENE_SETTINGS_PRESETS_PER_SCENE);
+    DrawTextEx(ui_font(), preset_status,
+               (Vector2){boundary.x + padding, preset_y + 3.0f},
+               13.0f, 1.0f, COLOR_UI_MUTED);
+    const float small_gap = 5.0f;
+    float nav_y = preset_y + 22.0f;
+    Rectangle previous = {boundary.x + padding, nav_y, 34.0f, 28.0f};
+    Rectangle next = {boundary.x + boundary.width - padding - 34.0f,
+                      nav_y, 34.0f, 28.0f};
+    Rectangle preset_name = {previous.x + previous.width + small_gap, nav_y,
+                             next.x - previous.x - previous.width - small_gap*2.0f,
+                             28.0f};
+    if (preset_count > 0) {
+        if ((text_button(UINT64_C(0x5052455345545052), previous, "<", false) &
+             BS_CLICKED) != 0) {
+            *selected = (*selected + preset_count - 1)%preset_count;
+        }
+        if ((text_button(UINT64_C(0x5052455345544E58), next, ">", false) &
+             BS_CLICKED) != 0) {
+            *selected = (*selected + 1)%preset_count;
+        }
+        disabled_text_button(preset_name,
+            track->scene_presets.items[scene_index][*selected].name, true);
+    } else {
+        disabled_text_button(previous, "<", false);
+        disabled_text_button(preset_name, "No saved presets", false);
+        disabled_text_button(next, ">", false);
+    }
+
+    float action_y = nav_y + 34.0f;
+    float action_width = (boundary.width - padding*2.0f - small_gap*3.0f)*0.25f;
+    Rectangle apply = {boundary.x + padding, action_y, action_width, 30.0f};
+    Rectangle save = {apply.x + action_width + small_gap, action_y,
+                      action_width, 30.0f};
+    Rectangle replace = {save.x + action_width + small_gap, action_y,
+                         action_width, 30.0f};
+    Rectangle remove = {replace.x + action_width + small_gap, action_y,
+                        action_width, 30.0f};
+    if (preset_count > 0) {
+        if ((text_button(UINT64_C(0x5052455345544150), apply,
+                         "Load", false) & BS_CLICKED) != 0 &&
+            scene_settings_preset_apply(&track->scene_presets, scene_index,
+                                        *selected, editable_settings)) {
+            commit_active_cue_settings(track, p->scene.id);
+            mark_project_dirty(track);
+        }
+        if ((text_button(UINT64_C(0x5052455345545250), replace,
+                         "Update", false) & BS_CLICKED) != 0 &&
+            scene_settings_preset_replace(&track->scene_presets, scene_index,
+                                          *selected, editable_settings)) {
+            mark_project_dirty(track);
+        }
+        if ((text_button(UINT64_C(0x505245534554444C), remove,
+                         "Delete", false) & BS_CLICKED) != 0 &&
+            scene_settings_preset_remove(&track->scene_presets, scene_index,
+                                         *selected)) {
+            if (*selected > 0 && *selected >= track->scene_presets.counts[scene_index]) {
+                (*selected)--;
+            }
+            mark_project_dirty(track);
+        }
+    } else {
+        disabled_text_button(apply, "Load", false);
+        disabled_text_button(replace, "Update", false);
+        disabled_text_button(remove, "Delete", false);
+    }
+    if (preset_count < SCENE_SETTINGS_PRESETS_PER_SCENE &&
+        (text_button(UINT64_C(0x5052455345545341), save,
+                     "Save new", false) & BS_CLICKED) != 0) {
+        char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
+        snprintf(name, sizeof(name), "Preset %llu",
+                 (unsigned long long)track->scene_presets.next_id);
+        if (scene_settings_preset_save(&track->scene_presets, scene_index,
+                                       name, editable_settings, selected)) {
+            mark_project_dirty(track);
+        }
+    } else if (preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE) {
+        disabled_text_button(save, "Full", false);
+    }
+
+    const float content_top = action_y + 42.0f;
     const float footer_height = 44.0f;
     const float content_height = fmaxf(0.0f, boundary.height -
                                        (content_top - boundary.y) - footer_height);
@@ -4087,10 +4647,16 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                    (Vector2){boundary.x + padding, y + 5.0f},
                    16.0f, 0.0f, COLOR_UI_INK);
         char value_text[32];
-        float value = scene_settings_get(&track->scene_settings, p->scene.id, index);
+        float value = scene_settings_get(editable_settings, p->scene.id, index);
         if (descriptor->kind == SCENE_SETTING_TOGGLE) {
-            snprintf(value_text, sizeof(value_text), "%s",
-                     value >= 0.5f ? "Wireframe" : "Filled");
+            bool hue_motion = p->scene.id == SCENE_SONG_ATLAS &&
+                              index == ATLAS_SETTING_HUE_MOTION;
+            snprintf(value_text, sizeof(value_text), "%s", hue_motion ?
+                     (value >= 0.5f ? "Music-reactive" : "Manual") :
+                     (value >= 0.5f ? "Wireframe" : "Filled"));
+        } else if (p->scene.id == SCENE_SONG_ATLAS &&
+                   index == ATLAS_SETTING_DETAIL) {
+            snprintf(value_text, sizeof(value_text), "%dx", (int)lroundf(value));
         } else {
             snprintf(value_text, sizeof(value_text), "%.*f",
                      (int)descriptor->precision, value);
@@ -4102,11 +4668,21 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                    15.0f, 0.0f, COLOR_ACCENT);
         Rectangle slider = {boundary.x + padding, y + 31.0f,
                             boundary.width - padding*2.0f, 30.0f};
-        bool changed = descriptor->kind == SCENE_SETTING_TOGGLE ?
-            scene_setting_surface_toggle(slider, p->scene.id, index, &value) :
-            scene_setting_slider(slider, p->scene.id, index, &value);
+        bool changed;
+        if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+            bool hue_motion = p->scene.id == SCENE_SONG_ATLAS &&
+                              index == ATLAS_SETTING_HUE_MOTION;
+            changed = scene_setting_toggle(
+                slider, p->scene.id, index, &value,
+                hue_motion ? "Manual" : "Filled",
+                hue_motion ? "Music" : "Wireframe");
+        } else {
+            changed = scene_setting_slider(
+                slider, p->scene.id, index, &value);
+        }
         if (changed &&
-            scene_settings_set(&track->scene_settings, p->scene.id, index, value)) {
+            scene_settings_set(editable_settings, p->scene.id, index, value)) {
+            commit_active_cue_settings(track, p->scene.id);
             mark_project_dirty(track);
         }
         DrawLine((int)(boundary.x + padding), (int)(y + row_height - 1.0f),
@@ -4128,7 +4704,8 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                          COLOR_ACCENT);
     }
 
-    DrawTextEx(ui_font(), "Saved with this track",
+    DrawTextEx(ui_font(), track->cue_settings_active ?
+               "Editing this cue snapshot" : "Presets saved with this track",
                (Vector2){boundary.x + padding,
                          boundary.y + boundary.height - 29.0f},
                14.0f, 0.0f, COLOR_UI_MUTED);
@@ -4198,9 +4775,7 @@ static void scene_browser(Rectangle boundary)
                         row, scene_name(id), p->scene.id == id) & BS_CLICKED) {
             if (scene_instance_select(&p->scene, id, scene_seed_for_track(track))) {
                 if (track != NULL) {
-                    track->base_scene = id;
-                    track->scene_switches.enabled = false;
-                    scene_switch_reset(&track->scene_switches);
+                    track_select_base_scene(track, id);
                 }
                 mark_project_dirty(track);
             }
@@ -4243,9 +4818,11 @@ static void scene_browser(Rectangle boundary)
                      "Clear image", false) & BS_CLICKED)) {
         if (ascii_art_grid_clear(track->ascii_cells, ASCII_GRID_MAX_CELLS,
                                  &track->ascii_columns, &track->ascii_rows)) {
+            track->ascii_image_path[0] = '\0';
+            track->ascii_image_sha256[0] = '\0';
             mark_project_dirty(track);
             notice_push(UI_NOTICE_INFO, "ASCII image cleared",
-                        "The track can now be saved as a portable empty ASCII scene.",
+                        "The bundled image will be removed from the next project save.",
                         NULL, false);
         }
     }
@@ -4716,6 +5293,17 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
         p->render_failed = true;
         return false;
     }
+    if (track_uses_song_atlas(track) &&
+        !song_atlas_map_valid(&track->song_atlas_map)) {
+        track->song_atlas_map_attempted = true;
+        if (song_atlas_map_build(
+                wave_samples, (size_t)wave.frameCount, (size_t)wave.channels,
+                wave.sampleRate, &track->song_atlas_map) == 0) {
+            TraceLog(LOG_WARNING,
+                     "ATLAS: whole-song map could not be prepared for export of %s",
+                     track->file_path);
+        }
+    }
     uint64_t total_frames = 0;
     if (render_export_total_frames(wave.frameCount, wave.sampleRate,
                                    p->render_config.fps, &total_frames) !=
@@ -4811,6 +5399,7 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
     p->scene_frame_index = 0;
     p->scene_clock_initialized = false;
     scene_switch_reset(&track->scene_switches);
+    track->cue_settings_active = false;
     p->ffmpeg = ffmpeg_start_rendering(output_path, &p->render_config,
                                        p->render_audio_path, total_frames,
                                        p->render_job_nonce);

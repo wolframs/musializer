@@ -47,8 +47,27 @@ typedef enum {
     MUSI_PROJECT_FILE_ERROR_PERMISSIONS,
     MUSI_PROJECT_FILE_ERROR_SYNC,
     MUSI_PROJECT_FILE_ERROR_CLOSE,
-    MUSI_PROJECT_FILE_ERROR_PUBLISH
+    MUSI_PROJECT_FILE_ERROR_PUBLISH,
+    MUSI_PROJECT_FILE_ERROR_DURABILITY
 } Musi_Project_File_Result;
+
+typedef enum Musi_Project_Asset_Category {
+    MUSI_PROJECT_ASSET_AUDIO = 0,
+    MUSI_PROJECT_ASSET_IMAGE,
+} Musi_Project_Asset_Category;
+
+typedef enum Musi_Project_Bundle_Result {
+    MUSI_PROJECT_BUNDLE_OK = 0,
+    MUSI_PROJECT_BUNDLE_ERROR_ARGUMENT,
+    MUSI_PROJECT_BUNDLE_ERROR_PATH,
+    MUSI_PROJECT_BUNDLE_ERROR_DIRECTORY,
+    MUSI_PROJECT_BUNDLE_ERROR_SOURCE,
+    MUSI_PROJECT_BUNDLE_ERROR_COPY,
+    MUSI_PROJECT_BUNDLE_ERROR_SYNC,
+    MUSI_PROJECT_BUNDLE_ERROR_IDENTITY,
+    MUSI_PROJECT_BUNDLE_ERROR_COLLISION,
+    MUSI_PROJECT_BUNDLE_ERROR_PUBLISH,
+} Musi_Project_Bundle_Result;
 
 // required_size includes the trailing NUL. Output remains untouched on error.
 Musi_Project_Io_Result musi_project_json_serialize(const Musi_Project *project,
@@ -63,6 +82,11 @@ Musi_Project_Io_Result musi_project_json_deserialize(Musi_Project *destination,
 const char *musi_project_io_result_string(Musi_Project_Io_Result result);
 
 Musi_Project_Path_Result musi_project_resolve_asset_path(
+    const char *project_path, const char *asset_path,
+    char *resolved, size_t capacity);
+// Resolves only a normalized project-relative descendant. Absolute paths,
+// traversal, legacy-CWD fallback, and symlink escapes are rejected.
+Musi_Project_Path_Result musi_project_resolve_bundled_asset_path(
     const char *project_path, const char *asset_path,
     char *resolved, size_t capacity);
 Musi_Project_Path_Result musi_project_canonicalize_existing_file(
@@ -96,4 +120,15 @@ bool musi_project_temporary_path(const char *destination,
 Musi_Project_File_Result musi_project_atomic_write(
     const char *destination, const void *data, size_t size);
 const char *musi_project_file_result_string(Musi_Project_File_Result result);
+
+// Copies an immutable content-addressed asset beneath
+// <project-stem>.assets/{audio,images}/ and returns both its portable stored
+// path and runtime path. Existing content is reused only after SHA-256
+// verification. The project itself must be published after all assets succeed.
+Musi_Project_Bundle_Result musi_project_bundle_asset(
+    const char *project_path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *expected_sha256,
+    char *stored_path, size_t stored_capacity,
+    char *runtime_path, size_t runtime_capacity);
+const char *musi_project_bundle_result_string(Musi_Project_Bundle_Result result);
 #endif

@@ -48,6 +48,8 @@ static const Scene_Setting_Descriptor atlas_settings[] = {
     SETTING("settings.atlas.color", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
     SETTING("settings.atlas.speed", "Camera speed", 0.00f, 2.50f, 1.00f, 2),
     TOGGLE("settings.atlas.wireframe", "Surface style", 0.0f),
+    SETTING("settings.atlas.detail", "Sampling detail", 1.00f, 3.00f, 1.00f, 0),
+    TOGGLE("settings.atlas.hue_motion", "Hue motion", 0.0f),
 };
 
 static const Scene_Setting_Descriptor terrarium_settings[] = {
@@ -151,6 +153,155 @@ bool scene_settings_reset_scene(Scene_Settings *settings, size_t scene_index)
     for (size_t index = 0; index < tables[scene_index].count; ++index) {
         settings->values[scene_index][index] = tables[scene_index].items[index].default_value;
     }
+    return true;
+}
+
+bool scene_settings_capture(const Scene_Settings *settings, size_t scene_index,
+                            Scene_Settings_Snapshot *snapshot)
+{
+    if (settings == NULL || snapshot == NULL ||
+        scene_index >= SCENE_SETTINGS_SCENE_COUNT) return false;
+    Scene_Settings_Snapshot staged = {
+        .captured = true,
+        .count = tables[scene_index].count,
+    };
+    for (size_t index = 0; index < staged.count; ++index) {
+        float value = settings->values[scene_index][index];
+        if (!value_in_range(value, &tables[scene_index].items[index])) return false;
+        staged.values[index] = value;
+    }
+    *snapshot = staged;
+    return true;
+}
+
+bool scene_settings_snapshot_valid(size_t scene_index,
+                                   const Scene_Settings_Snapshot *snapshot)
+{
+    if (snapshot == NULL || scene_index >= SCENE_SETTINGS_SCENE_COUNT) return false;
+    if (!snapshot->captured) return snapshot->count == 0;
+    bool legacy_atlas = scene_index == 4 && snapshot->count == 8;
+    if (snapshot->count != tables[scene_index].count && !legacy_atlas) return false;
+    for (size_t index = 0; index < snapshot->count; ++index) {
+        if (!value_in_range(snapshot->values[index],
+                            &tables[scene_index].items[index])) return false;
+    }
+    return true;
+}
+
+bool scene_settings_apply_snapshot(Scene_Settings *settings, size_t scene_index,
+                                   const Scene_Settings_Snapshot *snapshot)
+{
+    if (settings == NULL || !scene_settings_snapshot_valid(scene_index, snapshot) ||
+        !snapshot->captured) return false;
+    Scene_Settings staged = *settings;
+    for (size_t index = 0; index < snapshot->count; ++index) {
+        staged.values[scene_index][index] = snapshot->values[index];
+    }
+    for (size_t index = snapshot->count; index < tables[scene_index].count; ++index) {
+        staged.values[scene_index][index] = tables[scene_index].items[index].default_value;
+    }
+    *settings = staged;
+    return true;
+}
+
+void scene_settings_preset_library_init(Scene_Settings_Preset_Library *library)
+{
+    if (library == NULL) return;
+    memset(library, 0, sizeof(*library));
+    library->next_id = 1;
+}
+
+bool scene_settings_preset_library_valid(
+    const Scene_Settings_Preset_Library *library)
+{
+    if (library == NULL || library->next_id == 0) return false;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        if (library->counts[scene] > SCENE_SETTINGS_PRESETS_PER_SCENE) return false;
+        for (size_t index = 0; index < library->counts[scene]; ++index) {
+            const Scene_Settings_Preset *preset = &library->items[scene][index];
+            if (preset->id == 0 || preset->name[0] == '\0' ||
+                memchr(preset->name, '\0', sizeof(preset->name)) == NULL ||
+                !scene_settings_snapshot_valid(scene, &preset->snapshot)) return false;
+            if (preset->id >= library->next_id) return false;
+            for (size_t previous_scene = 0; previous_scene <= scene; ++previous_scene) {
+                size_t previous_count = previous_scene == scene ? index :
+                                        library->counts[previous_scene];
+                for (size_t previous = 0; previous < previous_count; ++previous) {
+                    if (library->items[previous_scene][previous].id == preset->id) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool scene_settings_preset_save(Scene_Settings_Preset_Library *library,
+                                size_t scene_index, const char *name,
+                                const Scene_Settings *settings,
+                                size_t *preset_index)
+{
+    if (library == NULL || name == NULL || settings == NULL ||
+        scene_index >= SCENE_SETTINGS_SCENE_COUNT || library->next_id == 0 ||
+        library->next_id == UINT64_MAX ||
+        library->counts[scene_index] >= SCENE_SETTINGS_PRESETS_PER_SCENE) return false;
+    if (!scene_settings_preset_library_valid(library)) return false;
+    const char *name_end = memchr(name, '\0', SCENE_SETTINGS_PRESET_NAME_CAPACITY);
+    if (name_end == NULL || name_end == name) return false;
+    size_t name_length = (size_t)(name_end - name);
+    Scene_Settings_Preset preset = {.id = library->next_id};
+    memcpy(preset.name, name, name_length + 1);
+    if (!scene_settings_capture(settings, scene_index, &preset.snapshot)) return false;
+    size_t index = library->counts[scene_index];
+    library->items[scene_index][index] = preset;
+    library->counts[scene_index]++;
+    library->next_id++;
+    if (preset_index != NULL) *preset_index = index;
+    return true;
+}
+
+bool scene_settings_preset_replace(Scene_Settings_Preset_Library *library,
+                                   size_t scene_index, size_t preset_index,
+                                   const Scene_Settings *settings)
+{
+    if (library == NULL || settings == NULL ||
+        scene_index >= SCENE_SETTINGS_SCENE_COUNT ||
+        preset_index >= library->counts[scene_index]) return false;
+    if (!scene_settings_preset_library_valid(library)) return false;
+    Scene_Settings_Snapshot snapshot;
+    if (!scene_settings_capture(settings, scene_index, &snapshot)) return false;
+    library->items[scene_index][preset_index].snapshot = snapshot;
+    return true;
+}
+
+bool scene_settings_preset_apply(const Scene_Settings_Preset_Library *library,
+                                 size_t scene_index, size_t preset_index,
+                                 Scene_Settings *settings)
+{
+    if (library == NULL || settings == NULL ||
+        scene_index >= SCENE_SETTINGS_SCENE_COUNT ||
+        preset_index >= library->counts[scene_index]) return false;
+    if (!scene_settings_preset_library_valid(library)) return false;
+    return scene_settings_apply_snapshot(
+        settings, scene_index, &library->items[scene_index][preset_index].snapshot);
+}
+
+bool scene_settings_preset_remove(Scene_Settings_Preset_Library *library,
+                                  size_t scene_index, size_t preset_index)
+{
+    if (library == NULL || scene_index >= SCENE_SETTINGS_SCENE_COUNT ||
+        preset_index >= library->counts[scene_index]) return false;
+    if (!scene_settings_preset_library_valid(library)) return false;
+    size_t count = library->counts[scene_index];
+    if (preset_index + 1 < count) {
+        memmove(&library->items[scene_index][preset_index],
+                &library->items[scene_index][preset_index + 1],
+                (count - preset_index - 1)*sizeof(library->items[scene_index][0]));
+    }
+    memset(&library->items[scene_index][count - 1], 0,
+           sizeof(library->items[scene_index][0]));
+    library->counts[scene_index]--;
     return true;
 }
 

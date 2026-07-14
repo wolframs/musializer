@@ -33,13 +33,44 @@ static float atlas_map_resample_band(const AudioSpectrumView *spectrum,
     return peak;
 }
 
-static size_t atlas_map_slice_count(size_t frame_count, uint32_t sample_rate)
+size_t song_atlas_map_slice_count(size_t frame_count, uint32_t sample_rate)
 {
+    if (frame_count == 0 || sample_rate == 0) return 0;
     double duration = (double)frame_count/(double)sample_rate;
-    double desired = ceil(duration*2.0);
-    if (desired < 24.0) desired = 24.0;
+    double desired = ceil(duration*2.0*(double)SONG_ATLAS_MAX_DETAIL);
+    if (desired < 24.0*(double)SONG_ATLAS_MAX_DETAIL) {
+        desired = 24.0*(double)SONG_ATLAS_MAX_DETAIL;
+    }
     if (desired > SONG_ATLAS_MAX_SLICES) desired = SONG_ATLAS_MAX_SLICES;
     return (size_t)desired;
+}
+
+size_t song_atlas_map_render_sample_count(size_t available,
+                                          size_t detail_level)
+{
+    if (available < 2 || available > SONG_ATLAS_MAX_SLICES ||
+        detail_level < 1 || detail_level > SONG_ATLAS_MAX_DETAIL) return 0;
+    size_t sample_count = (available*detail_level + SONG_ATLAS_MAX_DETAIL - 1)/
+                          SONG_ATLAS_MAX_DETAIL;
+    if (sample_count < 2) sample_count = 2;
+    if (sample_count > available) sample_count = available;
+    return sample_count;
+}
+
+size_t song_atlas_map_render_sample_index(size_t first, size_t available,
+                                          size_t sample_count, size_t sample)
+{
+    if (available < 2 || available > SONG_ATLAS_MAX_SLICES ||
+        sample_count < 2 || sample_count > available || sample >= sample_count ||
+        first > SIZE_MAX - available) return SIZE_MAX;
+    return first + (sample*(available - 1) + (sample_count - 1)/2)/
+                   (sample_count - 1);
+}
+
+float song_atlas_map_render_distance(float source_distance)
+{
+    if (!isfinite(source_distance)) return 0.0f;
+    return source_distance/(float)SONG_ATLAS_MAX_DETAIL;
 }
 
 static void atlas_map_smooth(Song_Atlas_Map *map)
@@ -63,7 +94,9 @@ static void atlas_map_smooth(Song_Atlas_Map *map)
                 weight += 0.20f;
             }
             spatial /= weight;
-            float response = spatial > previous[band] ? 0.72f : 0.38f;
+            float base_response = spatial > previous[band] ? 0.72f : 0.38f;
+            float response = 1.0f - powf(
+                1.0f - base_response, 1.0f/(float)SONG_ATLAS_MAX_DETAIL);
             float filtered = previous[band] + (spatial - previous[band])*response;
             previous[band] = filtered;
             map->slices[i].bands[band] = filtered;
@@ -101,7 +134,8 @@ static void atlas_map_finalize_dynamics(Song_Atlas_Map *map)
         float normalized = maximum_flux > 1.0e-8f ?
             map->slices[i].flux/maximum_flux : 0.0f;
         map->slices[i].flux = atlas_map_clamp01(normalized);
-        bool separated = last_onset == SIZE_MAX || i - last_onset >= 3;
+        bool separated = last_onset == SIZE_MAX ||
+                         i - last_onset >= 3U*SONG_ATLAS_MAX_DETAIL;
         map->slices[i].onset = separated && normalized >= 0.62f &&
                                map->slices[i].rms >= 0.16f;
         if (map->slices[i].onset) last_onset = i;
@@ -133,7 +167,7 @@ size_t song_atlas_map_build(const float *samples,
         return 0;
     }
 
-    map->count = atlas_map_slice_count(frame_count, sample_rate);
+    map->count = song_atlas_map_slice_count(frame_count, sample_rate);
     map->duration_seconds = (double)frame_count/(double)sample_rate;
     for (size_t i = 0; i < map->count; ++i) {
         double position = map->count > 1 ?

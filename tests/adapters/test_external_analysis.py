@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import analysis_io
+import analyze_audio as measured_adapter
 import external_analysis as external
 
 
@@ -43,9 +44,28 @@ def measured_document() -> dict:
             "spectral_flux": 0.1 if second < 6 else 0.7,
             "onset_strength": 0.05 if second < 6 else 0.8,
         })
+    settings = {
+        "sample_rate": external.MEASURED_SAMPLE_RATE,
+        "channels": external.MEASURED_CHANNELS,
+        "window_size": external.MEASURED_WINDOW,
+        "hop_size": external.MEASURED_HOP,
+    }
+    analysis = {
+        "analyzer_version": external.MEASURED_ANALYZER_VERSION,
+        **settings,
+        "window_function": "hann",
+        "band_edges_hz": {},
+    }
     return {
         "schema_version": "musializer.measured-analysis/v1", "lane": "measured_audio",
         "audio": {"sha256": SHA, "duration_seconds": 12.0},
+        "analysis": analysis,
+        "provenance": {
+            "adapter": "tools/analyze_audio.py",
+            "adapter_version": external.MEASURED_ANALYZER_VERSION,
+            "source_kind": "offline_measured_analysis",
+            "request_settings": settings,
+        },
         "frames": frames,
         "summary": {"sections": [
             {"start_seconds": 0.0, "end_seconds": 6.0},
@@ -269,6 +289,198 @@ class ExternalAnalysisTests(unittest.TestCase):
         self.assertTrue((output_dir / "analysis.bridge.tsv").is_file())
         self.assertTrue((output_dir / "scene-plan.json").is_file())
         self.assertTrue((output_dir / "assist-manifest.json").is_file())
+
+    def test_assist_sections_never_consumes_a_cached_mimo_lane(self):
+        audio = self.root / "track.wav"; audio.write_bytes(b"fixture audio")
+        audio_sha = analysis_io.sha256_file(audio)
+        output_dir = self.root / "analysis"; output_dir.mkdir()
+        measured = measured_document(); measured["audio"]["sha256"] = audio_sha
+        semantic = semantic_document(); semantic["audio"]["sha256"] = audio_sha
+        self.write_json("analysis/measured.json", measured)
+        self.write_json("analysis/semantic.cache.json", semantic)
+
+        def forbidden_runner(*_args, **_kwargs):
+            self.fail("sections mode should use only its measured cache")
+
+        external.run_assist(
+            audio, output_dir, audio_duration=12, mode="sections",
+            runner=forbidden_runner,
+        )
+        plan = analysis_io.read_json(output_dir / "scene-plan.json")
+        self.assertEqual(plan["sections"][0]["recommended_scene"], "spectrum")
+        self.assertEqual([source["lane"] for source in plan["sources"]],
+                         ["measured_audio"])
+        reasons = {
+            reason["source_lane"]
+            for section in plan["sections"] for reason in section["reasons"]
+        }
+        self.assertNotIn("semantic_interpretation", reasons)
+        bridge_rows = external.parse_bridge(
+            (output_dir / "analysis.bridge.tsv").read_text(encoding="ascii")
+        )
+        self.assertFalse(any(row[0].startswith("SEMANTIC") for row in bridge_rows))
+
+    def test_cache_fingerprints_reject_only_relevant_identity_mutations(self):
+        self.assertEqual(external.MEASURED_ANALYZER_VERSION,
+                         measured_adapter.ANALYZER_VERSION)
+        self.assertEqual(external.MEASURED_SAMPLE_RATE,
+                         measured_adapter.DEFAULT_SAMPLE_RATE)
+        self.assertEqual(external.MEASURED_CHANNELS,
+                         measured_adapter.DEFAULT_CHANNELS)
+        self.assertEqual(external.MEASURED_WINDOW,
+                         measured_adapter.DEFAULT_WINDOW)
+        self.assertEqual(external.MEASURED_HOP,
+                         measured_adapter.DEFAULT_HOP)
+        measured = measured_document()
+        self.assertTrue(external._measured_cache_accepts(measured))
+        changed_measured = json.loads(json.dumps(measured))
+        changed_measured["provenance"]["adapter_version"] = "older"
+        self.assertFalse(external._measured_cache_accepts(changed_measured))
+
+        model = self.root / "ggml-medium.en.bin"; model.write_bytes(b"model-a")
+        whisper = lyrics_document()
+        whisper["provenance"] = {
+            "adapter": "tools/external_analysis.py",
+            "adapter_version": analysis_io.ADAPTER_VERSION,
+            "source_kind": "whisper_import",
+            "model": model.name,
+            "request_settings": {
+                "language": "en", "dtw_model": "medium.en",
+                "model_sha256": analysis_io.sha256_file(model),
+                "gpu_requested": True,
+            },
+        }
+        self.assertTrue(external._whisper_cache_accepts(
+            whisper, measured_duration=12.0, model=model,
+        ))
+        model.write_bytes(b"model-b")
+        self.assertFalse(external._whisper_cache_accepts(
+            whisper, measured_duration=12.0, model=model,
+        ))
+
+        source_path = self.write_json("lyrics.json", lyrics_document())
+        source_sha = analysis_io.sha256_file(source_path)
+        review = {
+            "source": {"sha256": source_sha},
+            "provenance": {
+                "adapter": "tools/external_analysis.py",
+                "adapter_version": analysis_io.ADAPTER_VERSION,
+                "source_kind": "codex_lyric_review",
+                "model": "codex-default",
+                "prompt_version": "lyrics_cleanup_system/v1",
+                "prompt_sha256": analysis_io.sha256_file(external.LYRIC_PROMPT),
+                "request_settings": {"sandbox": "read-only", "ephemeral": True},
+            },
+        }
+        self.assertTrue(external._review_cache_accepts(
+            review, source_sha256=source_sha, model=None,
+        ))
+        review["provenance"]["prompt_sha256"] = "0" * 64
+        self.assertFalse(external._review_cache_accepts(
+            review, source_sha256=source_sha, model=None,
+        ))
+
+        audio = self.root / "track.mp3"; audio.write_bytes(b"audio")
+        audio_sha = analysis_io.sha256_file(audio)
+        request = external._mimo_request_identity(
+            audio, audio_sha=audio_sha, measured_duration=12.0, zdr=True,
+        )
+        semantic = semantic_document(); semantic["audio"]["sha256"] = audio_sha
+        semantic["provenance"] = {
+            "adapter": "tools/mimo_openrouter.py",
+            "adapter_version": analysis_io.ADAPTER_VERSION,
+            "source_kind": "mimo_openrouter",
+            "model": external.mimo_adapter.MODEL,
+            "prompt_version": external.mimo_adapter.PROMPT_VERSION,
+            "request_settings": {
+                key: value for key, value in request.items()
+                if key != "audio_sha256"
+            },
+        }
+        envelope = {
+            "request": request,
+            "cache_key": analysis_io.canonical_sha256(request),
+            "normalized": semantic,
+        }
+        self.assertTrue(external._mimo_cache_accepts(
+            envelope, request_identity=request,
+        ))
+        changed_request = {**request, "zero_data_retention": False}
+        self.assertFalse(external._mimo_cache_accepts(
+            envelope, request_identity=changed_request,
+        ))
+
+    def test_stale_codex_fingerprint_regenerates_only_review_stage(self):
+        audio = self.root / "track.wav"; audio.write_bytes(b"fixture audio")
+        audio_sha = analysis_io.sha256_file(audio)
+        output_dir = self.root / "analysis"; output_dir.mkdir()
+        measured = measured_document(); measured["audio"]["sha256"] = audio_sha
+        self.write_json("analysis/measured.json", measured)
+
+        model = self.root / "ggml-medium.en.bin"; model.write_bytes(b"model")
+        whisper_bin = self.root / "whisper-cli"; whisper_bin.write_bytes(b"bin")
+        whisper = lyrics_document(); whisper["audio"]["sha256"] = audio_sha
+        whisper["provenance"] = {
+            "adapter": "tools/external_analysis.py",
+            "adapter_version": analysis_io.ADAPTER_VERSION,
+            "source_kind": "whisper_import",
+            "model": model.name,
+            "request_settings": {
+                "language": "en", "dtw_model": "medium.en",
+                "model_sha256": analysis_io.sha256_file(model),
+                "gpu_requested": True,
+            },
+        }
+        whisper_path = self.write_json("analysis/lyrics.whisper.json", whisper)
+        stale_review = {
+            "schema_version": external.LYRIC_REVIEW_VERSION,
+            "lane": "lyric_review",
+            "audio": whisper["audio"],
+            "source": {
+                "schema_version": whisper["schema_version"],
+                "sha256": analysis_io.sha256_file(whisper_path),
+            },
+            "provenance": {
+                "adapter": "tools/external_analysis.py",
+                "adapter_version": analysis_io.ADAPTER_VERSION,
+                "source_kind": "codex_lyric_review",
+                "prompt_version": "lyrics_cleanup_system/v1",
+                "prompt_sha256": "0" * 64,
+                "model": "codex-default",
+            },
+            "lines": [], "notes": [],
+        }
+        self.write_json("analysis/lyrics.review.json", stale_review)
+        calls: list[list[str]] = []
+
+        def codex_runner(argv, **_kwargs):
+            calls.append(argv)
+            self.assertEqual(argv[0], "codex")
+            result_path = Path(argv[argv.index("-o") + 1])
+            analysis_io.atomic_write_json(result_path, {
+                "lines": [{
+                    "start_seconds": 1.0, "end_seconds": 2.0,
+                    "text": "hello world", "source_line_indices": [0],
+                    "confidence": 0.7, "uncertain": False,
+                }],
+                "notes": [],
+            })
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        result = external.run_assist(
+            audio, output_dir, audio_duration=12, mode="lyrics",
+            whisper_bin=whisper_bin, whisper_model=model,
+            runner=codex_runner,
+        )
+        self.assertEqual(result["cache_status"], {
+            "measured": "reused", "lyrics": "reused", "review": "generated",
+        })
+        self.assertEqual(len(calls), 1)
+        regenerated = analysis_io.read_json(output_dir / "lyrics.review.json")
+        self.assertEqual(
+            regenerated["provenance"]["prompt_sha256"],
+            analysis_io.sha256_file(external.LYRIC_PROMPT),
+        )
 
 
 if __name__ == "__main__":

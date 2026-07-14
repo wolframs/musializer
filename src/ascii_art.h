@@ -5,6 +5,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+    ASCII_GRID_MAX_COLUMNS = 96,
+    ASCII_GRID_MAX_ROWS = 54,
+    ASCII_GRID_MAX_CELLS = ASCII_GRID_MAX_COLUMNS*ASCII_GRID_MAX_ROWS,
+};
+
 typedef struct AsciiRgba {
     uint8_t r;
     uint8_t g;

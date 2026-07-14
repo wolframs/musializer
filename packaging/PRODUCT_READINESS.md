@@ -13,7 +13,7 @@ external runtime requirements are stated.
 | ASan + UBSan application build | implemented | implemented | rejected explicitly | rejected explicitly | rejected explicitly |
 | Headless C tests | GCC/Clang host toolchain | GCC/Clang-compatible host required | GCC/Clang-compatible host required | not native-MSVC compatible | not native-MSVC compatible |
 | Distribution recipe | tar.gz | `.app` directory | tar.gz | zip | not implemented |
-| Analysis support files in artifact | included | not included in `.app` yet | included | included | not applicable |
+| Analysis support files in artifact | included | included in `.app` resources | included | included | not applicable |
 
 `./nob dist` performs a fresh release build before packaging. Linux distribution
 objects live under `build/raylib/linux-dist` and omit `-march=native`, preventing
@@ -34,9 +34,11 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 
 ## Known product gaps
 
-- The macOS `.app` is not signed, notarized, placed in a DMG, or supplied with
-  analysis helpers. It does not register `.musi` Finder document handling. Its
-  icon build also requires ImageMagick's `convert` and Apple's `iconutil`.
+- The macOS `.app` is not signed, notarized, or placed in a DMG, and it does not
+  register `.musi` Finder document handling. Analysis helpers are packaged, but
+  their Python dependencies, optional local models, Codex login, and remote
+  credential flow still require validation on a native macOS release machine.
+  Icon generation also requires ImageMagick's `convert` and Apple's `iconutil`.
 - Native MSVC distribution packaging is not implemented.
 - The MinGW archive does not bundle FFmpeg or Python. Assisted analysis invokes
   the standard Windows launcher as `py -3`, so that launcher and compatible
@@ -64,9 +66,10 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 - Export currently decodes the complete track and holds both Raylib's Wave and
   a float analysis copy. Normal songs are handled, but hour-long mixes can use
   gigabytes and need a chunked canonical PCM reader before large-media claims.
-- Imported ASCII glyph grids are per track but are not serialized in `.musi`
-  v1. Saving is deliberately blocked while a grid exists; clearing it permits
-  an empty ASCII scene to round-trip without hidden loss.
+- Saved projects use a content-addressed sibling asset bundle for audio and
+  optional ASCII source images. The `.musi` file and its matching
+  `<stem>.assets/` directory must be moved together; a single-file archive or
+  cloud sync rule that omits the sibling directory is incomplete.
 - Caption text is strict UTF-8 and the bundled atlas covers accented Latin,
   Greek, Cyrillic, and common symbols. CJK font fallback, bidirectional text,
   and complex-script shaping are not implemented yet.

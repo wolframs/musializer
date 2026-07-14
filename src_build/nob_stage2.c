@@ -118,6 +118,7 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/scene_ascii_field.c",
         "./src/scene_song_atlas.c",
         "./src/scene_spectral_terrarium.c",
+        "./src/scene_constellation_motion.c",
         "./src/scene_constellation.c");
 }
 
@@ -149,6 +150,7 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/scene_event_merge.c",
         "./src/scene_settings.c",
         "./src/scene_orbital_lattice_motion.c",
+        "./src/scene_constellation_motion.c",
         "./src/semantic_lane.c",
         "./src/lyrics.c",
         "./src/caption_layout.c",

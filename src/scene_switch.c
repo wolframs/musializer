@@ -36,6 +36,14 @@ Scene_Switch_Result scene_switch_replace(Scene_Switch_Timeline *timeline,
             !isfinite(cue->strength) || cue->strength < 0.0f || cue->strength > 1.0f) {
             return SCENE_SWITCH_ERROR_CUE;
         }
+        if (cue->settings.count > SCENE_SETTINGS_MAX_CONTROLS ||
+            (cue->settings.captured && cue->settings.count == 0) ||
+            (!cue->settings.captured && cue->settings.count != 0)) {
+            return SCENE_SWITCH_ERROR_CUE;
+        }
+        for (size_t setting = 0; setting < cue->settings.count; ++setting) {
+            if (!isfinite(cue->settings.values[setting])) return SCENE_SWITCH_ERROR_CUE;
+        }
         if (i > 0 && cue->start_seconds < cues[i - 1].start_seconds) {
             return SCENE_SWITCH_ERROR_ORDER;
         }
@@ -57,6 +65,89 @@ Scene_Switch_Result scene_switch_replace(Scene_Switch_Timeline *timeline,
     timeline->enabled = enabled;
     timeline->active_index = SIZE_MAX;
     return SCENE_SWITCH_OK;
+}
+
+static uint64_t scene_switch_next_id(const Scene_Switch_Timeline *timeline)
+{
+    uint64_t next_id = 1;
+    for (size_t index = 0; index < timeline->count; ++index) {
+        if (timeline->cues[index].id >= next_id) {
+            if (timeline->cues[index].id == UINT64_MAX) return 0;
+            next_id = timeline->cues[index].id + 1;
+        }
+    }
+    return next_id;
+}
+
+Scene_Switch_Result scene_switch_cue_at(Scene_Switch_Timeline *timeline,
+                                        double time_seconds,
+                                        double duration_seconds,
+                                        uint32_t scene_index,
+                                        uint32_t scene_count,
+                                        float strength,
+                                        const Scene_Settings_Snapshot *settings)
+{
+    if (timeline == NULL || settings == NULL) return SCENE_SWITCH_ERROR_NULL;
+    if (!isfinite(time_seconds) || !isfinite(duration_seconds) ||
+        duration_seconds <= 0.0 || time_seconds < 0.0 ||
+        time_seconds >= duration_seconds || scene_index >= scene_count ||
+        !isfinite(strength) || strength < 0.0f || strength > 1.0f ||
+        !settings->captured || settings->count == 0 ||
+        settings->count > SCENE_SETTINGS_MAX_CONTROLS) return SCENE_SWITCH_ERROR_CUE;
+    for (size_t index = 0; index < settings->count; ++index) {
+        if (!isfinite(settings->values[index])) return SCENE_SWITCH_ERROR_CUE;
+    }
+
+    Scene_Switch_Cue staged[SCENE_SWITCH_CAPACITY];
+    size_t count = timeline->count;
+    if (count == 0) {
+        uint64_t id = scene_switch_next_id(timeline);
+        if (id == 0) return SCENE_SWITCH_ERROR_DUPLICATE_ID;
+        staged[0] = (Scene_Switch_Cue) {
+            .id = id,
+            .start_seconds = 0.0,
+            .end_seconds = duration_seconds,
+            .scene_index = scene_index,
+            .strength = strength,
+            .settings = *settings,
+        };
+        count = 1;
+    } else {
+        memcpy(staged, timeline->cues, count*sizeof(staged[0]));
+        size_t selected = SIZE_MAX;
+        for (size_t index = 0; index < count; ++index) {
+            if (staged[index].start_seconds <= time_seconds &&
+                time_seconds < staged[index].end_seconds) {
+                selected = index;
+                break;
+            }
+        }
+        if (selected == SIZE_MAX) return SCENE_SWITCH_ERROR_COVERAGE;
+        if (fabs(staged[selected].start_seconds - time_seconds) <= 0.001) {
+            staged[selected].scene_index = scene_index;
+            staged[selected].strength = strength;
+            staged[selected].settings = *settings;
+        } else {
+            if (count >= SCENE_SWITCH_CAPACITY) return SCENE_SWITCH_ERROR_CAPACITY;
+            uint64_t id = scene_switch_next_id(timeline);
+            if (id == 0) return SCENE_SWITCH_ERROR_DUPLICATE_ID;
+            memmove(&staged[selected + 2], &staged[selected + 1],
+                    (count - selected - 1)*sizeof(staged[0]));
+            Scene_Switch_Cue next = staged[selected];
+            staged[selected].end_seconds = time_seconds;
+            next.id = id;
+            next.start_seconds = time_seconds;
+            next.scene_index = scene_index;
+            next.strength = strength;
+            next.settings = *settings;
+            staged[selected + 1] = next;
+            count++;
+        }
+    }
+    Scene_Switch_Result result = scene_switch_replace(
+        timeline, staged, count, duration_seconds, scene_count);
+    if (result == SCENE_SWITCH_OK) timeline->enabled = true;
+    return result;
 }
 
 Scene_Switch_Result scene_switch_update(Scene_Switch_Timeline *timeline,

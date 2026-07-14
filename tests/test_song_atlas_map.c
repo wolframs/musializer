@@ -29,7 +29,7 @@ TEST(song_atlas_map_silence_is_valid_bounded_and_flat)
     size_t count = song_atlas_map_build(
         fixture.samples, fixture.frame_count, fixture.channel_count,
         fixture.sample_rate, map);
-    EXPECT_EQ_SIZE(count, 24);
+    EXPECT_EQ_SIZE(count, 72);
     EXPECT_TRUE(song_atlas_map_valid(map));
     EXPECT_NEAR(map->duration_seconds, 2.0, 0.0);
     for (size_t i = 0; i < map->count; ++i) {
@@ -43,6 +43,29 @@ TEST(song_atlas_map_silence_is_valid_bounded_and_flat)
 
     audio_fixture_destroy(&fixture);
     free(map);
+}
+
+TEST(song_atlas_map_detail_levels_are_exact_bounded_decimations)
+{
+    EXPECT_EQ_SIZE(song_atlas_map_slice_count(16000, 8000), 72);
+    EXPECT_EQ_SIZE(song_atlas_map_slice_count(800000, 8000),
+                   SONG_ATLAS_MAX_SLICES);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_count(576, 1), 192);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_count(576, 2), 384);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_count(576, 3), 576);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_index(20, 556, 192, 0), 20);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_index(20, 556, 192, 191), 575);
+    EXPECT_NEAR(song_atlas_map_render_distance(575.0f),
+                575.0f/3.0f, 0.00001f);
+    EXPECT_NEAR(song_atlas_map_render_distance(
+                    (float)song_atlas_map_render_sample_index(0, 576, 192, 191)),
+                song_atlas_map_render_distance(
+                    (float)song_atlas_map_render_sample_index(0, 576, 576, 575)),
+                0.0f);
+    EXPECT_NEAR(song_atlas_map_render_distance(NAN), 0.0f, 0.0f);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_count(576, 0), 0);
+    EXPECT_EQ_SIZE(song_atlas_map_render_sample_index(0, 576, 192, 192),
+                   SIZE_MAX);
 }
 
 TEST(song_atlas_map_preserves_frequency_order_across_whole_track)

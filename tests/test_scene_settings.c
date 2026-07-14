@@ -12,7 +12,7 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
     EXPECT_EQ_SIZE(scene_settings_count(0), 3);
     EXPECT_EQ_SIZE(scene_settings_count(1), 5);
     EXPECT_EQ_SIZE(scene_settings_count(2), 5);
-    EXPECT_EQ_SIZE(scene_settings_count(4), 8);
+    EXPECT_EQ_SIZE(scene_settings_count(4), 10);
     EXPECT_EQ_SIZE(scene_settings_count(99), 0);
     EXPECT_NEAR(scene_settings_get(&settings, 1, 1), 24.0f, 0.0f);
     const Scene_Setting_Descriptor *height = scene_settings_descriptor(
@@ -23,13 +23,20 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
         4, ATLAS_SETTING_CAMERA);
     const Scene_Setting_Descriptor *wireframe = scene_settings_descriptor(
         4, ATLAS_SETTING_WIREFRAME);
+    const Scene_Setting_Descriptor *detail = scene_settings_descriptor(
+        4, ATLAS_SETTING_DETAIL);
+    const Scene_Setting_Descriptor *hue_motion = scene_settings_descriptor(
+        4, ATLAS_SETTING_HUE_MOTION);
     REQUIRE_TRUE(height != NULL && width != NULL && camera != NULL &&
-                 wireframe != NULL);
+                 wireframe != NULL && detail != NULL && hue_motion != NULL);
     EXPECT_NEAR(height->maximum, 2.75f, 0.0f);
     EXPECT_NEAR(width->maximum, 3.20f, 0.0f);
     EXPECT_NEAR(camera->minimum, 0.25f, 0.0f);
     EXPECT_NEAR(camera->maximum, 1.75f, 0.0f);
     EXPECT_TRUE(wireframe->kind == SCENE_SETTING_TOGGLE);
+    EXPECT_NEAR(detail->minimum, 1.0f, 0.0f);
+    EXPECT_NEAR(detail->maximum, 3.0f, 0.0f);
+    EXPECT_TRUE(hue_motion->kind == SCENE_SETTING_TOGGLE);
 }
 
 TEST(scene_settings_set_and_reset_are_bounded)
@@ -48,6 +55,83 @@ TEST(scene_settings_set_and_reset_are_bounded)
     EXPECT_NEAR(scene_settings_get(&settings, 1, 0), 1.0f, 0.0f);
 }
 
+TEST(scene_settings_snapshots_are_scene_specific_and_atomic)
+{
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    REQUIRE_TRUE(scene_settings_set(&settings, 1, PULSE_SETTING_RINGS, 31.0f));
+    Scene_Settings_Snapshot snapshot;
+    REQUIRE_TRUE(scene_settings_capture(&settings, 1, &snapshot));
+    EXPECT_TRUE(scene_settings_snapshot_valid(1, &snapshot));
+    EXPECT_EQ_SIZE(snapshot.count, 5);
+
+    REQUIRE_TRUE(scene_settings_set(&settings, 1, PULSE_SETTING_RINGS, 12.0f));
+    REQUIRE_TRUE(scene_settings_apply_snapshot(&settings, 1, &snapshot));
+    EXPECT_NEAR(scene_settings_get(&settings, 1, PULSE_SETTING_RINGS), 31.0f, 0.0f);
+
+    Scene_Settings before = settings;
+    snapshot.count = 4;
+    EXPECT_FALSE(scene_settings_apply_snapshot(&settings, 1, &snapshot));
+    EXPECT_TRUE(memcmp(&settings, &before, sizeof(settings)) == 0);
+}
+
+TEST(scene_settings_legacy_atlas_snapshots_default_new_controls)
+{
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_DETAIL, 3.0f));
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_HUE_MOTION, 1.0f));
+    Scene_Settings_Snapshot legacy = {
+        .captured = true,
+        .count = 8,
+        .values = {1.2f, 2.0f, 1.0f, 1.1f, 1.0f, 30.0f, 0.8f, 1.0f},
+    };
+    EXPECT_TRUE(scene_settings_snapshot_valid(4, &legacy));
+    REQUIRE_TRUE(scene_settings_apply_snapshot(&settings, 4, &legacy));
+    EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_DETAIL), 1.0f, 0.0f);
+    EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_HUE_MOTION),
+                0.0f, 0.0f);
+}
+
+TEST(scene_settings_presets_save_replace_apply_and_remove_per_scene)
+{
+    Scene_Settings settings;
+    Scene_Settings_Preset_Library library;
+    scene_settings_init(&settings);
+    scene_settings_preset_library_init(&library);
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_WIDTH, 2.75f));
+    size_t selected = SIZE_MAX;
+    REQUIRE_TRUE(scene_settings_preset_save(
+        &library, 4, "Preset 1", &settings, &selected));
+    EXPECT_EQ_SIZE(selected, 0);
+    EXPECT_EQ_SIZE(library.counts[4], 1);
+    EXPECT_TRUE(scene_settings_preset_library_valid(&library));
+
+    library.items[1][0].id = library.items[4][0].id;
+    strcpy(library.items[1][0].name, "Duplicate ID");
+    REQUIRE_TRUE(scene_settings_capture(
+        &settings, 1, &library.items[1][0].snapshot));
+    library.counts[1] = 1;
+    EXPECT_FALSE(scene_settings_preset_library_valid(&library));
+    memset(&library.items[1][0], 0, sizeof(library.items[1][0]));
+    library.counts[1] = 0;
+
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_WIDTH, 1.25f));
+    REQUIRE_TRUE(scene_settings_preset_apply(&library, 4, 0, &settings));
+    EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_WIDTH), 2.75f, 0.0f);
+
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_WIDTH, 3.0f));
+    REQUIRE_TRUE(scene_settings_preset_replace(&library, 4, 0, &settings));
+    REQUIRE_TRUE(scene_settings_set(&settings, 4, ATLAS_SETTING_WIDTH, 1.0f));
+    REQUIRE_TRUE(scene_settings_preset_apply(&library, 4, 0, &settings));
+    EXPECT_NEAR(scene_settings_get(&settings, 4, ATLAS_SETTING_WIDTH), 3.0f, 0.0f);
+
+    EXPECT_EQ_SIZE(library.counts[1], 0);
+    REQUIRE_TRUE(scene_settings_preset_remove(&library, 4, 0));
+    EXPECT_EQ_SIZE(library.counts[4], 0);
+    EXPECT_TRUE(scene_settings_preset_library_valid(&library));
+}
+
 TEST(scene_settings_constant_mapping_round_trip_is_atomic)
 {
     Scene_Settings source;
@@ -60,7 +144,7 @@ TEST(scene_settings_constant_mapping_round_trip_is_atomic)
     size_t count = 999;
     REQUIRE_TRUE(scene_settings_export_mappings(
         &source, mappings, MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE, &count));
-    EXPECT_EQ_SIZE(count, 31);
+    EXPECT_EQ_SIZE(count, 33);
     EXPECT_TRUE(scene_settings_mappings_supported(mappings, count));
     REQUIRE_TRUE(scene_settings_import_mappings(&decoded, mappings, count));
     EXPECT_NEAR(scene_settings_get(&decoded, 2, 0), 0.42f, 0.000001f);

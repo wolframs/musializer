@@ -7,14 +7,13 @@
 #include <rlgl.h>
 
 #include "scene_draw.h"
+#include "scene_constellation_motion.h"
 
 enum { CONSTELLATION_NODE_COUNT = 72 };
 
 typedef struct Constellation_State {
     uint64_t seed;
-    float energy;
-    float flux;
-    float onset_pulse;
+    Constellation_Motion motion;
 } Constellation_State;
 
 static float constellation_clamp01(float value)
@@ -45,21 +44,20 @@ static void constellation_init(void *state, uint64_t seed)
     Constellation_State *constellation = state;
     memset(constellation, 0, sizeof(*constellation));
     constellation->seed = seed;
+    constellation_motion_init(&constellation->motion);
 }
 
 static void constellation_update(void *state, const Scene_Frame *frame)
 {
     Constellation_State *constellation = state;
-    float delta = frame->delta_seconds;
-    if (!isfinite(delta) || delta < 0.0f) delta = 0.0f;
-    if (delta > 0.1f) delta = 0.1f;
-    float blend = 1.0f - expf(-5.0f*delta);
-    float energy = constellation_clamp01(frame->audio.rms*1.8f);
-    float flux = constellation_clamp01(frame->audio.spectral_flux*5.0f);
-    constellation->energy += (energy - constellation->energy)*blend;
-    constellation->flux += (flux - constellation->flux)*blend;
-    constellation->onset_pulse *= expf(-7.0f*delta);
-    if (frame->audio.onset) constellation->onset_pulse = 1.0f;
+    Constellation_Motion_Input input = {
+        .time_seconds = frame->time_seconds,
+        .delta_seconds = frame->delta_seconds,
+        .rms = frame->audio.rms,
+        .spectral_flux = frame->audio.spectral_flux,
+        .onset = frame->audio.onset,
+    };
+    constellation_motion_update(&constellation->motion, &input);
 }
 
 static float constellation_band(const Scene_Frame *frame, size_t index)
@@ -143,7 +141,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
                          + time*1.8f + frame->semantic.valence*70.0f*semantic_weight,
                            360.0f);
     Color background = ColorFromHSV(base_hue, 0.72f,
-                                    0.035f + constellation->energy*0.035f);
+                                    0.035f + constellation->motion.energy*0.035f);
     DrawRectangleRec(boundary, background);
 
     int saved_width = rlGetFramebufferWidth();
@@ -172,14 +170,14 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
     rlSetFramebufferWidth(viewport_width);
     rlSetFramebufferHeight(viewport_height);
 
-    float orbit = time*(0.035f + constellation->flux*0.055f)
+    float orbit = time*(0.035f + constellation->motion.flux*0.055f)
                 + constellation_unit(constellation->seed, 10)*6.2831853f;
     Camera3D camera = {
         .position = { cosf(orbit)*8.9f, 1.2f + sinf(orbit*0.61f)*0.8f,
                       sinf(orbit)*8.9f },
         .target = { 0.0f, 0.0f, 0.0f },
         .up = { 0.0f, 1.0f, 0.0f },
-        .fovy = 56.0f + constellation->onset_pulse*3.0f,
+        .fovy = 56.0f + constellation->motion.onset_pulse*3.0f,
         .projection = CAMERA_PERSPECTIVE,
     };
     BeginMode3D(camera);
@@ -201,7 +199,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         positions[i] = constellation_base_position(constellation->seed, i, time, band);
         if (strengths[i] > 0.0f) {
             float phase = constellation_unit(ids[i], i + 31U)*6.2831853f;
-            float displacement = strengths[i]*(0.4f + constellation->energy*0.55f);
+            float displacement = strengths[i]*(0.4f + constellation->motion.energy*0.55f);
             positions[i].x += cosf(phase)*displacement;
             positions[i].y += sinf(phase*1.7f)*displacement;
             positions[i].z += sinf(phase)*displacement;
@@ -219,7 +217,8 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
             float active = fmaxf(strengths[i], strengths[other]);
             Color line = ColorFromHSV(fmodf(base_hue + (float)i*1.7f, 360.0f),
                                       0.48f + active*0.35f,
-                                      0.16f + constellation->energy*0.13f + active*0.53f);
+                                      0.16f + constellation->motion.energy*0.13f +
+                                      active*0.53f);
             scene_draw_tube(positions[i], positions[other],
                             0.006f + active*0.012f, 5,
                             ColorAlpha(line, 0.32f + active*0.58f));
@@ -232,7 +231,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         Color color = constellation_event_color(types[i],
                          fmodf(base_hue + (float)i*2.1f, 360.0f), brightness);
         float radius = (0.045f + band*0.075f + strengths[i]*0.16f
-                     + constellation->onset_pulse*0.018f)*glow_scale;
+                     + constellation->motion.onset_pulse*0.018f)*glow_scale;
         DrawSphere(positions[i], radius, color);
         if (strengths[i] > 0.12f && glow_scale > 0.001f) {
             DrawSphereWires(positions[i], radius*(1.5f + strengths[i]), 5, 8,
@@ -251,7 +250,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
 const Scene_Descriptor scene_constellation_descriptor = {
     .id = SCENE_CONSTELLATION,
     .name = "Constellation",
-    .state_version = 1,
+    .state_version = 2,
     .state_size = sizeof(Constellation_State),
     .init = constellation_init,
     .update = constellation_update,

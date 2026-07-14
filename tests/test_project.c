@@ -142,6 +142,9 @@ TEST(project_editor_subset_rejects_every_lossy_normalization)
     project.cue_count = 0;
     project.audio.mode = MUSI_ASSET_IMPORTED;
     EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_SUPPORTED);
+    project.audio.mode = MUSI_ASSET_MODE_COUNT;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
                 MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE);
 }
 
@@ -160,6 +163,32 @@ TEST(project_editor_subset_accepts_canonical_scene_setting_presets)
     EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
     EXPECT_TRUE(musi_project_editor_support(&project) ==
                 MUSI_PROJECT_EDITOR_SUPPORTED);
+}
+
+TEST(project_validates_scene_presets_and_cue_setting_snapshots)
+{
+    Musi_Project project = valid_project();
+    project.scene_switches.count = 1;
+    project.scene_switches.cues[0] = (Musi_Scene_Switch_Suggestion) {
+        .id = 90, .start_seconds = 0.0, .end_seconds = 180.0,
+        .strength = 1.0f, .setting_count = 3, .settings = {1.0f, 1.0f, 1.0f},
+    };
+    strcpy(project.scene_switches.cues[0].scene_name, "spectrum");
+    project.scene_preset_count = 1;
+    project.scene_presets[0] = (Musi_Scene_Preset) {
+        .id = 91, .setting_count = 3, .settings = {1.0f, 1.0f, 1.0f},
+    };
+    strcpy(project.scene_presets[0].scene_name, "spectrum");
+    strcpy(project.scene_presets[0].name, "Preset 1");
+    EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
+
+    project.scene_switches.cues[0].settings[1] = NAN;
+    EXPECT_TRUE(musi_project_validate(&project).error ==
+                MUSI_PROJECT_ERROR_SCENE_SWITCH);
+    project.scene_switches.cues[0].settings[1] = 1.0f;
+    project.scene_presets[0].setting_count = 0;
+    EXPECT_TRUE(musi_project_validate(&project).error ==
+                MUSI_PROJECT_ERROR_SCENE_PRESET);
 }
 
 TEST(project_audio_metadata_identity_is_strict_and_tolerant_only_in_time)
@@ -204,6 +233,23 @@ TEST(project_rejects_ranges_counts_and_non_finite_values)
     fill_sha256(project.analysis_lanes[0].audio_sha256, 'c');
     EXPECT_EQ_SIZE(musi_project_validate(&project).error,
                    MUSI_PROJECT_ERROR_ANALYSIS_LANE);
+
+    project = valid_project();
+    project.ascii_image.present = true;
+    strcpy(project.ascii_image.path, "show.assets/images/source.png");
+    fill_sha256(project.ascii_image.sha256, 'd');
+    project.ascii_image.columns = ASCII_GRID_MAX_COLUMNS;
+    project.ascii_image.rows = ASCII_GRID_MAX_ROWS;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error, MUSI_PROJECT_VALID);
+    project.ascii_image.columns = ASCII_GRID_MAX_COLUMNS + 1u;
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error,
+                   MUSI_PROJECT_ERROR_ASCII_IMAGE);
+
+    project = valid_project();
+    project.ascii_image.path[0] = 'x';
+    project.ascii_image.path[1] = '\0';
+    EXPECT_EQ_SIZE(musi_project_validate(&project).error,
+                   MUSI_PROJECT_ERROR_ASCII_IMAGE);
 }
 
 TEST(project_rejects_duplicate_ids_unsorted_and_overlapping_cues)

@@ -4,15 +4,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "ascii_art.h"
 #include "event_timeline.h"
 #include "lyrics.h"
 #include "scene_switch.h"
 
 #define MUSI_PROJECT_SCHEMA_VERSION 1u
 #define MUSI_PROJECT_MAX_SCENES 32u
-#define MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE 32u
+#define MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE 40u
 #define MUSI_PROJECT_MAX_CUES 256u
 #define MUSI_PROJECT_MAX_ANALYSIS_LANES 8u
+#define MUSI_PROJECT_MAX_SCENE_PRESETS 56u
 
 #define MUSI_PROJECT_ID_CAPACITY 65u
 #define MUSI_PROJECT_NAME_CAPACITY 129u
@@ -96,6 +98,14 @@ typedef struct Musi_Audio_Asset {
     uint16_t channels;
 } Musi_Audio_Asset;
 
+typedef struct Musi_Ascii_Image_Asset {
+    bool present;
+    char path[MUSI_PROJECT_PATH_CAPACITY];
+    char sha256[MUSI_PROJECT_ID_CAPACITY];
+    uint32_t columns;
+    uint32_t rows;
+} Musi_Ascii_Image_Asset;
+
 typedef struct Musi_Output_Settings {
     uint32_t width;
     uint32_t height;
@@ -166,6 +176,8 @@ typedef struct Musi_Scene_Switch_Suggestion {
     double end_seconds;
     char scene_name[MUSI_PROJECT_TYPE_CAPACITY];
     float strength;
+    size_t setting_count;
+    float settings[SCENE_SETTINGS_MAX_CONTROLS];
 } Musi_Scene_Switch_Suggestion;
 
 typedef struct Musi_Scene_Switch_Suggestions {
@@ -174,10 +186,19 @@ typedef struct Musi_Scene_Switch_Suggestions {
     Musi_Scene_Switch_Suggestion cues[SCENE_SWITCH_CAPACITY];
 } Musi_Scene_Switch_Suggestions;
 
+typedef struct Musi_Scene_Preset {
+    uint64_t id;
+    char scene_name[MUSI_PROJECT_TYPE_CAPACITY];
+    char name[MUSI_PROJECT_NAME_CAPACITY];
+    size_t setting_count;
+    float settings[SCENE_SETTINGS_MAX_CONTROLS];
+} Musi_Scene_Preset;
+
 typedef struct Musi_Project {
     uint32_t schema_version;
     Musi_Project_Metadata metadata;
     Musi_Audio_Asset audio;
+    Musi_Ascii_Image_Asset ascii_image;
     Musi_Output_Settings output;
     uint64_t deterministic_seed;
     size_t scene_count;
@@ -188,6 +209,8 @@ typedef struct Musi_Project {
     Musi_Analysis_Lane_Reference analysis_lanes[MUSI_PROJECT_MAX_ANALYSIS_LANES];
     Lyrics_Document lyrics;
     Musi_Scene_Switch_Suggestions scene_switches;
+    size_t scene_preset_count;
+    Musi_Scene_Preset scene_presets[MUSI_PROJECT_MAX_SCENE_PRESETS];
     // Validated model-derived semantic values are embedded project data. The
     // analysis_lanes entries above are provenance metadata, not dependencies
     // required to reconstruct this evaluated lane.
@@ -203,6 +226,7 @@ typedef enum Musi_Project_Error {
     MUSI_PROJECT_ERROR_SCHEMA_VERSION,
     MUSI_PROJECT_ERROR_METADATA,
     MUSI_PROJECT_ERROR_AUDIO,
+    MUSI_PROJECT_ERROR_ASCII_IMAGE,
     MUSI_PROJECT_ERROR_OUTPUT,
     MUSI_PROJECT_ERROR_COUNT,
     MUSI_PROJECT_ERROR_SCENE,
@@ -214,6 +238,7 @@ typedef enum Musi_Project_Error {
     MUSI_PROJECT_ERROR_DUPLICATE_ID,
     MUSI_PROJECT_ERROR_LYRICS,
     MUSI_PROJECT_ERROR_SCENE_SWITCH,
+    MUSI_PROJECT_ERROR_SCENE_PRESET,
     MUSI_PROJECT_ERROR_MANUAL_EVENT,
     MUSI_PROJECT_ERROR_SEMANTIC_EVENT
 } Musi_Project_Error;

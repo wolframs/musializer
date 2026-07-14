@@ -40,6 +40,18 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIn("track->scene_settings = hydrated_settings", source)
         self.assertIn("mark_project_dirty(track);", source)
 
+    def test_scene_presets_and_cues_capture_durable_tuning_snapshots(self):
+        source = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        codec = (ROOT / "src/project_io.c").read_text(encoding="utf-8")
+
+        self.assertIn('"+ Scene"', source)
+        self.assertIn("scene_switch_cue_at(", source)
+        self.assertIn("scene_settings_capture(", source)
+        self.assertIn("track_effective_scene_settings(track)", source)
+        self.assertIn("scene_settings_preset_save(", source)
+        self.assertIn("scene_settings_preset_apply(", source)
+        self.assertIn('\\"scene_presets\\"', codec)
+
     def test_song_atlas_exposes_extended_tuning_and_real_wireframe_mode(self):
         settings = (ROOT / "src/scene_settings.c").read_text(encoding="utf-8")
         scene = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")
@@ -51,12 +63,18 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIn('"settings.atlas.color", "Hue shift (deg)"', settings)
         self.assertIn('"settings.atlas.speed", "Camera speed"', settings)
         self.assertIn('TOGGLE("settings.atlas.wireframe"', settings)
+        self.assertIn('"settings.atlas.detail", "Sampling detail"', settings)
+        self.assertIn('TOGGLE("settings.atlas.hue_motion", "Hue motion"', settings)
         self.assertIn("ATLAS_SETTING_COLOR", scene)
         self.assertIn("ATLAS_SETTING_SPEED", scene)
         self.assertIn("ATLAS_SETTING_WIREFRAME", scene)
+        self.assertIn("ATLAS_SETTING_DETAIL", scene)
+        self.assertIn("ATLAS_SETTING_HUE_MOTION", scene)
+        self.assertIn("song_atlas_map_render_sample_count(", scene)
+        self.assertIn("atlas_map_dynamics(", scene)
         self.assertGreaterEqual(scene.count("if (!wireframe)"), 2)
-        self.assertIn('"Filled", !enabled', ui)
-        self.assertIn('"Wireframe", enabled', ui)
+        self.assertIn('hue_motion ? "Manual" : "Filled"', ui)
+        self.assertIn('hue_motion ? "Music" : "Wireframe"', ui)
         self.assertIn("p->scene_settings_scroll/max_scroll", ui)
 
     def test_ascii_field_animates_glyphs_and_uses_compression_safe_scanlines(self):
@@ -84,6 +102,24 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIsNotNone(capture_condition)
         self.assertIn("ATLAS_CAPTURE_INTERVAL", capture_condition.group("body"))
         self.assertNotIn("frame->audio.onset", capture_condition.group("body"))
+
+    def test_song_atlas_live_detail_preserves_depth_while_adding_samples(self):
+        source = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")
+
+        self.assertIn("ATLAS_BASE_CAPTURE_INTERVAL", source)
+        self.assertIn("song_atlas_map_render_sample_count(", source)
+        self.assertIn("song_atlas_map_render_sample_index(", source)
+        self.assertIn("song_atlas_map_render_distance(source_age + scroll_phase)", source)
+
+    def test_constellation_rebases_its_motion_envelope_on_seeks(self):
+        source = (ROOT / "src/scene_constellation.c").read_text(encoding="utf-8")
+        motion = (ROOT / "src/scene_constellation_motion.c").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("constellation_motion_update(", source)
+        self.assertIn("bool discontinuity", motion)
+        self.assertIn("constellation_motion_rebase(motion, input)", motion)
 
     def test_song_atlas_heightfield_faces_camera_and_batches_map_lines(self):
         source = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")

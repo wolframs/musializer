@@ -11,7 +11,9 @@
 #define ATLAS_BAND_COUNT SONG_ATLAS_BAND_COUNT
 #define ATLAS_SLICE_COUNT SONG_ATLAS_MAX_SLICES
 
-#define ATLAS_CAPTURE_INTERVAL 0.11
+#define ATLAS_BASE_CAPTURE_INTERVAL 0.11
+#define ATLAS_CAPTURE_INTERVAL \
+    (ATLAS_BASE_CAPTURE_INTERVAL/(double)SONG_ATLAS_MAX_DETAIL)
 #define ATLAS_SLICE_SPACING 0.29f
 
 typedef struct {
@@ -118,7 +120,9 @@ static void atlas_capture(Song_Atlas_State *atlas, const Scene_Frame *frame)
 
         // Quick attacks preserve musical articulation; slower releases keep
         // adjacent terrain slices visually connected instead of sparkling.
-        float response = value > atlas->filtered_bands[band] ? 0.62f : 0.24f;
+        float base_response = value > atlas->filtered_bands[band] ? 0.62f : 0.24f;
+        float response = 1.0f - powf(
+            1.0f - base_response, 1.0f/(float)SONG_ATLAS_MAX_DETAIL);
         atlas->filtered_bands[band] +=
             (value - atlas->filtered_bands[band])*response;
         slice->bands[band] = powf(atlas_clamp01(atlas->filtered_bands[band]), 0.78f);
@@ -190,6 +194,14 @@ static Vector3 atlas_vertex(const Song_Atlas_Slice *slice, size_t band, float ag
     };
 }
 
+static Vector3 atlas_live_vertex(const Song_Atlas_Slice *slice, size_t band,
+                                 float source_age, float scroll_phase)
+{
+    return atlas_vertex(slice, band,
+                        song_atlas_map_render_distance(source_age + scroll_phase),
+                        0.0f);
+}
+
 static Color atlas_mix_color(Color from, Color to, float amount)
 {
     amount = atlas_clamp01(amount);
@@ -224,7 +236,7 @@ static Color atlas_color(const Song_Atlas_Slice *slice, size_t band, float age,
     float amplitude = slice->bands[band];
     Color color = atlas_mix_color(frequency, summit,
                                   atlas_clamp01(amplitude*0.52f + slice->flux*0.14f));
-    float depth = 1.0f - (float)age/(float)(ATLAS_SLICE_COUNT - 1);
+    float depth = 1.0f - (float)age/(float)(SONG_ATLAS_BASE_SLICES - 1);
     float exposure = 0.12f + depth*0.68f + amplitude*0.24f;
     color.r = (unsigned char)((float)color.r*atlas_clamp01(exposure));
     color.g = (unsigned char)((float)color.g*atlas_clamp01(exposure));
@@ -240,24 +252,37 @@ static void atlas_rl_vertex(Vector3 point, Color color)
 
 static void atlas_draw_surface(const Song_Atlas_State *atlas, float scroll_phase,
                                float pixel_scale, float contour_scale,
-                               float color_shift, bool wireframe)
+                               float color_shift, bool wireframe,
+                               size_t detail_level)
 {
     if (atlas->count < 2) return;
+    size_t available = atlas->count;
+    size_t render_count = song_atlas_map_render_sample_count(
+        available, detail_level);
+    if (render_count < 2) return;
 
     if (!wireframe) {
         rlBegin(RL_TRIANGLES);
-        for (size_t row = 1; row < atlas->count; ++row) {
-            const Song_Atlas_Slice *newer = atlas_slice(atlas, atlas->count - row);
-            const Song_Atlas_Slice *older = atlas_slice(atlas, atlas->count - row - 1);
+        for (size_t sample = 1; sample < render_count; ++sample) {
+            size_t newer_age = song_atlas_map_render_sample_index(
+                0, available, render_count, sample - 1);
+            size_t older_age = song_atlas_map_render_sample_index(
+                0, available, render_count, sample);
+            const Song_Atlas_Slice *newer = atlas_slice(
+                atlas, atlas->count - newer_age - 1);
+            const Song_Atlas_Slice *older = atlas_slice(
+                atlas, atlas->count - older_age - 1);
             for (size_t band = 0; band + 1 < ATLAS_BAND_COUNT; ++band) {
-                Vector3 a = atlas_vertex(newer, band, row - 1, scroll_phase);
-                Vector3 b = atlas_vertex(newer, band + 1, row - 1, scroll_phase);
-                Vector3 c = atlas_vertex(older, band, row, scroll_phase);
-                Vector3 d = atlas_vertex(older, band + 1, row, scroll_phase);
-                Color ca = atlas_color(newer, band, row - 1, color_shift);
-                Color cb = atlas_color(newer, band + 1, row - 1, color_shift);
-                Color cc = atlas_color(older, band, row, color_shift);
-                Color cd = atlas_color(older, band + 1, row, color_shift);
+                Vector3 a = atlas_live_vertex(newer, band, newer_age, scroll_phase);
+                Vector3 b = atlas_live_vertex(newer, band + 1, newer_age, scroll_phase);
+                Vector3 c = atlas_live_vertex(older, band, older_age, scroll_phase);
+                Vector3 d = atlas_live_vertex(older, band + 1, older_age, scroll_phase);
+                float newer_depth = song_atlas_map_render_distance((float)newer_age);
+                float older_depth = song_atlas_map_render_distance((float)older_age);
+                Color ca = atlas_color(newer, band, newer_depth, color_shift);
+                Color cb = atlas_color(newer, band + 1, newer_depth, color_shift);
+                Color cc = atlas_color(older, band, older_depth, color_shift);
+                Color cd = atlas_color(older, band + 1, older_depth, color_shift);
                 // Counter-clockwise from above: the atlas camera lives above the
                 // heightfield, so upward-facing terrain must survive back-face
                 // culling on every OpenGL target.
@@ -277,13 +302,18 @@ static void atlas_draw_surface(const Song_Atlas_State *atlas, float scroll_phase
     rlBegin(RL_LINES);
     size_t row_step = wireframe ? 1U : 5U;
     size_t band_step = wireframe ? 1U : 5U;
-    for (size_t row = 0; row < atlas->count; row += row_step) {
-        const Song_Atlas_Slice *slice = atlas_slice(atlas, atlas->count - row - 1);
+    for (size_t sample = 0; sample < render_count; sample += row_step) {
+        size_t source_age = song_atlas_map_render_sample_index(
+            0, available, render_count, sample);
+        const Song_Atlas_Slice *slice = atlas_slice(
+            atlas, atlas->count - source_age - 1);
         Color line = ColorAlpha(RAYWHITE, (wireframe ? 0.16f : 0.08f) + 0.22f*
-                                (1.0f - (float)row/(float)atlas->count));
+                                (1.0f - (float)sample/(float)render_count));
         for (size_t band = 0; band + 1 < ATLAS_BAND_COUNT; ++band) {
-            atlas_rl_vertex(atlas_vertex(slice, band, row, scroll_phase), line);
-            atlas_rl_vertex(atlas_vertex(slice, band + 1, row, scroll_phase), line);
+            atlas_rl_vertex(atlas_live_vertex(
+                                slice, band, source_age, scroll_phase), line);
+            atlas_rl_vertex(atlas_live_vertex(
+                                slice, band + 1, source_age, scroll_phase), line);
         }
     }
     for (size_t band = wireframe ? 0U : 2U;
@@ -291,22 +321,34 @@ static void atlas_draw_surface(const Song_Atlas_State *atlas, float scroll_phase
         Color line = ColorAlpha(atlas_hue_shift(
                                 (Color){ 93, 219, 205, 255 }, color_shift),
                                 wireframe ? 0.32f : 0.18f);
-        for (size_t row = 1; row < atlas->count; ++row) {
-            const Song_Atlas_Slice *newer = atlas_slice(atlas, atlas->count - row);
-            const Song_Atlas_Slice *older = atlas_slice(atlas, atlas->count - row - 1);
-            atlas_rl_vertex(atlas_vertex(newer, band, row - 1, scroll_phase), line);
-            atlas_rl_vertex(atlas_vertex(older, band, row, scroll_phase), line);
+        for (size_t sample = 1; sample < render_count; ++sample) {
+            size_t newer_age = song_atlas_map_render_sample_index(
+                0, available, render_count, sample - 1);
+            size_t older_age = song_atlas_map_render_sample_index(
+                0, available, render_count, sample);
+            const Song_Atlas_Slice *newer = atlas_slice(
+                atlas, atlas->count - newer_age - 1);
+            const Song_Atlas_Slice *older = atlas_slice(
+                atlas, atlas->count - older_age - 1);
+            atlas_rl_vertex(atlas_live_vertex(
+                                newer, band, newer_age, scroll_phase), line);
+            atlas_rl_vertex(atlas_live_vertex(
+                                older, band, older_age, scroll_phase), line);
         }
     }
-    for (size_t row = 0; row < atlas->count; ++row) {
-        const Song_Atlas_Slice *slice = atlas_slice(atlas, atlas->count - row - 1);
+    for (size_t sample = 0; sample < render_count; ++sample) {
+        size_t source_age = song_atlas_map_render_sample_index(
+            0, available, render_count, sample);
+        const Song_Atlas_Slice *slice = atlas_slice(
+            atlas, atlas->count - source_age - 1);
         if (!slice->onset) continue;
         Color landmark = ColorAlpha(atlas_hue_shift(
                                     (Color){ 255, 219, 150, 255 }, color_shift),
                                     0.24f + slice->flux*0.52f);
         for (size_t band = 0; band + 1 < ATLAS_BAND_COUNT; ++band) {
-            Vector3 a = atlas_vertex(slice, band, row, scroll_phase);
-            Vector3 b = atlas_vertex(slice, band + 1, row, scroll_phase);
+            Vector3 a = atlas_live_vertex(slice, band, source_age, scroll_phase);
+            Vector3 b = atlas_live_vertex(
+                slice, band + 1, source_age, scroll_phase);
             a.y += 0.025f;
             b.y += 0.025f;
             atlas_rl_vertex(a, landmark);
@@ -326,6 +368,23 @@ static float atlas_map_playhead(const Song_Atlas_Map *map, double time_seconds)
     return (float)(normalized*(double)(map->count - 1));
 }
 
+static void atlas_map_dynamics(const Song_Atlas_Map *map, float playhead,
+                               float *energy, float *flux)
+{
+    if (!song_atlas_map_valid(map) || energy == NULL || flux == NULL) return;
+    size_t lower = (size_t)floorf(playhead);
+    if (lower >= map->count - 1) {
+        *energy = map->slices[map->count - 1].rms;
+        *flux = map->slices[map->count - 1].flux;
+        return;
+    }
+    float amount = playhead - (float)lower;
+    *energy = map->slices[lower].rms +
+              (map->slices[lower + 1].rms - map->slices[lower].rms)*amount;
+    *flux = map->slices[lower].flux +
+            (map->slices[lower + 1].flux - map->slices[lower].flux)*amount;
+}
+
 static Vector3 atlas_map_playhead_vertex(const Song_Atlas_Map *map,
                                          float playhead, size_t band)
 {
@@ -335,8 +394,10 @@ static Vector3 atlas_map_playhead_vertex(const Song_Atlas_Map *map,
     }
     size_t upper = lower + 1;
     float amount = playhead - (float)lower;
-    Vector3 a = atlas_vertex(&map->slices[lower], band, -amount, 0.0f);
-    Vector3 b = atlas_vertex(&map->slices[upper], band, 1.0f - amount, 0.0f);
+    Vector3 a = atlas_vertex(&map->slices[lower], band,
+                             -amount/(float)SONG_ATLAS_MAX_DETAIL, 0.0f);
+    Vector3 b = atlas_vertex(&map->slices[upper], band,
+                             (1.0f - amount)/(float)SONG_ATLAS_MAX_DETAIL, 0.0f);
     return (Vector3) {
         a.x + (b.x - a.x)*amount,
         a.y + (b.y - a.y)*amount,
@@ -344,29 +405,48 @@ static Vector3 atlas_map_playhead_vertex(const Song_Atlas_Map *map,
     };
 }
 
+static Vector3 atlas_complete_vertex(const Song_Atlas_Slice *slice, size_t band,
+                                     float map_distance)
+{
+    return atlas_vertex(slice, band,
+                        song_atlas_map_render_distance(map_distance), 0.0f);
+}
+
 static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
                                         double time_seconds, float pixel_scale,
                                         float contour_scale, float color_shift,
-                                        bool wireframe)
+                                        bool wireframe, size_t detail_level)
 {
     if (!song_atlas_map_valid(map)) return;
     float playhead = atlas_map_playhead(map, time_seconds);
-    size_t first = playhead > 10.0f ? (size_t)floorf(playhead) - 10 : 0;
+    const size_t history = 10U*SONG_ATLAS_MAX_DETAIL;
+    size_t first = playhead > (float)history ?
+                   (size_t)floorf(playhead) - history : 0;
+    size_t available = map->count - first;
+    size_t sample_count = song_atlas_map_render_sample_count(
+        available, detail_level);
+    if (sample_count < 2) return;
 
     if (!wireframe) {
         rlBegin(RL_TRIANGLES);
-        for (size_t row = first; row + 1 < map->count; ++row) {
+        for (size_t sample = 0; sample + 1 < sample_count; ++sample) {
+            size_t row = song_atlas_map_render_sample_index(
+                first, available, sample_count, sample);
+            size_t next_row = song_atlas_map_render_sample_index(
+                first, available, sample_count, sample + 1);
             const Song_Atlas_Slice *near = &map->slices[row];
-            const Song_Atlas_Slice *far = &map->slices[row + 1];
+            const Song_Atlas_Slice *far = &map->slices[next_row];
             float near_distance = (float)row - playhead;
-            float far_distance = (float)(row + 1) - playhead;
-            float near_depth = fmaxf(0.0f, near_distance);
-            float far_depth = fmaxf(0.0f, far_distance);
+            float far_distance = (float)next_row - playhead;
+            float near_depth = fmaxf(0.0f, near_distance)/
+                               (float)SONG_ATLAS_MAX_DETAIL;
+            float far_depth = fmaxf(0.0f, far_distance)/
+                              (float)SONG_ATLAS_MAX_DETAIL;
             for (size_t band = 0; band + 1 < ATLAS_BAND_COUNT; ++band) {
-                Vector3 a = atlas_vertex(near, band, near_distance, 0.0f);
-                Vector3 b = atlas_vertex(near, band + 1, near_distance, 0.0f);
-                Vector3 c = atlas_vertex(far, band, far_distance, 0.0f);
-                Vector3 d = atlas_vertex(far, band + 1, far_distance, 0.0f);
+                Vector3 a = atlas_complete_vertex(near, band, near_distance);
+                Vector3 b = atlas_complete_vertex(near, band + 1, near_distance);
+                Vector3 c = atlas_complete_vertex(far, band, far_distance);
+                Vector3 d = atlas_complete_vertex(far, band + 1, far_distance);
                 Color ca = atlas_color(near, band, near_depth, color_shift);
                 Color cb = atlas_color(near, band + 1, near_depth, color_shift);
                 Color cc = atlas_color(far, band, far_depth, color_shift);
@@ -382,7 +462,9 @@ static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
 
     rlSetLineWidth(fmaxf(1.0f, pixel_scale*contour_scale));
     rlBegin(RL_LINES);
-    for (size_t row = first; row < map->count; ++row) {
+    for (size_t sample = 0; sample < sample_count; ++sample) {
+        size_t row = song_atlas_map_render_sample_index(
+            first, available, sample_count, sample);
         float distance = (float)row - playhead;
         if (!wireframe && row%8 != 0 && !map->slices[row].onset) continue;
         Color line = map->slices[row].onset ?
@@ -391,10 +473,10 @@ static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
                        0.28f + map->slices[row].flux*0.50f) :
             ColorAlpha(RAYWHITE, 0.12f);
         for (size_t band = 0; band + 1 < ATLAS_BAND_COUNT; ++band) {
-            atlas_rl_vertex(atlas_vertex(&map->slices[row], band,
-                                         distance, 0.0f), line);
-            atlas_rl_vertex(atlas_vertex(&map->slices[row], band + 1,
-                                         distance, 0.0f), line);
+            atlas_rl_vertex(atlas_complete_vertex(
+                                 &map->slices[row], band, distance), line);
+            atlas_rl_vertex(atlas_complete_vertex(
+                                 &map->slices[row], band + 1, distance), line);
         }
     }
     size_t band_step = wireframe ? 1U : 5U;
@@ -403,13 +485,17 @@ static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
         Color line = ColorAlpha(atlas_hue_shift(
                                 (Color){ 93, 219, 205, 255 }, color_shift),
                                 wireframe ? 0.30f : 0.16f);
-        for (size_t row = first; row + 1 < map->count; ++row) {
+        for (size_t sample = 0; sample + 1 < sample_count; ++sample) {
+            size_t row = song_atlas_map_render_sample_index(
+                first, available, sample_count, sample);
+            size_t next_row = song_atlas_map_render_sample_index(
+                first, available, sample_count, sample + 1);
             float near_distance = (float)row - playhead;
-            float far_distance = (float)(row + 1) - playhead;
-            atlas_rl_vertex(atlas_vertex(&map->slices[row], band,
-                                         near_distance, 0.0f), line);
-            atlas_rl_vertex(atlas_vertex(&map->slices[row + 1], band,
-                                         far_distance, 0.0f), line);
+            float far_distance = (float)next_row - playhead;
+            atlas_rl_vertex(atlas_complete_vertex(
+                                 &map->slices[row], band, near_distance), line);
+            atlas_rl_vertex(atlas_complete_vertex(
+                                 &map->slices[next_row], band, far_distance), line);
         }
     }
     Color playhead_color = { 255, 238, 196, 255 };
@@ -447,6 +533,31 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_SPEED);
     bool wireframe = scene_settings_get(
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_WIREFRAME) >= 0.5f;
+    size_t detail_level = (size_t)lroundf(scene_settings_get(
+        renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_DETAIL));
+    if (detail_level < 1) detail_level = 1;
+    if (detail_level > SONG_ATLAS_MAX_DETAIL) {
+        detail_level = SONG_ATLAS_MAX_DETAIL;
+    }
+    bool hue_motion = scene_settings_get(
+        renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_HUE_MOTION) >= 0.5f;
+    if (hue_motion) {
+        float hue_energy = frame->audio.rms;
+        float hue_flux = frame->audio.spectral_flux;
+        if (song_atlas_map_valid(renderer->song_atlas_map)) {
+            float playhead = atlas_map_playhead(renderer->song_atlas_map,
+                                                frame->time_seconds);
+            atlas_map_dynamics(renderer->song_atlas_map, playhead,
+                               &hue_energy, &hue_flux);
+        }
+        hue_energy = atlas_clamp01(hue_energy);
+        hue_flux = atlas_clamp01(hue_flux);
+        float hue_wave = sinf((float)frame->time_seconds*
+                              (0.70f + hue_energy*0.55f));
+        color_shift += fmodf((float)frame->time_seconds*12.0f +
+                             hue_wave*(14.0f + hue_energy*34.0f) +
+                             hue_flux*82.0f, 360.0f);
+    }
     float seed_phase = atlas_hash_unit(atlas->seed, 7)*2.0f*PI;
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue = fmodf(205.0f + atlas_hash_unit(atlas->seed, 2)*100.0f +
@@ -492,7 +603,8 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
     if (song_atlas_map_valid(renderer->song_atlas_map)) {
         float playhead = atlas_map_playhead(renderer->song_atlas_map,
                                             frame->time_seconds);
-        float remaining = (float)(renderer->song_atlas_map->count - 1) - playhead;
+        float remaining = ((float)(renderer->song_atlas_map->count - 1) - playhead)/
+                          (float)SONG_ATLAS_MAX_DETAIL;
         float focus_slices = fminf(18.0f, fmaxf(4.0f, remaining*0.45f));
         target_z = 1.40f - focus_slices*ATLAS_SLICE_SPACING;
     }
@@ -521,11 +633,11 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
         atlas_draw_complete_surface(renderer->song_atlas_map,
                                     frame->time_seconds,
                                     renderer->pixel_scale, contour_scale,
-                                    color_shift, wireframe);
+                                    color_shift, wireframe, detail_level);
     } else {
         atlas_draw_surface(atlas, atlas_scroll_phase(atlas, frame->time_seconds),
                            renderer->pixel_scale, contour_scale, color_shift,
-                           wireframe);
+                           wireframe, detail_level);
     }
 
     EndMode3D();
@@ -540,7 +652,7 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
 const Scene_Descriptor scene_song_atlas_descriptor = {
     .id = SCENE_SONG_ATLAS,
     .name = "Song Atlas",
-    .state_version = 2,
+    .state_version = 4,
     .state_size = sizeof(Song_Atlas_State),
     .init = song_atlas_init,
     .update = song_atlas_update,

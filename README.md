@@ -26,9 +26,10 @@ The upstream demo below remains a lovely snapshot of where it began.
 - Switch among seven built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
   ASCII Field, Song Atlas, Spectral Terrarium, and Constellation.
 - Tune every scene from a live parameter inspector. Song Atlas includes broad
-  terrain/camera ranges, hue and camera-speed controls, and Filled/Wireframe
-  surface modes; exact values and per-scene resets are saved with the track
-  and reused by offline export.
+  terrain/camera ranges, 1x-3x sampling detail, manual or music-reactive hue,
+  camera-speed controls, and Filled/Wireframe surface modes; exact values,
+  numbered per-scene presets, and per-scene resets are saved with the track and
+  reused by offline export.
 - Import an image as a color-aware, audio-reactive ASCII field with animated
   glyph waves and compression-resilient CRT scanlines; author timeline events
   and edit timed lyrics in the application.
@@ -143,16 +144,21 @@ The normal workflow is:
    window expands to the right when the current monitor has room; otherwise
    the track rail and preview compact without hiding the controls. Drag a
    slider for live feedback or use **Reset** to restore that scene's defaults.
+   **Save new** captures a per-scene preset; **Load**, **Update**, and
+   **Delete** manage the selected preset.
 3. Open **Lyrics** to write or import lyric cues and adjust their start/end
    times against the playhead.
 4. Open **Assist** for timed-lyric help, measured scene planning, semantic music
    interpretation, or the complete pipeline. Selecting a workflow first shows
    its local/remote data boundary. Results are validated and staged with a
    lane-specific impact summary, then require an explicit Apply confirmation.
-5. Inspect the generated section markers and enable **Auto scenes** if they
-   should drive both preview and export.
-6. Add manual Constellation events with **+ Feel**, **+ Cue**, and **+ Custom**,
-   or import an image into ASCII Field.
+5. Inspect generated section markers and enable **Auto scenes** if they should
+   drive both preview and export. To author a scene change manually, position
+   the playhead, select and tune the scene, then choose **+ Scene**. The cue
+   captures the scene's tuning at that moment; seeking and export reload the
+   same snapshot. Cue boundaries currently use deterministic cuts.
+6. Add manual visualization events with **+ Feel** and **+ Custom**, or import
+   an image into ASCII Field.
 7. Open **Export**, choose resolution, frame rate, and quality, then select the
    destination. Progress reports the exact frame count and ETA; cancellation
    does not replace an existing video.
@@ -227,22 +233,34 @@ Projects embed the evaluated lyrics, semantic events, manual events, scene
 suggestions, deterministic seed, export settings, metadata, and analysis
 provenance. They do not require a mutable analysis cache to replay accepted
 semantic cues. Saves use a durable temporary sibling and atomic replacement.
-Audio below the saved project directory can be stored as a verified relative
-reference; unrelated assets retain a canonical absolute path.
+Every save imports the track audio and, when present, the ASCII source image
+into a content-addressed sibling bundle:
+
+```text
+show.musi
+show.assets/audio/<sha256>.<ext>
+show.assets/images/<sha256>.<ext>
+```
+
+The project stores strict relative references plus SHA-256 identities. Existing
+matching objects are reused, conflicting objects are rejected, and the project
+file is published only after every required asset is present. As a result,
+moving `show.musi` together with `show.assets/` keeps the project portable and
+offline-replayable; source files elsewhere on the workstation are no longer a
+runtime dependency after a successful save.
 
 The v1 schema deliberately describes future composition features that this
 editor cannot yet preserve. This build opens only its lossless editor subset:
-referenced full-track audio, integer-frame-rate H.264 MP4 output, one enabled
-opaque full-track Normal scene, no parameter cues, and only Musializer's
-canonical constant mappings used to store scene-control values. Arbitrary
-analysis-driven mappings and other schema-valid composition features are
-rejected with an explicit unsupported-feature error instead of being silently
-rewritten.
+full-track referenced or imported audio, integer-frame-rate H.264 MP4 output,
+one enabled opaque full-track Normal scene, and only Musializer's canonical
+constant mappings and scene-cue snapshots. Arbitrary analysis-driven mappings
+and other schema-valid composition features are rejected with an explicit
+unsupported-feature error instead of being silently rewritten.
 
-Imported ASCII grids are currently per-track editor state but are not stored in
-`.musi` v1. Export works, but project save is blocked while a populated grid
-exists. Use **Clear image** to discard it explicitly; an empty ASCII scene then
-saves and reopens normally.
+An imported ASCII image is stored as a verified image asset with its derived
+grid dimensions. Reopening the project verifies the image identity and rebuilds
+the deterministic grid before exposing the track; a missing, modified, or
+escaped bundle path fails closed instead of silently clearing the scene.
 
 ## Rendering
 

@@ -2,6 +2,30 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
+
+static bool timeline_suffix_equal(const char *value, const char *suffix)
+{
+    size_t value_length = strlen(value);
+    size_t suffix_length = strlen(suffix);
+    if (value_length < suffix_length) return false;
+    const char *at = value + value_length - suffix_length;
+    for (size_t index = 0; index < suffix_length; ++index) {
+        char left = at[index];
+        char right = suffix[index];
+        if (left >= 'A' && left <= 'Z') left = (char)(left - 'A' + 'a');
+        if (right >= 'A' && right <= 'Z') right = (char)(right - 'A' + 'a');
+        if (left != right) return false;
+    }
+    return true;
+}
+
+bool track_timeline_path_is_seekable(const char *path)
+{
+    if (path == NULL || path[0] == '\0') return false;
+    return !timeline_suffix_equal(path, ".xm") &&
+           !timeline_suffix_equal(path, ".mod");
+}
 
 static double clamp_position(double seconds, double duration_seconds)
 {

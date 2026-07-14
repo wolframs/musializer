@@ -59,13 +59,21 @@ Modes have deliberately narrow authority:
 
 - `lyrics` runs/reuses measured analysis, configured GPU whisper.cpp, and an
   evidence-preserving Codex review.
-- `sections` is entirely local and uses whatever valid lyric or semantic caches
-  already exist.
+- `sections` is entirely local and uses measured audio analysis plus any
+  independently valid cached local lyric review. It never consumes a cached
+  MiMo semantic lane.
 - `mimo` runs/reuses measured analysis and the existing MiMo/OpenRouter helper.
   This explicit command is the authorization boundary for the remote request.
 - `all` performs both lyric and MiMo work, then plans sections.
 
-All stages are hash-checked and cache-aware. Whisper is configured with
+All stages are hash-checked and cache-aware at their own provenance boundary.
+Measured caches include the analyzer version and analysis configuration;
+Whisper caches include the adapter version, model file hash, language, timing
+model, and measured duration; Codex reviews include the Whisper source hash,
+selected model, and repository prompt version/hash; MiMo caches include its
+model, prompt, output schema, audio metadata, routing, fallback, and ZDR request
+settings. A mismatch regenerates that stage and its downstream products while
+leaving still-valid upstream evidence reusable. Whisper is configured with
 `MUSIALIZER_WHISPER_BIN` and `MUSIALIZER_WHISPER_MODEL` or the corresponding
 flags. On this workstation the helper also detects the prior setup at
 `/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli` and
@@ -105,9 +113,13 @@ indices and stay within their timing envelope. The review is a separate
 adds uncited lines.
 
 The deterministic section planner combines measured section boundaries,
-measured feature changes, lyric gaps, and (when supplied) subjective semantic
-changes. Each recommendation records lane-specific reasons. MiMo remains a
-creative signal and never becomes measured timing or authoritative lyrics.
+measured feature changes, lyric gaps, and (when explicitly supplied) subjective
+semantic changes. The `assist sections` mode may supply measured evidence and
+an independently valid cached local lyric review, but never semantic evidence;
+`assist mimo`, `assist all`, or a lower-level `plan --semantic` invocation can
+supply semantic evidence. Each recommendation records lane-specific reasons.
+MiMo remains a creative signal and never becomes measured timing or
+authoritative lyrics.
 
 ### Importing an existing MiMo chat export
 

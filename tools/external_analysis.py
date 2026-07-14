@@ -31,6 +31,7 @@ from analysis_io import (
     sha256_file,
 )
 from import_whisper import normalize_whisper
+import mimo_openrouter as mimo_adapter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,15 @@ SCENE_PLAN_VERSION = "musializer.scene-plan/v1"
 SEMANTIC_NOTES_VERSION = "musializer.semantic-notes/v1"
 BRIDGE_VERSION = "MUSIALIZER_BRIDGE\t1"
 SCENES = ("spectrum", "pulse", "orbital", "ascii", "atlas", "terrarium", "constellation")
+
+# Keep the orchestrator's measured-cache contract dependency-free. These are
+# the explicit defaults passed to tools/analyze_audio.py; its adapter version is
+# the invalidation boundary for algorithm/band-definition changes.
+MEASURED_ANALYZER_VERSION = "1"
+MEASURED_SAMPLE_RATE = 24000
+MEASURED_CHANNELS = 1
+MEASURED_WINDOW = 2048
+MEASURED_HOP = 1024
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -637,7 +647,13 @@ def atomic_write_text(path: Path, value: str) -> None:
         raise
 
 
-def _cache_matches(path: Path, schema_version: str, audio_sha: str) -> dict[str, Any] | None:
+def _cache_matches(
+    path: Path,
+    schema_version: str,
+    audio_sha: str,
+    *,
+    accept: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any] | None:
     if not path.is_file(): return None
     try:
         value = read_json(path)
@@ -645,7 +661,144 @@ def _cache_matches(path: Path, schema_version: str, audio_sha: str) -> dict[str,
         return None
     if value.get("schema_version") != schema_version: return None
     document = value.get("normalized", {}) if schema_version == "musializer.analysis-cache/v1" else value
-    return value if document.get("audio", {}).get("sha256") == audio_sha else None
+    if document.get("audio", {}).get("sha256") != audio_sha: return None
+    if accept is not None and not accept(value): return None
+    return value
+
+
+def _provenance_matches(
+    document: dict[str, Any], *, adapter: str, adapter_version: str,
+    source_kind: str, request_settings: dict[str, Any] | None = None,
+    model: str | None = None, prompt_version: str | None = None,
+    prompt_sha256: str | None = None,
+) -> bool:
+    provenance = document.get("provenance")
+    if not isinstance(provenance, dict): return False
+    if (provenance.get("adapter") != adapter or
+            provenance.get("adapter_version") != adapter_version or
+            provenance.get("source_kind") != source_kind):
+        return False
+    if request_settings is not None and provenance.get("request_settings") != request_settings:
+        return False
+    if model is not None and provenance.get("model") != model: return False
+    if prompt_version is not None and provenance.get("prompt_version") != prompt_version:
+        return False
+    if prompt_sha256 is not None and provenance.get("prompt_sha256") != prompt_sha256:
+        return False
+    return True
+
+
+def _measured_cache_accepts(document: dict[str, Any]) -> bool:
+    settings = {
+        "sample_rate": MEASURED_SAMPLE_RATE,
+        "channels": MEASURED_CHANNELS,
+        "window_size": MEASURED_WINDOW,
+        "hop_size": MEASURED_HOP,
+    }
+    analysis = document.get("analysis")
+    if not isinstance(analysis, dict): return False
+    if analysis.get("analyzer_version") != MEASURED_ANALYZER_VERSION:
+        return False
+    if any(analysis.get(key) != value for key, value in settings.items()):
+        return False
+    return _provenance_matches(
+        document,
+        adapter="tools/analyze_audio.py",
+        adapter_version=MEASURED_ANALYZER_VERSION,
+        source_kind="offline_measured_analysis",
+        request_settings=settings,
+    )
+
+
+def _whisper_cache_accepts(
+    document: dict[str, Any], *, measured_duration: float,
+    model: Path | None,
+) -> bool:
+    audio = document.get("audio", {})
+    if (not isinstance(audio, dict) or
+            audio.get("duration_seconds") != measured_duration):
+        return False
+    provenance = document.get("provenance", {})
+    settings = provenance.get("request_settings", {}) if isinstance(provenance, dict) else {}
+    if (not isinstance(settings, dict) or settings.get("language") != "en" or
+            settings.get("gpu_requested") is not True):
+        return False
+    if model is not None:
+        if not model.is_file(): return False
+        dtw_model = (model.name[len("ggml-"):-len(".bin")]
+                     if model.name.startswith("ggml-") and model.name.endswith(".bin")
+                     else None)
+        expected_settings = {
+            "language": "en", "dtw_model": dtw_model,
+            "model_sha256": sha256_file(model), "gpu_requested": True,
+        }
+        if settings != expected_settings or provenance.get("model") != model.name:
+            return False
+    elif not isinstance(settings.get("model_sha256"), str):
+        return False
+    return _provenance_matches(
+        document,
+        adapter="tools/external_analysis.py",
+        adapter_version=ADAPTER_VERSION,
+        source_kind="whisper_import",
+    )
+
+
+def _review_cache_accepts(
+    document: dict[str, Any], *, source_sha256: str, model: str | None,
+) -> bool:
+    prompt_sha = sha256_file(LYRIC_PROMPT)
+    return (document.get("source", {}).get("sha256") == source_sha256 and
+            _provenance_matches(
+                document,
+                adapter="tools/external_analysis.py",
+                adapter_version=ADAPTER_VERSION,
+                source_kind="codex_lyric_review",
+                model=model or "codex-default",
+                prompt_version="lyrics_cleanup_system/v1",
+                prompt_sha256=prompt_sha,
+                request_settings={"sandbox": "read-only", "ephemeral": True},
+            ))
+
+
+def _mimo_request_identity(
+    audio: Path, *, audio_sha: str, measured_duration: float, zdr: bool,
+) -> dict[str, Any]:
+    audio_format = audio.suffix.lstrip(".").lower()
+    settings = {
+        "model": mimo_adapter.MODEL,
+        "prompt_version": mimo_adapter.PROMPT_VERSION,
+        "prompt_sha256": canonical_sha256(mimo_adapter.SYSTEM_PROMPT),
+        "response_schema_version": mimo_adapter.SCORE_SCHEMA_VERSION,
+        "model_output_schema_sha256": canonical_sha256(mimo_adapter.MODEL_OUTPUT_SCHEMA),
+        "audio_duration_seconds": measured_duration,
+        "audio_format": audio_format,
+        "allow_fallbacks": True,
+        "zero_data_retention": zdr,
+        "provider_order": [],
+    }
+    return {"audio_sha256": audio_sha, **settings}
+
+
+def _mimo_cache_accepts(
+    envelope: dict[str, Any], *, request_identity: dict[str, Any],
+) -> bool:
+    normalized = envelope.get("normalized")
+    return (isinstance(normalized, dict) and
+            envelope.get("request") == request_identity and
+            envelope.get("cache_key") == canonical_sha256(request_identity) and
+            _provenance_matches(
+                normalized,
+                adapter="tools/mimo_openrouter.py",
+                adapter_version=ADAPTER_VERSION,
+                source_kind="mimo_openrouter",
+                request_settings={
+                    key: value for key, value in request_identity.items()
+                    if key != "audio_sha256"
+                },
+                model=mimo_adapter.MODEL,
+                prompt_version=mimo_adapter.PROMPT_VERSION,
+            ))
 
 
 def _default_whisper_paths() -> tuple[Path | None, Path | None]:
@@ -700,21 +853,32 @@ def run_assist(
         }
 
     cache_status: dict[str, str] = {}
-    measured = _cache_matches(paths["measured"], "musializer.measured-analysis/v1", audio_sha)
+    measured = _cache_matches(
+        paths["measured"], "musializer.measured-analysis/v1", audio_sha,
+        accept=_measured_cache_accepts,
+    )
     if measured is None:
         _run(
             [sys.executable, str(ROOT / "tools/analyze_audio.py"), str(audio), str(paths["measured"])],
             timeout=external_timeout, env=_safe_local_env(), runner=runner,
         )
-        measured = _cache_matches(paths["measured"], "musializer.measured-analysis/v1", audio_sha)
+        measured = _cache_matches(
+            paths["measured"], "musializer.measured-analysis/v1", audio_sha,
+            accept=_measured_cache_accepts,
+        )
         if measured is None: raise RuntimeError("measured analyzer produced an invalid cache")
         cache_status["measured"] = "generated"
     else: cache_status["measured"] = "reused"
     measured_duration = duration(measured.get("audio", {}).get("duration_seconds"))
 
-    lyrics: dict[str, Any] | None = _cache_matches(paths["review"], LYRIC_REVIEW_VERSION, audio_sha)
+    lyrics: dict[str, Any] | None = None
     if mode in {"lyrics", "all"}:
-        whisper_lane = _cache_matches(paths["lyrics"], "musializer.lyric-timing/v1", audio_sha)
+        whisper_lane = _cache_matches(
+            paths["lyrics"], "musializer.lyric-timing/v1", audio_sha,
+            accept=lambda value: _whisper_cache_accepts(
+                value, measured_duration=measured_duration, model=whisper_model,
+            ),
+        )
         if whisper_lane is None:
             if whisper_bin is None or whisper_model is None:
                 raise AnalysisValidationError("GPU Whisper is not configured or autodetectable")
@@ -726,17 +890,48 @@ def run_assist(
             cache_status["lyrics"] = "generated"
         else: cache_status["lyrics"] = "reused"
         source_sha = sha256_file(paths["lyrics"])
-        if lyrics is None or lyrics.get("source", {}).get("sha256") != source_sha:
+        lyrics = _cache_matches(
+            paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
+            accept=lambda value: _review_cache_accepts(
+                value, source_sha256=source_sha, model=codex_model,
+            ),
+        )
+        if lyrics is None:
             lyrics = run_codex_review(
                 paths["lyrics"], paths["review"], codex_bin=codex_bin,
                 model=codex_model, timeout=external_timeout, runner=runner,
             )
             cache_status["review"] = "generated"
         else: cache_status["review"] = "reused"
+    elif mode == "sections":
+        # Scene changes may use already-established local lyric evidence, but
+        # never trigger lyric generation and never inherit a semantic lane.
+        whisper_lane = _cache_matches(
+            paths["lyrics"], "musializer.lyric-timing/v1", audio_sha,
+            accept=lambda value: _whisper_cache_accepts(
+                value, measured_duration=measured_duration, model=whisper_model,
+            ),
+        )
+        if whisper_lane is not None:
+            source_sha = sha256_file(paths["lyrics"])
+            lyrics = _cache_matches(
+                paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
+                accept=lambda value: _review_cache_accepts(
+                    value, source_sha256=source_sha, model=codex_model,
+                ),
+            )
 
     semantic: dict[str, Any] | None = None
     if mode in {"mimo", "all"}:
-        envelope = _cache_matches(paths["semantic"], "musializer.analysis-cache/v1", audio_sha)
+        request_identity = _mimo_request_identity(
+            audio, audio_sha=audio_sha, measured_duration=measured_duration, zdr=zdr,
+        )
+        envelope = _cache_matches(
+            paths["semantic"], "musializer.analysis-cache/v1", audio_sha,
+            accept=lambda value: _mimo_cache_accepts(
+                value, request_identity=request_identity,
+            ),
+        )
         if envelope is None:
             command = [
                 sys.executable, str(ROOT / "tools/mimo_openrouter.py"), str(audio),
@@ -744,17 +939,16 @@ def run_assist(
             ]
             if zdr: command.append("--zdr")
             _run(command, timeout=external_timeout, env=_openrouter_env(), runner=runner)
-            envelope = _cache_matches(paths["semantic"], "musializer.analysis-cache/v1", audio_sha)
+            envelope = _cache_matches(
+                paths["semantic"], "musializer.analysis-cache/v1", audio_sha,
+                accept=lambda value: _mimo_cache_accepts(
+                    value, request_identity=request_identity,
+                ),
+            )
             if envelope is None: raise RuntimeError("MiMo helper produced an invalid cache")
             cache_status["semantic"] = "generated"
         else: cache_status["semantic"] = "reused"
         semantic = _semantic_document(envelope)
-    elif paths["semantic"].is_file():
-        try:
-            candidate = _semantic_document(read_json(paths["semantic"]))
-            if candidate and candidate.get("audio", {}).get("sha256") == audio_sha: semantic = candidate
-        except (OSError, ValueError):
-            semantic = None
 
     lyrics_path = paths["review"] if lyrics else None
     plan = build_scene_plan(
