@@ -5,7 +5,7 @@
 #include <stddef.h>
 
 enum {
-    SCENE_SETTINGS_SCENE_COUNT = 7,
+    SCENE_SETTINGS_SCENE_COUNT = 9,
     SCENE_SETTINGS_MAX_CONTROLS = 10,
 };
 

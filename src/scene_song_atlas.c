@@ -250,10 +250,54 @@ static void atlas_rl_vertex(Vector3 point, Color color)
     rlVertex3f(point.x, point.y, point.z);
 }
 
+static Color atlas_light_color(Color color, float light)
+{
+    light = 0.26f + atlas_clamp01(light)*0.86f;
+    float red = (float)color.r*light;
+    float green = (float)color.g*light;
+    float blue = (float)color.b*light;
+    color.r = (unsigned char)fminf(255.0f, red);
+    color.g = (unsigned char)fminf(255.0f, green);
+    color.b = (unsigned char)fminf(255.0f, blue);
+    return color;
+}
+
+static float atlas_triangle_light(Vector3 a, Vector3 b, Vector3 c,
+                                  Vector3 light_direction)
+{
+    Vector3 first = {b.x - a.x, b.y - a.y, b.z - a.z};
+    Vector3 second = {c.x - a.x, c.y - a.y, c.z - a.z};
+    Vector3 normal = {
+        first.y*second.z - first.z*second.y,
+        first.z*second.x - first.x*second.z,
+        first.x*second.y - first.y*second.x,
+    };
+    float normal_length = sqrtf(normal.x*normal.x + normal.y*normal.y +
+                                normal.z*normal.z);
+    float light_length = sqrtf(light_direction.x*light_direction.x +
+                               light_direction.y*light_direction.y +
+                               light_direction.z*light_direction.z);
+    if (normal_length <= 0.00001f || light_length <= 0.00001f) return 0.45f;
+    float dot = (normal.x*light_direction.x + normal.y*light_direction.y +
+                 normal.z*light_direction.z)/(normal_length*light_length);
+    if (dot < 0.0f) dot = -dot;
+    return atlas_clamp01(dot);
+}
+
+static void atlas_lit_triangle(Vector3 a, Vector3 b, Vector3 c,
+                               Color ca, Color cb, Color cc,
+                               Vector3 light_direction)
+{
+    float light = atlas_triangle_light(a, b, c, light_direction);
+    atlas_rl_vertex(a, atlas_light_color(ca, light));
+    atlas_rl_vertex(b, atlas_light_color(cb, light));
+    atlas_rl_vertex(c, atlas_light_color(cc, light));
+}
+
 static void atlas_draw_surface(const Song_Atlas_State *atlas, float scroll_phase,
                                float pixel_scale, float contour_scale,
                                float color_shift, bool wireframe,
-                               size_t detail_level)
+                               size_t detail_level, Vector3 light_direction)
 {
     if (atlas->count < 2) return;
     size_t available = atlas->count;
@@ -286,8 +330,8 @@ static void atlas_draw_surface(const Song_Atlas_State *atlas, float scroll_phase
                 // Counter-clockwise from above: the atlas camera lives above the
                 // heightfield, so upward-facing terrain must survive back-face
                 // culling on every OpenGL target.
-                atlas_rl_vertex(a, ca); atlas_rl_vertex(b, cb); atlas_rl_vertex(c, cc);
-                atlas_rl_vertex(b, cb); atlas_rl_vertex(d, cd); atlas_rl_vertex(c, cc);
+                atlas_lit_triangle(a, b, c, ca, cb, cc, light_direction);
+                atlas_lit_triangle(b, d, c, cb, cd, cc, light_direction);
             }
         }
         rlEnd();
@@ -415,7 +459,8 @@ static Vector3 atlas_complete_vertex(const Song_Atlas_Slice *slice, size_t band,
 static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
                                         double time_seconds, float pixel_scale,
                                         float contour_scale, float color_shift,
-                                        bool wireframe, size_t detail_level)
+                                        bool wireframe, size_t detail_level,
+                                        Vector3 light_direction)
 {
     if (!song_atlas_map_valid(map)) return;
     float playhead = atlas_map_playhead(map, time_seconds);
@@ -451,8 +496,8 @@ static void atlas_draw_complete_surface(const Song_Atlas_Map *map,
                 Color cb = atlas_color(near, band + 1, near_depth, color_shift);
                 Color cc = atlas_color(far, band, far_depth, color_shift);
                 Color cd = atlas_color(far, band + 1, far_depth, color_shift);
-                atlas_rl_vertex(a, ca); atlas_rl_vertex(b, cb); atlas_rl_vertex(c, cc);
-                atlas_rl_vertex(b, cb); atlas_rl_vertex(d, cd); atlas_rl_vertex(c, cc);
+                atlas_lit_triangle(a, b, c, ca, cb, cc, light_direction);
+                atlas_lit_triangle(b, d, c, cb, cd, cc, light_direction);
             }
         }
         rlEnd();
@@ -629,15 +674,22 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
     rlMatrixMode(RL_MODELVIEW);
     rlScalef(width_scale, height_scale, depth_scale);
 
+    Vector3 light_direction = {
+        cosf(journey*0.73f + seed_phase)*0.42f,
+        0.78f + energy*0.20f,
+        sinf(journey*0.73f + seed_phase)*0.42f,
+    };
+
     if (song_atlas_map_valid(renderer->song_atlas_map)) {
         atlas_draw_complete_surface(renderer->song_atlas_map,
                                     frame->time_seconds,
                                     renderer->pixel_scale, contour_scale,
-                                    color_shift, wireframe, detail_level);
+                                    color_shift, wireframe, detail_level,
+                                    light_direction);
     } else {
         atlas_draw_surface(atlas, atlas_scroll_phase(atlas, frame->time_seconds),
                            renderer->pixel_scale, contour_scale, color_shift,
-                           wireframe, detail_level);
+                           wireframe, detail_level, light_direction);
     }
 
     EndMode3D();

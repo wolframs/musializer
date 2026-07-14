@@ -24,6 +24,12 @@ struct FFMPEG {
     char *temporary_path;
 };
 
+bool ffmpeg_available(void)
+{
+    char resolved[MAX_PATH];
+    return SearchPathA(NULL, "ffmpeg.exe", NULL, MAX_PATH, resolved, NULL) > 0;
+}
+
 static char *duplicate_string(const char *value)
 {
     size_t length = strlen(value);

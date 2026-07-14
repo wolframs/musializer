@@ -8,6 +8,9 @@
 
 typedef struct FFMPEG FFMPEG;
 
+// Cheap preflight used before showing the destination picker. Encoding still
+// validates startup independently to avoid time-of-check/time-of-use assumptions.
+bool ffmpeg_available(void);
 FFMPEG *ffmpeg_start_rendering(const char *output_path,
                                const Render_Export_Config *config,
                                const char *sound_file_path,

@@ -24,6 +24,8 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 ## External runtime dependencies
 
 - FFmpeg must be discoverable through `PATH` for MP4 export. It is not bundled.
+  The export panel checks this before opening the destination picker; encoder
+  startup is still validated again when rendering begins.
 - Python 3 and NumPy are needed for measured/assisted analysis, not playback or
   rendering.
 - Whisper, Codex, and an OpenRouter credential are needed only by their explicit
@@ -57,8 +59,9 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
   prevent repaint/cancel input despite bounded child cleanup. A writer queue
   and asynchronous finalization are required before claiming long-export UI
   responsiveness.
-- The Assist panel discovers its packaged helper and reports launch/runtime
-  failures with the immutable job log, but it does not duplicate the product
+- The Assist panel discovers its packaged helper, reports specific launch/runtime
+  failures, and exposes retry-review plus copy-path actions when an immutable
+  job log exists, but it does not duplicate the product
   doctor's full Python/model/credential preflight in-process. The helper also
   exposes elapsed time and a hard timeout, not structured per-stage progress or
   a trustworthy percentage. Run `tools/musializer_doctor.py` before production
@@ -73,6 +76,15 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 - Caption text is strict UTF-8 and the bundled atlas covers accented Latin,
   Greek, Cyrillic, and common symbols. CJK font fallback, bidirectional text,
   and complex-script shaping are not implemented yet.
+- Cadence currently estimates per-word windows proportionally inside each
+  accepted line-level lyric cue. This is deterministic and editable at the line
+  boundary, but it is not a claim of Whisper-derived word alignment. A future
+  word-timing format needs an explicit project and analysis-contract migration.
+- The live beat phase learns from conservative onset intervals and falls back to
+  a deterministic 120 BPM clock before it has enough evidence. It resets on
+  seeks instead of reconstructing tempo history before the destination, so the
+  first beats after an arbitrary seek can differ from uninterrupted playback.
+  Offline export from frame zero remains deterministic.
 - The current editor intentionally rejects schema-valid project features it
   cannot preserve: imported audio, partial ranges, fractional FPS/non-MP4
   output, scene stacks/noncanonical layout, parameter cues, and arbitrary

@@ -90,9 +90,11 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn("track_timeline_build_waveform", plug)
         self.assertIn("track_timeline_seek_from_x", plug)
         self.assertIn("track_timeline_path_is_seekable", plug)
-        self.assertIn('"-0.1 s"', plug)
-        self.assertIn('"+0.1 s"', plug)
-        self.assertIn("2.0f, COLOR_TIMELINE_CURSOR", plug)
+        self.assertIn('"Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s"', plug)
+        self.assertNotIn('"-0.1 s"', plug)
+        self.assertNotIn('"+0.1 s"', plug)
+        self.assertIn("1.25f, COLOR_TIMELINE_CURSOR", plug)
+        self.assertIn("DrawTriangle((Vector2){x - 5.0f", plug)
         seek = re.search(
             r"static void seek_track_to\([^;]+?\)\s*\{.*?\n\}",
             plug,
@@ -245,6 +247,53 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn("SpaceGrotesk-Regular.otf", plug)
         self.assertIn("static Font ui_font(void)", plug)
         self.assertEqual(plug.count("GetFontDefault()"), 1)
+
+    def test_ux_audit_critical_recovery_paths_are_wired(self):
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        ffmpeg_header = (ROOT / "src/ffmpeg.h").read_text(encoding="utf-8")
+
+        browser_start = plug.index("static void scene_browser(Rectangle boundary)")
+        browser_end = plug.index("static const char *notice_severity_label", browser_start)
+        browser = plug[browser_start:browser_end]
+        self.assertNotIn("if (row_height < 30.0f) return", browser)
+        self.assertIn('"Scene [%u]"', browser)
+        self.assertIn("select_base_scene(id)", browser)
+
+        self.assertIn("draw_notice_wrapped_text(", plug)
+        self.assertIn('"Copy path"', plug)
+        self.assertIn('"Retry"', plug)
+        self.assertIn('"+%zu more notice%s"', plug)
+        self.assertIn("notice_severity_color(", plug)
+        self.assertIn("danger_text_button(", plug)
+        self.assertIn("scene_settings_expand_window();", plug)
+        self.assertIn('"Expand the application window for this inspector"', plug)
+        self.assertIn("bool ffmpeg_available(void);", ffmpeg_header)
+        self.assertLess(plug.index("if (ffmpeg_available())"),
+                        plug.index("start_rendering_track(track);"))
+
+    def test_scene_tuning_growth_is_renderer_backed_and_legacy_safe(self):
+        settings = (ROOT / "src/scene_settings.c").read_text(encoding="utf-8")
+        spectrum = (ROOT / "src/scene_spectrum.c").read_text(encoding="utf-8")
+        terrarium = (ROOT / "src/scene_spectral_terrarium.c").read_text(encoding="utf-8")
+        constellation = (ROOT / "src/scene_constellation.c").read_text(encoding="utf-8")
+        project = (ROOT / "src/project.h").read_text(encoding="utf-8")
+
+        for key in (
+            "settings.spectrum.glow_softness",
+            "settings.spectrum.hue_swing",
+            "settings.terrarium.sim_speed",
+            "settings.terrarium.density",
+            "settings.constellation.event_duration",
+            "settings.constellation.density",
+        ):
+            self.assertIn(key, settings)
+        self.assertIn("SPECTRUM_SETTING_BAR_TAPER", spectrum)
+        self.assertIn("TERRARIUM_SETTING_SIM_SPEED", terrarium)
+        self.assertIn("TERRARIUM_SETTING_GLASS_OPACITY", terrarium)
+        self.assertIn("CONSTELLATION_SETTING_EVENT_REACH", constellation)
+        self.assertIn("CONSTELLATION_SETTING_HUE_SWING", constellation)
+        self.assertIn("snapshot->count == 3", settings)
+        self.assertIn("MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE 64u", project)
 
     def test_export_keeps_exact_video_frames_and_color_contract_cross_platform(self):
         for filename in ("ffmpeg_posix.c", "ffmpeg_windows.c"):

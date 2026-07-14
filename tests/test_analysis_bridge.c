@@ -69,6 +69,25 @@ TEST(analysis_bridge_preserves_absent_lanes_and_semantic_notes)
     free(bridge);
 }
 
+TEST(analysis_bridge_accepts_signature_scene_names)
+{
+    static const char signature_bridge[] =
+        "MUSIALIZER_BRIDGE\t1\n"
+        "AUDIO\t" HASH_A "\t10000\n"
+        "SECTION\t21\t0\t5000\tcadence\t500\tW10=\n"
+        "SECTION\t22\t5000\t10000\tloom\t700\tW10=\n";
+    Analysis_Bridge *bridge = new_bridge();
+    if (bridge == NULL) return;
+    REQUIRE_TRUE(analysis_bridge_parse(
+        bridge, signature_bridge, sizeof(signature_bridge) - 1,
+        HASH_A, 10000) == ANALYSIS_BRIDGE_OK);
+    EXPECT_TRUE(bridge->sections[0].recommended_scene == ANALYSIS_SCENE_CADENCE);
+    EXPECT_TRUE(bridge->sections[1].recommended_scene == ANALYSIS_SCENE_LOOM);
+    EXPECT_TRUE(strcmp(analysis_scene_name(ANALYSIS_SCENE_CADENCE), "cadence") == 0);
+    EXPECT_TRUE(strcmp(analysis_scene_name(ANALYSIS_SCENE_LOOM), "loom") == 0);
+    free(bridge);
+}
+
 TEST(analysis_bridge_rejects_identity_header_and_base64_errors_atomically)
 {
     Analysis_Bridge *bridge = new_bridge();

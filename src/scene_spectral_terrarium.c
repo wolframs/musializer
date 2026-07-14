@@ -32,9 +32,8 @@ typedef struct {
 } Terrarium_Plant;
 
 typedef struct {
-    float angle;
-    float radius;
-    float height;
+    Vector3 position;
+    Vector3 velocity;
     float speed;
     float phase;
     uint8_t band;
@@ -48,6 +47,7 @@ typedef struct {
     float energy;
     float bass;
     float treble;
+    float spectral_centroid;
     float flux;
     float onset_pulse;
     Terrarium_Particle particles[TERRARIUM_PARTICLE_COUNT];
@@ -129,13 +129,21 @@ static void terrarium_seed_world(Spectral_Terrarium_State *terrarium, double son
 
     for (size_t i = 0; i < TERRARIUM_CREATURE_COUNT; ++i) {
         Terrarium_Creature *creature = &terrarium->creatures[i];
-        creature->angle = terrarium_hash_unit(terrarium->seed, (uint32_t)i + 800U)*2.0f*PI;
-        creature->radius = 0.7f + terrarium_hash_unit(terrarium->seed, (uint32_t)i + 900U)*2.55f;
-        creature->height = -0.85f + terrarium_hash_unit(terrarium->seed, (uint32_t)i + 1000U)*2.7f;
+        float angle = terrarium_hash_unit(
+            terrarium->seed, (uint32_t)i + 800U)*2.0f*PI;
+        float radius = 0.7f + terrarium_hash_unit(
+            terrarium->seed, (uint32_t)i + 900U)*2.55f;
+        float height = -0.85f + terrarium_hash_unit(
+            terrarium->seed, (uint32_t)i + 1000U)*2.7f;
         creature->speed = (0.22f + terrarium_hash_unit(terrarium->seed, (uint32_t)i + 1100U)*0.42f)
-                        *((i & 1U) ? -1.0f : 1.0f);
+                        *(0.85f + (float)(i%3U)*0.08f);
         creature->phase = terrarium_hash_unit(terrarium->seed, (uint32_t)i + 1200U)*2.0f*PI;
         creature->band = (uint8_t)(i*3U + 2U);
+        creature->position = (Vector3){cosf(angle)*radius, height,
+                                       sinf(angle)*radius};
+        creature->velocity = (Vector3){-sinf(angle)*creature->speed,
+                                       0.0f,
+                                       cosf(angle)*creature->speed};
     }
 
     terrarium->simulation_time = floor(song_time*60.0)/60.0;
@@ -143,6 +151,7 @@ static void terrarium_seed_world(Spectral_Terrarium_State *terrarium, double son
     terrarium->energy = 0.0f;
     terrarium->bass = 0.0f;
     terrarium->treble = 0.0f;
+    terrarium->spectral_centroid = 0.5f;
     terrarium->flux = 0.0f;
     terrarium->onset_pulse = 0.0f;
 }
@@ -156,7 +165,8 @@ static void spectral_terrarium_init(void *state, uint64_t seed)
     terrarium_seed_world(terrarium, 0.0);
 }
 
-static void terrarium_simulate(Spectral_Terrarium_State *terrarium, float step)
+static void terrarium_simulate(Spectral_Terrarium_State *terrarium, float step,
+                               float creature_speed)
 {
     float time = (float)terrarium->simulation_time;
     for (size_t i = 0; i < TERRARIUM_PARTICLE_COUNT; ++i) {
@@ -174,10 +184,106 @@ static void terrarium_simulate(Spectral_Terrarium_State *terrarium, float step)
         }
     }
 
+    Vector3 next_velocity[TERRARIUM_CREATURE_COUNT];
+    for (size_t i = 0; i < TERRARIUM_CREATURE_COUNT; ++i) {
+        const Terrarium_Creature *creature = &terrarium->creatures[i];
+        Vector3 separation = {0};
+        Vector3 alignment = {0};
+        Vector3 cohesion = {0};
+        size_t neighbors = 0;
+        for (size_t j = 0; j < TERRARIUM_CREATURE_COUNT; ++j) {
+            if (i == j) continue;
+            const Terrarium_Creature *other = &terrarium->creatures[j];
+            Vector3 delta = {
+                creature->position.x - other->position.x,
+                creature->position.y - other->position.y,
+                creature->position.z - other->position.z,
+            };
+            float distance_squared = delta.x*delta.x + delta.y*delta.y +
+                                     delta.z*delta.z;
+            if (distance_squared > 4.0f) continue;
+            neighbors += 1;
+            alignment.x += other->velocity.x;
+            alignment.y += other->velocity.y;
+            alignment.z += other->velocity.z;
+            cohesion.x += other->position.x;
+            cohesion.y += other->position.y;
+            cohesion.z += other->position.z;
+            if (distance_squared < 0.72f && distance_squared > 0.0001f) {
+                float inverse = 1.0f/distance_squared;
+                separation.x += delta.x*inverse;
+                separation.y += delta.y*inverse;
+                separation.z += delta.z*inverse;
+            }
+        }
+
+        Vector3 acceleration = {0};
+        if (neighbors > 0) {
+            float inverse = 1.0f/(float)neighbors;
+            alignment.x = alignment.x*inverse - creature->velocity.x;
+            alignment.y = alignment.y*inverse - creature->velocity.y;
+            alignment.z = alignment.z*inverse - creature->velocity.z;
+            cohesion.x = cohesion.x*inverse - creature->position.x;
+            cohesion.y = cohesion.y*inverse - creature->position.y;
+            cohesion.z = cohesion.z*inverse - creature->position.z;
+            float tightness = 0.16f + terrarium->spectral_centroid*0.26f;
+            acceleration.x += separation.x*0.19f + alignment.x*0.22f +
+                              cohesion.x*tightness;
+            acceleration.y += separation.y*0.19f + alignment.y*0.22f +
+                              cohesion.y*tightness;
+            acceleration.z += separation.z*0.19f + alignment.z*0.22f +
+                              cohesion.z*tightness;
+        }
+
+        float target_height = -0.75f + terrarium->spectral_centroid*3.05f;
+        acceleration.y += (target_height - creature->position.y)*0.34f;
+        float dominant_heading = terrarium->spectral_centroid*2.0f*PI +
+                                 sinf(time*0.17f)*0.55f;
+        acceleration.x += cosf(dominant_heading)*0.12f;
+        acceleration.z += sinf(dominant_heading)*0.12f;
+        acceleration.x += -creature->position.z*0.055f;
+        acceleration.z += creature->position.x*0.055f;
+
+        Vector3 velocity = {
+            creature->velocity.x + acceleration.x*step,
+            creature->velocity.y + acceleration.y*step,
+            creature->velocity.z + acceleration.z*step,
+        };
+        float speed = sqrtf(velocity.x*velocity.x + velocity.y*velocity.y +
+                            velocity.z*velocity.z);
+        float desired = creature->speed*creature_speed*
+                        (0.78f + terrarium->energy*0.58f + terrarium->flux*0.28f);
+        if (speed > 0.0001f) {
+            float limited = fminf(fmaxf(speed, desired*0.68f), desired*1.35f);
+            float scale = limited/speed;
+            velocity.x *= scale;
+            velocity.y *= scale;
+            velocity.z *= scale;
+        }
+        next_velocity[i] = velocity;
+    }
     for (size_t i = 0; i < TERRARIUM_CREATURE_COUNT; ++i) {
         Terrarium_Creature *creature = &terrarium->creatures[i];
-        float activity = 0.7f + terrarium->energy*0.8f + terrarium->flux*0.65f;
-        creature->angle = fmodf(creature->angle + creature->speed*activity*step, 2.0f*PI);
+        creature->velocity = next_velocity[i];
+        creature->position.x += creature->velocity.x*step;
+        creature->position.y += creature->velocity.y*step;
+        creature->position.z += creature->velocity.z*step;
+        float radius = sqrtf(creature->position.x*creature->position.x +
+                             creature->position.z*creature->position.z);
+        if (radius > 3.55f) {
+            float scale = 3.55f/radius;
+            creature->position.x *= scale;
+            creature->position.z *= scale;
+            creature->velocity.x *= -0.25f;
+            creature->velocity.z *= -0.25f;
+        }
+        if (creature->position.y < -1.42f) {
+            creature->position.y = -1.42f;
+            creature->velocity.y = fabsf(creature->velocity.y)*0.45f;
+        } else if (creature->position.y > 2.72f) {
+            creature->position.y = 2.72f;
+            creature->velocity.y = -fabsf(creature->velocity.y)*0.45f;
+        }
     }
     terrarium->simulation_time += step;
 }
@@ -194,6 +300,11 @@ static void spectral_terrarium_update(void *state, const Scene_Frame *frame)
     float delta = frame->delta_seconds;
     if (!isfinite(delta) || delta < 0.0f) delta = 0.0f;
     if (delta > 0.133333f) delta = 0.133333f;
+    float simulation_speed = scene_settings_get(
+        frame->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_SIM_SPEED);
+    float creature_speed = scene_settings_get(
+        frame->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_CREATURE_SPEED);
+    delta *= simulation_speed;
 
     size_t low_end = frame->audio.bands_count/6U;
     if (low_end < 1U) low_end = 1U;
@@ -201,11 +312,24 @@ static void spectral_terrarium_update(void *state, const Scene_Frame *frame)
     float target_energy = terrarium_clamp01(frame->audio.rms*1.9f);
     float target_bass = terrarium_band_range(frame, 0, low_end);
     float target_treble = terrarium_band_range(frame, high_begin, frame->audio.bands_count);
+    float centroid_weight = 0.0f;
+    float centroid_sum = 0.0f;
+    if (frame->audio.bands != NULL && frame->audio.bands_count > 1U) {
+        for (size_t i = 0; i < frame->audio.bands_count; ++i) {
+            float value = terrarium_clamp01(frame->audio.bands[i]);
+            centroid_sum += value*(float)i/(float)(frame->audio.bands_count - 1U);
+            centroid_weight += value;
+        }
+    }
+    float target_centroid = centroid_weight > 0.0001f ?
+                            centroid_sum/centroid_weight : 0.5f;
     float target_flux = terrarium_clamp01(frame->audio.spectral_flux*5.0f);
     float blend = 1.0f - expf(-5.5f*delta);
     terrarium->energy += (target_energy - terrarium->energy)*blend;
     terrarium->bass += (target_bass - terrarium->bass)*blend;
     terrarium->treble += (target_treble - terrarium->treble)*blend;
+    terrarium->spectral_centroid +=
+        (target_centroid - terrarium->spectral_centroid)*blend;
     terrarium->flux += (target_flux - terrarium->flux)*blend;
     terrarium->onset_pulse *= expf(-6.8f*delta);
     if (frame->audio.onset) terrarium->onset_pulse = 1.0f;
@@ -213,7 +337,7 @@ static void spectral_terrarium_update(void *state, const Scene_Frame *frame)
     terrarium->accumulator += delta;
     int steps = 0;
     while (terrarium->accumulator >= TERRARIUM_FIXED_STEP && steps < TERRARIUM_MAX_STEPS) {
-        terrarium_simulate(terrarium, TERRARIUM_FIXED_STEP);
+        terrarium_simulate(terrarium, TERRARIUM_FIXED_STEP, creature_speed);
         terrarium->accumulator -= TERRARIUM_FIXED_STEP;
         steps += 1;
     }
@@ -226,22 +350,29 @@ static void spectral_terrarium_update(void *state, const Scene_Frame *frame)
 static Vector3 terrarium_creature_position(const Terrarium_Creature *creature,
                                            const Spectral_Terrarium_State *terrarium)
 {
-    float y = creature->height + sinf((float)terrarium->simulation_time*1.3f + creature->phase)
-                            *(0.12f + terrarium->treble*0.18f);
-    return (Vector3) { cosf(creature->angle)*creature->radius, y,
-                       sinf(creature->angle)*creature->radius };
+    Vector3 position = creature->position;
+    position.y += sinf((float)terrarium->simulation_time*1.3f + creature->phase)
+                  *(0.035f + terrarium->treble*0.055f);
+    return position;
 }
 
 static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                                  const Scene_Frame *frame, float hue,
-                                 float growth_scale, float particle_scale)
+                                 float growth_scale, float particle_scale,
+                                 float glass_opacity, float density)
 {
     Color soil = ColorFromHSV(fmodf(hue + 115.0f, 360.0f), 0.55f, 0.16f + terrarium->bass*0.08f);
     DrawCylinder((Vector3) { 0.0f, -1.82f, 0.0f }, 4.15f, 3.9f, 0.22f, 48, soil);
     DrawCircle3D((Vector3) { 0.0f, -1.69f, 0.0f }, 4.0f, (Vector3) { 1, 0, 0 }, 90.0f,
                  ColorAlpha(ColorFromHSV(hue, 0.52f, 0.28f), 0.55f));
 
-    for (size_t i = 0; i < TERRARIUM_PLANT_COUNT; ++i) {
+    size_t plant_count = (size_t)ceilf((float)TERRARIUM_PLANT_COUNT*density);
+    size_t particle_count = (size_t)ceilf((float)TERRARIUM_PARTICLE_COUNT*density);
+    size_t creature_count = (size_t)ceilf((float)TERRARIUM_CREATURE_COUNT*density);
+    if (plant_count > TERRARIUM_PLANT_COUNT) plant_count = TERRARIUM_PLANT_COUNT;
+    if (particle_count > TERRARIUM_PARTICLE_COUNT) particle_count = TERRARIUM_PARTICLE_COUNT;
+    if (creature_count > TERRARIUM_CREATURE_COUNT) creature_count = TERRARIUM_CREATURE_COUNT;
+    for (size_t i = 0; i < plant_count; ++i) {
         const Terrarium_Plant *plant = &terrarium->plants[i];
         float amplitude = terrarium_band(frame, plant->band);
         float height = plant->height*(0.72f + amplitude*0.75f +
@@ -263,7 +394,7 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                                 0.62f, 0.55f + amplitude*0.42f));
     }
 
-    for (size_t i = 0; i < TERRARIUM_PARTICLE_COUNT; ++i) {
+    for (size_t i = 0; i < particle_count; ++i) {
         const Terrarium_Particle *particle = &terrarium->particles[i];
         float shimmer = 0.5f + 0.5f*sinf((float)terrarium->simulation_time*2.1f + particle->phase);
         Color color = ColorFromHSV(fmodf(hue + 35.0f + (float)i*4.7f, 360.0f), 0.38f,
@@ -273,11 +404,19 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
                    ColorAlpha(color, 0.38f + shimmer*0.52f));
     }
 
-    for (size_t i = 0; i < TERRARIUM_CREATURE_COUNT; ++i) {
+    for (size_t i = 0; i < creature_count; ++i) {
         const Terrarium_Creature *creature = &terrarium->creatures[i];
         float amplitude = terrarium_band(frame, creature->band);
         Vector3 position = terrarium_creature_position(creature, terrarium);
-        Vector3 tangent = { -sinf(creature->angle), 0.0f, cosf(creature->angle) };
+        float velocity_length = sqrtf(
+            creature->velocity.x*creature->velocity.x +
+            creature->velocity.y*creature->velocity.y +
+            creature->velocity.z*creature->velocity.z);
+        Vector3 tangent = velocity_length > 0.0001f ? (Vector3){
+            creature->velocity.x/velocity_length,
+            creature->velocity.y/velocity_length,
+            creature->velocity.z/velocity_length,
+        } : (Vector3){1.0f, 0.0f, 0.0f};
         float length = 0.18f + amplitude*0.32f;
         Vector3 head = { position.x + tangent.x*length, position.y,
                          position.z + tangent.z*length };
@@ -290,7 +429,8 @@ static void terrarium_draw_world(const Spectral_Terrarium_State *terrarium,
     }
 
     // Sparse latitude rings imply a glass habitat without hiding its contents.
-    Color glass = ColorAlpha(ColorFromHSV(fmodf(hue + 25.0f, 360.0f), 0.2f, 0.9f), 0.13f);
+    Color glass = ColorAlpha(
+        ColorFromHSV(fmodf(hue + 25.0f, 360.0f), 0.2f, 0.9f), glass_opacity);
     for (int ring = 0; ring < 4; ++ring) {
         float y = -1.35f + (float)ring*1.15f;
         float radius = sqrtf(fmaxf(0.0f, 16.0f - (y + 1.65f)*(y + 1.65f)));
@@ -310,6 +450,10 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_GROWTH);
     float particle_scale = scene_settings_get(
         renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_PARTICLES);
+    float glass_opacity = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_GLASS_OPACITY);
+    float density = scene_settings_get(
+        renderer->settings, SCENE_SPECTRAL_TERRARIUM, TERRARIUM_SETTING_DENSITY);
 
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float hue = fmodf(145.0f + terrarium_hash_unit(terrarium->seed, 1500U)*125.0f
@@ -361,7 +505,8 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
     rlMatrixMode(RL_PROJECTION);
     rlScalef(full_aspect/viewport_aspect, 1.0f, 1.0f);
     rlMatrixMode(RL_MODELVIEW);
-    terrarium_draw_world(terrarium, frame, hue, growth_scale, particle_scale);
+    terrarium_draw_world(terrarium, frame, hue, growth_scale, particle_scale,
+                         glass_opacity, density);
     EndMode3D();
 
     rlDrawRenderBatchActive();
@@ -374,7 +519,7 @@ static void spectral_terrarium_draw(const void *state, const Scene_Frame *frame,
 const Scene_Descriptor scene_spectral_terrarium_descriptor = {
     .id = SCENE_SPECTRAL_TERRARIUM,
     .name = "Spectral Terrarium",
-    .state_version = 1,
+    .state_version = 2,
     .state_size = sizeof(Spectral_Terrarium_State),
     .init = spectral_terrarium_init,
     .update = spectral_terrarium_update,

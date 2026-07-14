@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <math.h>
+#include <string.h>
 
 enum {
     ASCII_FIELD_MAX_COLUMNS = 96,
@@ -10,6 +11,8 @@ enum {
 
 typedef struct {
     uint64_t seed;
+    double last_sample_time;
+    float spectrum_history[ASCII_FIELD_MAX_ROWS][ASCII_FIELD_MAX_COLUMNS];
 } Ascii_Field_State;
 
 static float ascii_clamp01(float value)
@@ -144,15 +147,6 @@ static bool ascii_scissor(Rectangle boundary, int *x, int *y, int *width, int *h
     return true;
 }
 
-static Font ascii_font(const Scene_Renderer *renderer)
-{
-    Font font = renderer->font;
-    if (font.texture.id == 0 || font.baseSize <= 0 || font.glyphCount <= 0) {
-        font = GetFontDefault();
-    }
-    return font;
-}
-
 static Font ascii_grid_font(void)
 {
     /* The bundled caption face is intentionally literary and proportional.
@@ -161,43 +155,42 @@ static Font ascii_grid_font(void)
     return GetFontDefault();
 }
 
-static void ascii_draw_empty(const Scene_Renderer *renderer, Rectangle boundary)
-{
-    Font font = ascii_font(renderer);
-    float pixel_scale = renderer->pixel_scale > 0.0f ? renderer->pixel_scale : 1.0f;
-    const char *title = "Import an image for ASCII Field";
-    const char *hint = "Drop an image file or choose Import image.";
-    float title_size = fminf(24.0f*pixel_scale,
-                             fmaxf(11.0f*pixel_scale, boundary.width/28.0f));
-    float hint_size = title_size*0.66f;
-    Vector2 title_measure = MeasureTextEx(font, title, title_size, 1.0f);
-    Vector2 hint_measure = MeasureTextEx(font, hint, hint_size, 0.5f);
-    float center_x = boundary.x + boundary.width*0.5f;
-    float center_y = boundary.y + boundary.height*0.5f;
-    Color title_color = { 0, 240, 255, 220 };
-    Color hint_color = { 172, 166, 194, 180 };
-
-    DrawLineEx((Vector2){ center_x - title_measure.x*0.58f, center_y - title_size },
-               (Vector2){ center_x + title_measure.x*0.58f, center_y - title_size },
-               1.0f*pixel_scale, (Color){ 255, 0, 110, 120 });
-    DrawTextEx(font, title,
-               (Vector2){ center_x - title_measure.x*0.5f, center_y - title_size*0.68f },
-               title_size, 1.0f, title_color);
-    DrawTextEx(font, hint,
-               (Vector2){ center_x - hint_measure.x*0.5f, center_y + title_size*0.62f },
-               hint_size, 0.5f, hint_color);
-}
-
 static void ascii_field_init(void *state, uint64_t seed)
 {
     Ascii_Field_State *field = state;
+    memset(field, 0, sizeof(*field));
     field->seed = seed;
+    field->last_sample_time = -1.0;
 }
 
 static void ascii_field_update(void *state, const Scene_Frame *frame)
 {
-    (void)state;
-    (void)frame;
+    Ascii_Field_State *field = state;
+    if (field == NULL || frame == NULL || !isfinite(frame->time_seconds)) return;
+    double elapsed = field->last_sample_time < 0.0 ? 0.0 :
+                     frame->time_seconds - field->last_sample_time;
+    if (field->last_sample_time >= 0.0 && (elapsed < 0.0 || elapsed > 0.75)) {
+        memset(field->spectrum_history, 0, sizeof(field->spectrum_history));
+        field->last_sample_time = -1.0;
+    }
+    if (field->last_sample_time >= 0.0 && elapsed < 1.0/18.0) return;
+
+    memmove(&field->spectrum_history[1][0],
+            &field->spectrum_history[0][0],
+            (ASCII_FIELD_MAX_ROWS - 1U)*ASCII_FIELD_MAX_COLUMNS*sizeof(float));
+    for (size_t column = 0; column < ASCII_FIELD_MAX_COLUMNS; ++column) {
+        float value = ascii_audio_band(frame, column, ASCII_FIELD_MAX_COLUMNS);
+        float trail = 0.0f;
+        if (frame->audio.trails != NULL && frame->audio.bands_count > 0) {
+            size_t index = column*frame->audio.bands_count/
+                           ASCII_FIELD_MAX_COLUMNS;
+            if (index >= frame->audio.bands_count) index = frame->audio.bands_count - 1;
+            trail = ascii_clamp01(frame->audio.trails[index]);
+        }
+        field->spectrum_history[0][column] =
+            ascii_clamp01(value*0.78f + trail*0.22f);
+    }
+    field->last_sample_time = frame->time_seconds;
 }
 
 static void ascii_field_draw(const void *state,
@@ -253,16 +246,11 @@ static void ascii_field_draw(const void *state,
     }
 
     BeginScissorMode(scissor_x, scissor_y, scissor_width, scissor_height);
-    if (renderer->ascii_cells == NULL || renderer->ascii_columns == 0 ||
-        renderer->ascii_rows == 0 ||
-        renderer->ascii_columns > SIZE_MAX/renderer->ascii_rows) {
-        ascii_draw_empty(renderer, boundary);
-        EndScissorMode();
-        return;
-    }
-
-    size_t columns = renderer->ascii_columns;
-    size_t rows = renderer->ascii_rows;
+    bool imported = renderer->ascii_cells != NULL &&
+                    renderer->ascii_columns > 0 && renderer->ascii_rows > 0 &&
+                    renderer->ascii_columns <= SIZE_MAX/renderer->ascii_rows;
+    size_t columns = imported ? renderer->ascii_columns : 80U;
+    size_t rows = imported ? renderer->ascii_rows : 42U;
     size_t draw_columns = columns < ASCII_FIELD_MAX_COLUMNS
         ? columns : ASCII_FIELD_MAX_COLUMNS;
     size_t draw_rows = rows < ASCII_FIELD_MAX_ROWS ? rows : ASCII_FIELD_MAX_ROWS;
@@ -308,7 +296,32 @@ static void ascii_field_draw(const void *state,
         size_t x_step = columns/draw_columns;
         size_t x_remainder = columns%draw_columns;
         for (size_t column = 0; column < draw_columns; ++column) {
-            const AsciiCell *cell = &renderer->ascii_cells[source_y*columns + source_x];
+            size_t history_row = row*ASCII_FIELD_MAX_ROWS/draw_rows;
+            size_t history_column = column*ASCII_FIELD_MAX_COLUMNS/draw_columns;
+            float spectrum_density = field->spectrum_history[history_row][history_column];
+            AsciiCell blended = {
+                .glyph = '#',
+                .foreground = { 0, 220, 255, 255 },
+                .luminance = spectrum_density,
+                .edge_strength = 0.0f,
+                .edge_orientation = ASCII_EDGE_NONE,
+            };
+            if (imported) {
+                blended = renderer->ascii_cells[source_y*columns + source_x];
+                blended.luminance = ascii_clamp01(
+                    blended.luminance*0.78f + spectrum_density*0.42f);
+                blended.foreground.g = ascii_color_byte(
+                    (float)blended.foreground.g*0.82f + spectrum_density*46.0f);
+                blended.foreground.b = ascii_color_byte(
+                    (float)blended.foreground.b*0.82f + spectrum_density*64.0f);
+            } else {
+                Color live = ColorFromHSV(
+                    fmodf(188.0f + (float)column/(float)draw_columns*132.0f +
+                          semantic_valence*28.0f, 360.0f),
+                    0.78f, 0.58f + spectrum_density*0.42f);
+                blended.foreground = (AsciiRgba){live.r, live.g, live.b, 255};
+            }
+            const AsciiCell *cell = &blended;
             float band = ascii_audio_band(frame, column, draw_columns);
             float horizontal_t = ((float)column + 0.5f)/(float)draw_columns;
             float vertical_t = ((float)row + 0.5f)/(float)draw_rows;
@@ -417,7 +430,7 @@ static void ascii_field_draw(const void *state,
 const Scene_Descriptor scene_ascii_field_descriptor = {
     .id = SCENE_ASCII_FIELD,
     .name = "ASCII Field",
-    .state_version = 3,
+    .state_version = 4,
     .state_size = sizeof(Ascii_Field_State),
     .init = ascii_field_init,
     .update = ascii_field_update,

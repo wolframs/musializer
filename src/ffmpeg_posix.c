@@ -27,6 +27,33 @@ struct FFMPEG {
     char *temporary_path;
 };
 
+bool ffmpeg_available(void)
+{
+    const char *path = getenv("PATH");
+    if (path == NULL || path[0] == '\0') return false;
+    const char *cursor = path;
+    while (true) {
+        const char *separator = strchr(cursor, ':');
+        size_t directory_length = separator != NULL ?
+                                  (size_t)(separator - cursor) : strlen(cursor);
+        const char *directory = directory_length == 0 ? "." : cursor;
+        size_t effective_length = directory_length == 0 ? 1u : directory_length;
+        if (effective_length <= SIZE_MAX - sizeof("/ffmpeg")) {
+            size_t capacity = effective_length + sizeof("/ffmpeg");
+            char *candidate = malloc(capacity);
+            if (candidate == NULL) return false;
+            memcpy(candidate, directory, effective_length);
+            memcpy(candidate + effective_length, "/ffmpeg", sizeof("/ffmpeg"));
+            bool executable = access(candidate, X_OK) == 0;
+            free(candidate);
+            if (executable) return true;
+        }
+        if (separator == NULL) break;
+        cursor = separator + 1;
+    }
+    return false;
+}
+
 static void ffmpeg_free_paths(FFMPEG *ffmpeg)
 {
     free(ffmpeg->output_path);

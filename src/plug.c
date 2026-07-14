@@ -16,6 +16,7 @@
 #include "assist_ui_state.h"
 #include "caption_layout.h"
 #include "audio_analyzer.h"
+#include "beat_tracker.h"
 #include "editor_draft.h"
 #include "plug.h"
 #include "ffmpeg.h"
@@ -94,7 +95,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 23
+#define PLUG_STATE_VERSION 24
 
 #define COLOR_ACCENT                  GetColor(0x002FA7FF)
 #define COLOR_BACKGROUND              GetColor(0x151515FF)
@@ -102,7 +103,11 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define COLOR_UI_RAISED               GetColor(0xFFFFFFFF)
 #define COLOR_UI_INK                  GetColor(0x141414FF)
 #define COLOR_UI_MUTED                GetColor(0x66666BFF)
+#define COLOR_UI_DISABLED             GetColor(0x929298FF)
 #define COLOR_UI_RULE                 GetColor(0xD2D2D6FF)
+#define COLOR_UI_DANGER               GetColor(0xC62828FF)
+#define COLOR_UI_WARNING              GetColor(0xB26A00FF)
+#define COLOR_UI_SUCCESS              GetColor(0x18794EFF)
 #define COLOR_TRACK_PANEL_BACKGROUND  COLOR_UI_SURFACE
 #define COLOR_TRACK_BUTTON_BACKGROUND COLOR_UI_RAISED
 #define COLOR_TRACK_BUTTON_HOVEROVER  GetColor(0xE7EAF2FF)
@@ -121,6 +126,15 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define HUD_POPUP_SLIDEIN_SECS 0.1f
 #define TOOLTIP_PADDING 20.0f
 #define TRACKLABEL_SCROLL_SECS 0.05f
+
+#define UI_FONT_HEADER 19.0f
+#define UI_FONT_LABEL 16.0f
+#define UI_FONT_CAPTION 13.0f
+#define UI_FONT_VALUE 15.0f
+#define UI_PANEL_PADDING 10.0f
+#define UI_CONTROL_GAP 8.0f
+#define UI_BUTTON_HEIGHT 36.0f
+#define UI_COMPACT_BUTTON_HEIGHT 30.0f
 
 #define KEY_TOGGLE_PLAY KEY_SPACE
 #define KEY_RENDER      KEY_R
@@ -246,6 +260,7 @@ typedef struct {
 
     // Audio analyzer and realtime-safe callback handoff
     AudioAnalyzer analyzer;
+    Beat_Tracker beat_tracker;
     SampleRing sample_ring;
     SampleFrame sample_ring_storage[SAMPLE_RING_CAPACITY];
     bool timeline_scrubbing;
@@ -261,6 +276,14 @@ typedef struct {
     int scene_settings_expanded_width;
     float scene_settings_scroll;
     Scene_Id scene_settings_scroll_scene;
+    bool scene_settings_reset_confirmation;
+    bool scene_settings_reset_undo_available;
+    Scene_Id scene_settings_reset_scene;
+    Scene_Settings_Snapshot scene_settings_reset_undo;
+    uint64_t scene_settings_reset_notice_id;
+    bool scene_preset_delete_confirmation;
+    Scene_Id scene_preset_delete_scene;
+    size_t scene_preset_delete_index;
     uint64_t scene_frame_index;
     double scene_previous_time;
     bool scene_clock_initialized;
@@ -273,6 +296,7 @@ typedef struct {
     Event_Timeline event_undo;
     bool event_undo_available;
     bool clear_events_confirmation;
+    uint64_t clear_events_notice_id;
     uint64_t next_event_id;
     Scene_Event_Merge scene_events;
     uint64_t scene_events_user_revision;
@@ -308,6 +332,8 @@ typedef struct {
     double assist_cancel_started_at;
     bool assist_confirmation_pending;
     bool assist_apply_confirmation_pending;
+    uint64_t assist_apply_notice_id;
+    char assist_failure_detail[UI_NOTICE_DETAIL_CAPACITY];
     Analysis_Candidate *assist_candidate;
     size_t assist_candidate_track_index;
     Assist_Mode assist_candidate_mode;
@@ -317,7 +343,7 @@ typedef struct {
     Ui_Notice_Queue notices;
 
     bool tooltip_show;
-    char tooltip_buffer[32];
+    char tooltip_buffer[256];
     Side tooltip_align;
     Rectangle tooltip_element_boundary;
 
@@ -354,6 +380,7 @@ static void analyzer_configure(uint32_t sample_rate, uint32_t channels)
         .selected_channel = 0,
     };
     NOB_ASSERT(audio_analyzer_init(&p->analyzer, config));
+    beat_tracker_reset(&p->beat_tracker);
     sample_ring_reset(&p->sample_ring);
 }
 
@@ -382,6 +409,7 @@ static RenderTexture2D load_offline_render_target(const Render_Export_Config *co
 static void fft_clean(void)
 {
     audio_analyzer_reset(&p->analyzer);
+    beat_tracker_reset(&p->beat_tracker);
     sample_ring_reset(&p->sample_ring);
 }
 
@@ -796,6 +824,10 @@ static bool scene_id_from_name(const char *name, Scene_Id *result)
         id = SCENE_SPECTRAL_TERRARIUM;
     } else if (strcmp(name, "constellation") == 0) {
         id = SCENE_CONSTELLATION;
+    } else if (strcmp(name, "cadence") == 0) {
+        id = SCENE_CADENCE;
+    } else if (strcmp(name, "loom") == 0) {
+        id = SCENE_LOOM;
     } else {
         return false;
     }
@@ -843,6 +875,8 @@ static const char *scene_stable_name(Scene_Id id)
     case SCENE_SONG_ATLAS: return "atlas";
     case SCENE_SPECTRAL_TERRARIUM: return "terrarium";
     case SCENE_CONSTELLATION: return "constellation";
+    case SCENE_CADENCE: return "cadence";
+    case SCENE_LOOM: return "loom";
     case COUNT_SCENES: break;
     }
     return "spectrum";
@@ -974,8 +1008,16 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         lyric = lyrics_at_time(&track->lyrics, time_seconds);
     }
 
+    bool onset = flux > 0.08f;
+    float beat_phase = 0.0f;
+    if (!beat_tracker_update(&p->beat_tracker, time_seconds, onset, flux,
+                             &beat_phase)) {
+        beat_tracker_reset(&p->beat_tracker);
+    }
+
     return (Scene_Frame) {
         .time_seconds = time_seconds,
+        .duration_seconds = track != NULL ? track->duration_seconds : 0.0,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
         .settings = track_effective_scene_settings(track),
@@ -989,7 +1031,8 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
             .rms = rms,
             .peak = peak,
             .spectral_flux = flux,
-            .onset = flux > 0.08f,
+            .beat_phase = beat_phase,
+            .onset = onset,
         },
     };
 }
@@ -1086,8 +1129,27 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
     };
     scene_instance_update(&p->scene, &frame);
     scene_instance_draw(&p->scene, &frame, &renderer, boundary);
-    draw_scene_lyric_overlay(boundary, frame.lyric, renderer.font,
-                             renderer.pixel_scale);
+    if (p->scene.id != SCENE_CADENCE) {
+        draw_scene_lyric_overlay(boundary, frame.lyric, renderer.font,
+                                 renderer.pixel_scale);
+    }
+}
+
+static uint64_t notice_push(Ui_Notice_Severity severity, const char *title,
+                            const char *detail, const char *path, bool persistent);
+
+static bool select_base_scene(Scene_Id selected)
+{
+    Track *track = current_track();
+    if (selected < 0 || selected >= COUNT_SCENES || p->scene.id == selected) return false;
+    if (!scene_instance_select(&p->scene, selected, scene_seed_for_track(track))) return false;
+    if (track != NULL) track_select_base_scene(track, selected);
+    mark_project_dirty(track);
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail), "%s is now the track's base scene.",
+             scene_name(selected));
+    notice_push(UI_NOTICE_INFO, "Base scene changed", detail, NULL, false);
+    return true;
 }
 
 static void update_scene_shortcuts(void)
@@ -1100,19 +1162,14 @@ static void update_scene_shortcuts(void)
     if (IsKeyPressed(KEY_FIVE)) selected = SCENE_SONG_ATLAS;
     if (IsKeyPressed(KEY_SIX)) selected = SCENE_SPECTRAL_TERRARIUM;
     if (IsKeyPressed(KEY_SEVEN)) selected = SCENE_CONSTELLATION;
-    Track *track = current_track();
-    if (selected != COUNT_SCENES &&
-        scene_instance_select(&p->scene, selected, scene_seed_for_track(track))) {
-        if (track != NULL) {
-            track_select_base_scene(track, selected);
-        }
-        mark_project_dirty(track);
-    }
+    if (IsKeyPressed(KEY_EIGHT)) selected = SCENE_CADENCE;
+    if (IsKeyPressed(KEY_NINE)) selected = SCENE_LOOM;
+    if (selected != COUNT_SCENES) (void)select_base_scene(selected);
 }
 
 
-static void notice_push(Ui_Notice_Severity severity, const char *title,
-                        const char *detail, const char *path, bool persistent)
+static uint64_t notice_push(Ui_Notice_Severity severity, const char *title,
+                            const char *detail, const char *path, bool persistent)
 {
     char bounded_title[UI_NOTICE_TITLE_CAPACITY];
     char bounded_detail[UI_NOTICE_DETAIL_CAPACITY];
@@ -1128,11 +1185,20 @@ static void notice_push(Ui_Notice_Severity severity, const char *title,
         .detail = bounded_detail,
         .path = bounded_path,
     };
-    Ui_Notice_Result result = ui_notice_push(&p->notices, &spec, NULL);
+    uint64_t notice_id = 0;
+    Ui_Notice_Result result = ui_notice_push(&p->notices, &spec, &notice_id);
     if (result != UI_NOTICE_OK && result != UI_NOTICE_DROPPED) {
         TraceLog(LOG_WARNING, "UI: could not queue notice: %s",
                  ui_notice_result_string(result));
     }
+    return result == UI_NOTICE_OK ? notice_id : 0;
+}
+
+static void notice_dismiss(uint64_t *notice_id)
+{
+    if (notice_id == NULL || *notice_id == 0) return;
+    (void)ui_notice_dismiss(&p->notices, *notice_id);
+    *notice_id = 0;
 }
 
 static inline float signf(float x)
@@ -1259,7 +1325,13 @@ typedef enum {
     BS_NONE      = 0,
     BS_HOVEROVER = 1,
     BS_CLICKED   = 2,
+    BS_PRESSED   = 4,
 } Button_State;
+
+typedef enum {
+    BUTTON_STYLE_NEUTRAL,
+    BUTTON_STYLE_DANGER,
+} Button_Style;
 
 static int button_with_id(uint64_t id, Rectangle boundary);
 static bool start_assist_job(Assist_Mode mode, Track *track);
@@ -1281,17 +1353,23 @@ static bool stage_candidate_analysis_lanes(
     Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES],
     size_t *staged_count, char staged_audio_sha256[SHA256_HEX_SIZE]);
 
-static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
+static int styled_text_button(uint64_t id, Rectangle boundary, const char *label,
+                              bool selected, Button_Style style)
 {
     int state = button_with_id(id, boundary);
-    Color background = selected ? COLOR_TRACK_BUTTON_SELECTED : COLOR_TRACK_BUTTON_BACKGROUND;
+    Color signal = style == BUTTON_STYLE_DANGER ? COLOR_UI_DANGER :
+                                                   COLOR_TRACK_BUTTON_SELECTED;
+    Color background = selected ? signal : COLOR_TRACK_BUTTON_BACKGROUND;
     if (state & BS_HOVEROVER) {
-        background = selected ? ColorBrightness(COLOR_TRACK_BUTTON_SELECTED, 0.12f) :
+        background = selected ? ColorBrightness(signal, 0.12f) :
                                 COLOR_TRACK_BUTTON_HOVEROVER;
     }
+    if (state & BS_PRESSED) background = ColorBrightness(background, -0.08f);
     DrawRectangleRec(boundary, background);
-    DrawRectangleLinesEx(boundary, 1.0f,
-                         selected ? COLOR_TRACK_BUTTON_SELECTED : COLOR_UI_RULE);
+    DrawRectangleLinesEx(boundary, state & BS_PRESSED ? 2.0f : 1.0f,
+                         selected ? signal :
+                         style == BUTTON_STYLE_DANGER ? ColorAlpha(signal, 0.72f) :
+                                                        COLOR_UI_RULE);
     float font_size = fminf(boundary.height*0.52f, 22.0f);
     Vector2 size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
     float available_width = boundary.width - 12.0f;
@@ -1299,18 +1377,30 @@ static int text_button(uint64_t id, Rectangle boundary, const char *label, bool 
         font_size *= available_width/size.x;
         size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
     }
+    float press_offset = state & BS_PRESSED ? 1.0f : 0.0f;
     DrawTextEx(ui_font(), label,
                (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
-                         boundary.y + (boundary.height - size.y)*0.5f},
+                         boundary.y + (boundary.height - size.y)*0.5f + press_offset},
                font_size, 0.0f, selected ? WHITE : COLOR_UI_INK);
     return state;
+}
+
+static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
+{
+    return styled_text_button(id, boundary, label, selected, BUTTON_STYLE_NEUTRAL);
+}
+
+static int danger_text_button(uint64_t id, Rectangle boundary,
+                              const char *label, bool armed)
+{
+    return styled_text_button(id, boundary, label, armed, BUTTON_STYLE_DANGER);
 }
 
 static void disabled_text_button(Rectangle boundary, const char *label, bool selected)
 {
     Color background = selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.62f) :
                                   ColorAlpha(COLOR_TRACK_BUTTON_BACKGROUND, 0.72f);
-    Color foreground = selected ? ColorAlpha(WHITE, 0.82f) : COLOR_UI_MUTED;
+    Color foreground = selected ? ColorAlpha(WHITE, 0.82f) : COLOR_UI_DISABLED;
     DrawRectangleRec(boundary, background);
     DrawRectangleLinesEx(boundary, 1.0f,
                          selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.7f) :
@@ -1670,8 +1760,8 @@ static int import_lyrics_document(Lyrics_Document *document)
 static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead)
 {
     const Color signal = COLOR_ACCENT;
-    const float padding = 8.0f;
-    const float gap = 8.0f;
+    const float padding = UI_PANEL_PADDING;
+    const float gap = UI_CONTROL_GAP;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
 
@@ -1843,7 +1933,7 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
     EndScissorMode();
     lyric_text_input_update();
 
-    Rectangle apply = {form.x, form.y + 146.0f, 92.0f, 36.0f};
+    Rectangle apply = {form.x, form.y + 146.0f, 92.0f, UI_BUTTON_HEIGHT};
     if (text_button(UINT64_C(0x4C59524943415050), apply, "Apply", false) & BS_CLICKED) {
         lyric_editor_apply(track);
     }
@@ -1857,7 +1947,8 @@ static void draw_lyrics_editor(Rectangle boundary, Track *track, double playhead
         discard_button.x + discard_button.width + gap, apply.y, 92.0f, apply.height,
     };
     if (!p->lyric_draft_new &&
-        (text_button(UINT64_C(0x4C5952494344454C), delete_button, "Delete", false) & BS_CLICKED)) {
+        (danger_text_button(UINT64_C(0x4C5952494344454C), delete_button,
+                            "Delete", false) & BS_CLICKED)) {
         if (lyrics_delete(&track->lyrics, p->selected_lyric_id) == LYRICS_OK) {
             lyric_editor_clear_draft();
             mark_project_dirty(track);
@@ -1897,8 +1988,8 @@ static bool find_assist_helper(char *path, size_t capacity)
 static void draw_assist_panel(Rectangle boundary, Track *track)
 {
     const Color signal = COLOR_ACCENT;
-    const float padding = 10.0f;
-    const float gap = 8.0f;
+    const float padding = UI_PANEL_PADDING;
+    const float gap = UI_CONTROL_GAP;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
     BeginScissorMode((int)boundary.x + 1, (int)boundary.y + 1,
@@ -1906,11 +1997,11 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                      (int)fmaxf(0.0f, boundary.height - 2.0f));
     DrawTextEx(ui_font(), "ASSISTED ANALYSIS",
                (Vector2){boundary.x + padding, boundary.y + padding},
-               19.0f, 1.0f, signal);
+               UI_FONT_HEADER, 1.0f, signal);
     DrawTextEx(ui_font(),
                "Validated results stay staged until you apply them.",
                (Vector2){boundary.x + padding, boundary.y + 36.0f},
-               15.0f, 1.0f, COLOR_UI_MUTED);
+               UI_FONT_VALUE, 1.0f, COLOR_UI_MUTED);
 
     const Assist_Mode modes[] = {
         ASSIST_MODE_LYRICS, ASSIST_MODE_SECTIONS, ASSIST_MODE_MIMO, ASSIST_MODE_ALL,
@@ -1937,7 +2028,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                  track->scene_switches.count);
         Rectangle toggle = {
             boundary.x + boundary.width - padding - 190.0f,
-            boundary.y + 8.0f, 190.0f, 36.0f,
+            boundary.y + 8.0f, 190.0f, UI_BUTTON_HEIGHT,
         };
         if (text_button(UINT64_C(0x4155544F5343454E), toggle, auto_label,
                         track->scene_switches.enabled) & BS_CLICKED) {
@@ -1959,12 +2050,13 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
             boundary.x + padding + (float)column*(button_width + gap),
             boundary.y + layout.mode_top + (float)row*layout.mode_row_height,
             button_width,
-            36.0f,
+            UI_BUTTON_HEIGHT,
         };
         bool selected = (p->assist_candidate != NULL &&
                          p->assist_candidate_mode == modes[i]) ||
-                        ((active || p->assist_confirmation_pending) &&
-                         p->assist_mode == modes[i]);
+                        (active && p->assist_mode == modes[i]);
+        bool armed = p->assist_confirmation_pending && !active &&
+                     p->assist_mode == modes[i];
         int state = BS_NONE;
         if (start_block == ASSIST_START_ALLOWED) {
             state = text_button(UINT64_C(0x4153534953540000) + i,
@@ -1973,7 +2065,10 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         } else {
             disabled_text_button(button_boundary,
                                  assist_mode_display_name(modes[i]), selected);
+            tooltip(button_boundary, assist_start_block_reason(start_block),
+                    SIDE_BOTTOM, false);
         }
+        if (armed) DrawRectangleLinesEx(button_boundary, 2.0f, COLOR_UI_WARNING);
         DrawTextEx(ui_font(), assist_mode_badge(modes[i]),
                    (Vector2){button_boundary.x + 3.0f, button_boundary.y + 39.0f},
                    11.0f, 1.0f,
@@ -2032,16 +2127,22 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         snprintf(status, sizeof(status),
                  "40:00 job deadline reached  |  Editor content unchanged");
     } else if (p->assist_job_state == ASSIST_JOB_FAILED) {
-        snprintf(status, sizeof(status),
-                 "Analysis failed  |  Editor content unchanged  |  Log: %s",
-                 p->assist_log_path[0] != '\0' ? GetFileName(p->assist_log_path) :
-                                                 "application log");
+        snprintf(status, sizeof(status), "Analysis failed  |  %.250s%s%s",
+                 p->assist_failure_detail[0] != '\0' ? p->assist_failure_detail :
+                 "The helper exited before producing a validated result.",
+                 p->assist_log_path[0] != '\0' ? "  |  Log: " : "",
+                 p->assist_log_path[0] != '\0' ? GetFileName(p->assist_log_path) : "");
     } else {
         snprintf(status, sizeof(status),
                  "Ready  |  Select a workflow to review its data boundary");
     }
+    Color status_color = p->assist_job_state == ASSIST_JOB_FAILED ? COLOR_UI_DANGER :
+                         p->assist_job_state == ASSIST_JOB_SUCCEEDED ||
+                         p->assist_candidate != NULL ? COLOR_UI_SUCCESS :
+                         p->assist_confirmation_pending ? COLOR_UI_WARNING :
+                         active ? signal : COLOR_UI_INK;
     DrawTextEx(ui_font(), status, (Vector2){boundary.x + padding, status_y},
-               16.0f, 1.0f, active ? signal : COLOR_UI_INK);
+               16.0f, 1.0f, status_color);
 
     float action_y = boundary.y + layout.content_y;
     if (p->assist_confirmation_pending && !active && p->assist_candidate == NULL) {
@@ -2051,19 +2152,24 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         DrawTextEx(ui_font(), assist_mode_data_boundary(p->assist_mode),
                    (Vector2){boundary.x + padding, action_y + 21.0f},
                    14.0f, 1.0f, COLOR_UI_MUTED);
-        Rectangle start = {boundary.x + padding, action_y + 48.0f, 144.0f, 36.0f};
+        Rectangle start = {boundary.x + padding, action_y + 48.0f,
+                           144.0f, UI_BUTTON_HEIGHT};
         Rectangle cancel = {start.x + start.width + gap, start.y, 94.0f, start.height};
         if (helpers_available) {
             if (text_button(UINT64_C(0x4153534953544346), start,
                             "Start analysis", false) & BS_CLICKED) {
                 if (!start_assist_job(p->assist_mode, track)) {
                     notice_push(UI_NOTICE_ERROR, "Analysis could not start",
-                                "Check Python, required model tools, credentials, and the job log.",
-                                p->assist_log_path, true);
+                                p->assist_failure_detail,
+                                p->assist_log_path[0] != '\0' ? p->assist_log_path : NULL,
+                                true);
                 }
             }
         } else {
             disabled_text_button(start, "Start analysis", false);
+            tooltip(start, assist_start_block_reason(
+                        helpers_available ? start_block :
+                        ASSIST_START_HELPER_UNAVAILABLE), SIDE_BOTTOM, false);
         }
         if (text_button(UINT64_C(0x4153534953544343), cancel, "Cancel", false) & BS_CLICKED) {
             p->assist_confirmation_pending = false;
@@ -2076,7 +2182,8 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                    "No percentage is reported. The complete job stops at 40:00; playback remains available.",
                    (Vector2){boundary.x + padding, action_y + 21.0f},
                    14.0f, 1.0f, COLOR_UI_MUTED);
-        Rectangle cancel = {boundary.x + padding, action_y + 48.0f, 130.0f, 36.0f};
+        Rectangle cancel = {boundary.x + padding, action_y + 48.0f,
+                            130.0f, UI_BUTTON_HEIGHT};
         if (text_button(UINT64_C(0x4153534953545354), cancel,
                         "Cancel job", false) & BS_CLICKED) {
             request_assist_job_cancel();
@@ -2139,7 +2246,8 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                        (Vector2){boundary.x + padding, line_y},
                        13.0f, 1.0f, COLOR_UI_MUTED);
         }
-        Rectangle apply = {boundary.x + padding, action_y + 72.0f, 144.0f, 36.0f};
+        Rectangle apply = {boundary.x + padding, action_y + 72.0f,
+                           144.0f, UI_BUTTON_HEIGHT};
         Rectangle discard = {apply.x + apply.width + gap, apply.y, 100.0f, apply.height};
         bool draft_conflict = assist_candidate_conflicts_with_lyric_draft(
             (candidate->available_lanes & ANALYSIS_CANDIDATE_LYRICS) != 0,
@@ -2157,15 +2265,18 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                                p->assist_apply_confirmation_pending) & BS_CLICKED) {
             if (!p->assist_apply_confirmation_pending) {
                 p->assist_apply_confirmation_pending = true;
-                notice_push(UI_NOTICE_WARNING, "Confirm staged changes",
-                            "Only the listed lanes will be replaced; unlisted editor content remains unchanged.",
-                            NULL, false);
+                p->assist_apply_notice_id = notice_push(
+                    UI_NOTICE_WARNING, "Confirm staged changes",
+                    "Only the listed lanes will be replaced; unlisted editor content remains unchanged.",
+                    NULL, true);
             } else {
+                notice_dismiss(&p->assist_apply_notice_id);
                 (void)apply_assist_candidate();
             }
         }
         if (text_button(UINT64_C(0x4153534953544449), discard,
                         "Discard", false) & BS_CLICKED) {
+            notice_dismiss(&p->assist_apply_notice_id);
             discard_assist_candidate();
         }
         if (draft_conflict) {
@@ -2183,18 +2294,18 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
 
 static void draw_export_panel(Rectangle boundary, Track *track)
 {
-    const float padding = 10.0f;
-    const float gap = 8.0f;
+    const float padding = UI_PANEL_PADDING;
+    const float gap = UI_CONTROL_GAP;
     const Color signal = COLOR_ACCENT;
     DrawRectangleRec(boundary, COLOR_UI_SURFACE);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
     DrawTextEx(ui_font(), "EXPORT",
                (Vector2){boundary.x + padding, boundary.y + padding},
-               19.0f, 1.0f, signal);
+               UI_FONT_HEADER, 1.0f, signal);
     DrawTextEx(ui_font(),
                "One deterministic scene path. The destination is replaced only after the encoder succeeds.",
                (Vector2){boundary.x + padding, boundary.y + 36.0f},
-               15.0f, 1.0f, COLOR_UI_MUTED);
+               UI_FONT_VALUE, 1.0f, COLOR_UI_MUTED);
 
     float y = boundary.y + 62.0f;
     DrawTextEx(ui_font(), "SIZE", (Vector2){boundary.x + padding, y + 10.0f},
@@ -2202,7 +2313,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
     float x = boundary.x + 68.0f;
     const float size_width = 76.0f;
     for (int i = 0; i < RENDER_RESOLUTION_COUNT; ++i) {
-        Rectangle button = {x, y, size_width, 36.0f};
+        Rectangle button = {x, y, size_width, UI_BUTTON_HEIGHT};
         if (text_button(UINT64_C(0x4558504F52545300) + (uint64_t)i, button,
                         render_export_resolution_name((Render_Resolution)i),
                         p->render_resolution == (Render_Resolution)i) & BS_CLICKED) {
@@ -2219,7 +2330,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
                13.0f, 1.0f, COLOR_UI_MUTED);
     x += 48.0f;
     for (int i = 0; i < RENDER_FRAME_RATE_COUNT; ++i) {
-        Rectangle button = {x, y, 72.0f, 36.0f};
+        Rectangle button = {x, y, 72.0f, UI_BUTTON_HEIGHT};
         if (text_button(UINT64_C(0x4558504F52544600) + (uint64_t)i, button,
                         render_export_frame_rate_name((Render_Frame_Rate)i),
                         p->render_frame_rate == (Render_Frame_Rate)i) & BS_CLICKED) {
@@ -2237,7 +2348,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
                13.0f, 1.0f, COLOR_UI_MUTED);
     x = boundary.x + 86.0f;
     for (int i = 0; i < RENDER_QUALITY_COUNT; ++i) {
-        Rectangle button = {x, y, 106.0f, 36.0f};
+        Rectangle button = {x, y, 106.0f, UI_BUTTON_HEIGHT};
         if (text_button(UINT64_C(0x4558504F52545100) + (uint64_t)i, button,
                         render_export_quality_name((Render_Quality)i),
                         p->render_config.quality == (Render_Quality)i) & BS_CLICKED) {
@@ -2274,12 +2385,19 @@ static void draw_export_panel(Rectangle boundary, Track *track)
 
     Rectangle render = {
         boundary.x + boundary.width - padding - 212.0f,
-        boundary.y + boundary.height - 44.0f, 212.0f, 36.0f,
+        boundary.y + boundary.height - 44.0f, 212.0f, UI_BUTTON_HEIGHT,
     };
     Rectangle close = {render.x - 98.0f - gap, render.y, 98.0f, render.height};
-    if (text_button(UINT64_C(0x4558504F5254474F), render,
-                    "Choose output and render", false) & BS_CLICKED) {
-        start_rendering_track(track);
+    if (ffmpeg_available()) {
+        if (text_button(UINT64_C(0x4558504F5254474F), render,
+                        "Choose output and render", true) & BS_CLICKED) {
+            start_rendering_track(track);
+        }
+    } else {
+        disabled_text_button(render, "FFmpeg required", false);
+        tooltip(render,
+                "Install FFmpeg, then run the product doctor with --require export",
+                SIDE_TOP, false);
     }
     if (text_button(UINT64_C(0x4558504F5254434C), close, "Close", false) & BS_CLICKED) {
         p->export_panel_open = false;
@@ -2336,7 +2454,6 @@ static void draw_track_waveform(Rectangle boundary, const Track *track)
     size_t columns = (size_t)floorf(boundary.width);
     if (columns > 4096u) columns = 4096u;
     float amplitude = fmaxf(1.0f, boundary.height*0.43f);
-    Color waveform = ColorAlpha(COLOR_ACCENT, 0.58f);
     for (size_t column = 0; column < columns; ++column) {
         size_t first = column*bin_count/columns;
         size_t end = (column + 1u)*bin_count/columns;
@@ -2353,6 +2470,10 @@ static void draw_track_waveform(Rectangle boundary, const Track *track)
             }
         }
         float x = boundary.x + ((float)column + 0.5f)*boundary.width/(float)columns;
+        float local_peak = fmaxf(fabsf(minimum), fabsf(maximum));
+        Color waveform = ColorAlpha(
+            ColorBrightness(COLOR_ACCENT, -0.18f + fminf(1.0f, local_peak)*0.24f),
+            0.38f + fminf(1.0f, local_peak)*0.48f);
         DrawLineEx((Vector2){x, center - maximum*amplitude},
                    (Vector2){x, center - minimum*amplitude},
                    1.0f, waveform);
@@ -2392,20 +2513,34 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         controls_height,
     };
     const char *labels[6] = {"Lyrics", "Assist", "Export", "+ Feel", "+ Scene", "+ Custom"};
+    const char *control_tooltips[6] = {
+        "Edit timed lyric content and synchronization",
+        "Stage local or model-assisted analysis",
+        "Configure and render a deterministic MP4",
+        "Record a feeling marker at the playhead",
+        "Cue this scene and its current tuning at the playhead",
+        "Record a custom marker at the playhead",
+    };
+    const float control_widths[6] = {74.0f, 74.0f, 90.0f, 74.0f, 82.0f, 86.0f};
     const uint32_t types[6] = {
         EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
         EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
     };
     float control_x = controls.x;
     for (size_t i = 0; i < 6; ++i) {
-        Rectangle boundary = {control_x, controls.y, event_button_width, controls.height};
+        Rectangle boundary = {control_x, controls.y, control_widths[i], controls.height};
         int state = text_button(UINT64_C(0x45564E5400000000) + i, boundary, labels[i],
                                 (i == 0 && p->lyrics_editor_open) ||
                                 (i == 1 && p->assist_panel_open) ||
-                                (i == 2 && p->export_panel_open));
-        DrawRectangleLinesEx(boundary, 1.0f,
+                                i == 2);
+        Color category = i < 3 ? (Color){242, 190, 66, 255} :
+                                 event_type_color(types[i]);
+        DrawRectangle((int)boundary.x, (int)boundary.y, 4,
+                      (int)boundary.height, category);
+        DrawRectangleLinesEx(boundary, 2.0f,
                              ColorAlpha(i < 3 ? (Color){242, 190, 66, 255}
                                                : event_type_color(types[i]), 0.8f));
+        tooltip(boundary, control_tooltips[i], SIDE_TOP, false);
         if (state & BS_CLICKED) {
             bool blocked = p->lyrics_editor_open &&
                            !lyric_editor_allow_context_change(track);
@@ -2434,18 +2569,23 @@ static void timeline(Rectangle timeline_boundary, Track *track)
                 record_timeline_event(track, types[i]);
             }
         }
-        control_x += event_button_width + margin;
+        control_x += control_widths[i] + margin;
     }
     Rectangle clear_boundary = {control_x, controls.y, 112.0f, controls.height};
     const char *clear_label = p->event_undo_available ? "Undo clear" :
                               p->clear_events_confirmation ? "Confirm clear" :
                               "Clear manual";
-    if (text_button(UINT64_C(0x45564E54FFFFFFFF), clear_boundary,
-                    clear_label, p->clear_events_confirmation) & BS_CLICKED) {
+    int clear_state = p->clear_events_confirmation ?
+        danger_text_button(UINT64_C(0x45564E54FFFFFFFF), clear_boundary,
+                           clear_label, true) :
+        text_button(UINT64_C(0x45564E54FFFFFFFF), clear_boundary,
+                    clear_label, false);
+    if (clear_state & BS_CLICKED) {
         if (p->event_undo_available) {
             if (event_timeline_replace(&track->manual_events, &p->event_undo) ==
                 EVENT_TIMELINE_OK) {
                 p->event_undo_available = false;
+                notice_dismiss(&p->clear_events_notice_id);
                 track->next_manual_event_id = timeline_next_id(&track->manual_events);
                 mark_project_dirty(track);
                 notice_push(UI_NOTICE_SUCCESS, "Manual events restored",
@@ -2457,15 +2597,17 @@ static void timeline(Rectangle timeline_boundary, Track *track)
             track->next_manual_event_id = 1;
             p->event_undo_available = true;
             p->clear_events_confirmation = false;
+            notice_dismiss(&p->clear_events_notice_id);
             mark_project_dirty(track);
             notice_push(UI_NOTICE_SUCCESS, "Manual events cleared",
                         "Lyrics, semantic cues, and scene suggestions were not changed.",
                         NULL, false);
         } else {
             p->clear_events_confirmation = true;
-            notice_push(UI_NOTICE_WARNING, "Confirm manual-event clear",
-                        "Click Confirm clear. Lyrics and imported lanes will remain.",
-                        NULL, false);
+            p->clear_events_notice_id = notice_push(
+                UI_NOTICE_WARNING, "Confirm manual-event clear",
+                "Click Confirm clear. Lyrics and imported lanes will remain.",
+                NULL, true);
         }
     }
 
@@ -2488,10 +2630,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         timeline_boundary.width - margin*2.0f,
         transport_height,
     };
-    const char *seek_labels[] = {
-        "Start", "-10 s", "-1 s", "-0.1 s", "+0.1 s", "+1 s", "+10 s",
-    };
-    const double seek_deltas[] = {0.0, -10.0, -1.0, -0.1, 0.1, 1.0, 10.0};
+    const char *seek_labels[] = {"Start", "-1 s", "+1 s"};
+    const double seek_deltas[] = {0.0, -1.0, 1.0};
     float seek_x = transport.x;
     for (size_t i = 0; i < NOB_ARRAY_LEN(seek_labels); ++i) {
         float width = i == 0 ? 62.0f : 58.0f;
@@ -2573,7 +2713,11 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     float x = waveform_lane.x + played/len*waveform_lane.width;
     DrawLineEx((Vector2){x, waveform_lane.y},
                (Vector2){x, waveform_lane.y + waveform_lane.height},
-               2.0f, COLOR_TIMELINE_CURSOR);
+               1.25f, COLOR_TIMELINE_CURSOR);
+    DrawTriangle((Vector2){x - 5.0f, waveform_lane.y},
+                 (Vector2){x + 5.0f, waveform_lane.y},
+                 (Vector2){x, waveform_lane.y + 7.0f},
+                 COLOR_TIMELINE_CURSOR);
     EndScissorMode();
 
     if (p->lyrics_editor_open) {
@@ -2638,6 +2782,7 @@ static void timeline(Rectangle timeline_boundary, Track *track)
 
 static int button_with_id(uint64_t id, Rectangle boundary)
 {
+    (void)id;
     Vector2 mouse = GetMousePosition();
     int hoverover = CheckCollisionPointRec(mouse, boundary);
 
@@ -2653,7 +2798,8 @@ static int button_with_id(uint64_t id, Rectangle boundary)
         }
     }
 
-    return (clicked<<1) | hoverover;
+    int pressed = hoverover && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    return (pressed<<2) | (clicked<<1) | hoverover;
 }
 
 #define DJB2_INIT 5381
@@ -2667,7 +2813,7 @@ static uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
     return hash;
 }
 
-static bool assist_job_start_failed(void)
+static bool assist_job_start_failed(const char *detail, bool log_available)
 {
     p->assist_process = NOB_INVALID_PROC;
 #ifdef _WIN32
@@ -2677,6 +2823,9 @@ static bool assist_job_start_failed(void)
     }
 #endif
     p->assist_job_state = ASSIST_JOB_FAILED;
+    snprintf(p->assist_failure_detail, sizeof(p->assist_failure_detail), "%s",
+             detail != NULL ? detail : "The analysis process could not be started.");
+    if (!log_available) p->assist_log_path[0] = '\0';
     return false;
 }
 
@@ -2711,12 +2860,16 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
     path_hash = djb2(path_hash, &track->lyrics.duration_seconds,
                      sizeof(track->lyrics.duration_seconds));
     if (!nob_mkdir_if_not_exists("./build/analysis")) {
-        return assist_job_start_failed();
+        return assist_job_start_failed(
+            "The local analysis workspace could not be created. Check directory permissions.",
+            false);
     }
     snprintf(p->assist_output_dir, sizeof(p->assist_output_dir),
              "./build/analysis/%016llx", (unsigned long long)path_hash);
     if (!nob_mkdir_if_not_exists(p->assist_output_dir)) {
-        return assist_job_start_failed();
+        return assist_job_start_failed(
+            "The track analysis workspace could not be created. Check directory permissions.",
+            false);
     }
     // The output directory remains stable so the Python orchestration layer can
     // reuse measured/model caches. Each accepted bridge and its diagnostic log
@@ -2742,20 +2895,23 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
         if (bridge_length <= 0 || log_length <= 0 ||
             (size_t)bridge_length >= sizeof(p->assist_bridge_path) ||
             (size_t)log_length >= sizeof(p->assist_log_path)) {
-            return assist_job_start_failed();
+            return assist_job_start_failed(
+                "The analysis artifact path is too long for this installation.", false);
         }
         if (!FileExists(p->assist_bridge_path) && !FileExists(p->assist_log_path)) {
             unique_artifacts = true;
             break;
         }
     }
-    if (!unique_artifacts) return assist_job_start_failed();
+    if (!unique_artifacts) return assist_job_start_failed(
+        "A unique analysis artifact name could not be reserved.", false);
 
     char duration_text[64];
     snprintf(duration_text, sizeof(duration_text), "%.9f", track->lyrics.duration_seconds);
     char helper_path[PLUG_RELOAD_PATH_CAPACITY];
     if (!find_assist_helper(helper_path, sizeof(helper_path))) {
-        return assist_job_start_failed();
+        return assist_job_start_failed(
+            "The Assist helper script is missing from this installation.", false);
     }
     Nob_Cmd command = {0};
     Nob_Procs processes = {0};
@@ -2763,7 +2919,8 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
     HANDLE assist_job_object = create_assist_job_object();
     if (assist_job_object == NULL) {
         nob_cmd_free(command);
-        return assist_job_start_failed();
+        return assist_job_start_failed(
+            "Windows could not create a process group for the analysis job.", false);
     }
 #endif
 #ifdef _WIN32
@@ -2795,7 +2952,9 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
         CloseHandle(assist_job_object);
 #endif
         nob_da_free(processes);
-        return assist_job_start_failed();
+        return assist_job_start_failed(
+            "Python could not launch the Assist helper. Review the job log for details.",
+            FileExists(p->assist_log_path));
     }
     p->assist_process = processes.items[0];
 #ifdef _WIN32
@@ -2805,6 +2964,7 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
     p->assist_mode = mode;
     p->assist_track_index = track_index;
     p->assist_job_state = ASSIST_JOB_RUNNING;
+    p->assist_failure_detail[0] = '\0';
     p->assist_started_at = GetTime();
     p->assist_cancel_started_at = 0.0;
     p->assist_confirmation_pending = false;
@@ -3067,6 +3227,7 @@ static bool apply_assist_candidate(void)
              staged_audio_sha256);
     free(p->assist_candidate);
     p->assist_candidate = NULL;
+    notice_dismiss(&p->assist_apply_notice_id);
     p->assist_confirmation_pending = false;
     p->assist_apply_confirmation_pending = false;
     p->assist_job_state = ASSIST_JOB_IDLE;
@@ -3082,6 +3243,7 @@ static bool apply_assist_candidate(void)
 static void discard_assist_candidate(void)
 {
     if (p->assist_candidate == NULL) return;
+    notice_dismiss(&p->assist_apply_notice_id);
     const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
                              GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
                              "the missing target track";
@@ -3304,9 +3466,11 @@ static void poll_assist_job(void)
     p->assist_process = NOB_INVALID_PROC;
     if (status < 0) {
         p->assist_job_state = ASSIST_JOB_FAILED;
+        snprintf(p->assist_failure_detail, sizeof(p->assist_failure_detail), "%s",
+                 "The helper exited before producing a validated result.");
         TraceLog(LOG_WARNING, "ASSIST: analysis failed; see %s", p->assist_log_path);
         notice_push(UI_NOTICE_ERROR, "Analysis failed",
-                    "The helper exited before producing a validated result.",
+                    p->assist_failure_detail,
                     p->assist_log_path, true);
         return;
     }
@@ -4385,27 +4549,13 @@ static void set_scene_settings_open(bool open)
         p->scene_settings_open = true;
         p->scene_settings_scroll = 0.0f;
         p->scene_settings_scroll_scene = p->scene.id;
-        if (!IsWindowMaximized()) {
-            const int inspector_width = 340;
-            int monitor = GetCurrentMonitor();
-            Vector2 position = GetWindowPosition();
-            Vector2 monitor_position = GetMonitorPosition(monitor);
-            int current_width = GetScreenWidth();
-            if (scene_settings_window_can_expand(
-                    (int)roundf(position.x), current_width,
-                    (int)roundf(monitor_position.x), GetMonitorWidth(monitor),
-                    inspector_width)) {
-                p->scene_settings_restore_width = current_width;
-                p->scene_settings_expanded_width = current_width + inspector_width;
-                p->scene_settings_window_expanded = true;
-                SetWindowSize(p->scene_settings_expanded_width, GetScreenHeight());
-            }
-        }
         return;
     }
 
     p->scene_settings_open = false;
     p->active_button_id = 0;
+    p->scene_settings_reset_confirmation = false;
+    notice_dismiss(&p->scene_settings_reset_notice_id);
     if (p->scene_settings_window_expanded && !IsWindowMaximized() &&
         abs(GetScreenWidth() - p->scene_settings_expanded_width) <= 4) {
         SetWindowSize(p->scene_settings_restore_width, GetScreenHeight());
@@ -4413,6 +4563,29 @@ static void set_scene_settings_open(bool open)
     p->scene_settings_window_expanded = false;
     p->scene_settings_restore_width = 0;
     p->scene_settings_expanded_width = 0;
+}
+
+static bool scene_settings_can_expand_window(void)
+{
+    if (IsWindowMaximized() || p->scene_settings_window_expanded) return false;
+    const int inspector_width = 340;
+    int monitor = GetCurrentMonitor();
+    Vector2 position = GetWindowPosition();
+    Vector2 monitor_position = GetMonitorPosition(monitor);
+    return scene_settings_window_can_expand(
+        (int)roundf(position.x), GetScreenWidth(),
+        (int)roundf(monitor_position.x), GetMonitorWidth(monitor),
+        inspector_width);
+}
+
+static void scene_settings_expand_window(void)
+{
+    if (!scene_settings_can_expand_window()) return;
+    const int inspector_width = 340;
+    p->scene_settings_restore_width = GetScreenWidth();
+    p->scene_settings_expanded_width = p->scene_settings_restore_width + inspector_width;
+    p->scene_settings_window_expanded = true;
+    SetWindowSize(p->scene_settings_expanded_width, GetScreenHeight());
 }
 
 static bool scene_setting_slider(Rectangle boundary, Scene_Id scene_id,
@@ -4460,7 +4633,9 @@ static bool scene_setting_slider(Rectangle boundary, Scene_Id scene_id,
     float handle_x = boundary.x + boundary.width*normalized;
     DrawRectangleRec((Rectangle){handle_x - 5.0f, center_y - 8.0f, 10.0f, 16.0f},
                      COLOR_ACCENT);
-    if (hover || p->active_button_id == id) {
+    if (p->active_button_id == id) {
+        DrawRectangleLinesEx(boundary, 2.0f, ColorAlpha(COLOR_ACCENT, 0.72f));
+    } else if (hover) {
         DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(COLOR_ACCENT, 0.28f));
     }
     return changed;
@@ -4501,26 +4676,81 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                (Vector2){boundary.x, boundary.y + boundary.height},
                2.0f, COLOR_ACCENT);
 
-    const float padding = 18.0f;
+    const float padding = UI_PANEL_PADDING;
     DrawTextEx(ui_font(), "SCENE SETTINGS",
                (Vector2){boundary.x + padding, boundary.y + 18.0f},
-               15.0f, 1.0f, COLOR_UI_MUTED);
+               UI_FONT_VALUE, 1.0f, COLOR_UI_MUTED);
     DrawTextEx(ui_font(), scene_name(p->scene.id),
                (Vector2){boundary.x + padding, boundary.y + 39.0f},
                24.0f, 0.0f, COLOR_UI_INK);
 
     Scene_Settings *editable_settings = track_effective_scene_settings(track);
+    if (p->scene_settings_reset_scene != p->scene.id) {
+        p->scene_settings_reset_confirmation = false;
+        p->scene_settings_reset_undo_available = false;
+        p->scene_settings_reset_scene = p->scene.id;
+        notice_dismiss(&p->scene_settings_reset_notice_id);
+    }
     float button_y = boundary.y + 72.0f;
-    float button_width = (boundary.width - padding*2.0f - 8.0f)*0.5f;
-    Rectangle reset = {boundary.x + padding, button_y, button_width, 30.0f};
-    Rectangle hide = {reset.x + reset.width + 8.0f, button_y,
-                      button_width, 30.0f};
-    if (text_button(UINT64_C(0x53455454494E4752), reset,
-                    "Reset", false) & BS_CLICKED) {
-        if (scene_settings_reset_scene(editable_settings, p->scene.id)) {
-            commit_active_cue_settings(track, p->scene.id);
-            mark_project_dirty(track);
+    const float header_gap = 6.0f;
+    float button_width = (boundary.width - padding*2.0f - header_gap*2.0f)/3.0f;
+    Rectangle reset = {boundary.x + padding, button_y, button_width,
+                       UI_COMPACT_BUTTON_HEIGHT};
+    Rectangle expand = {reset.x + reset.width + header_gap, button_y,
+                        button_width, UI_COMPACT_BUTTON_HEIGHT};
+    Rectangle hide = {expand.x + expand.width + header_gap, button_y,
+                      button_width, UI_COMPACT_BUTTON_HEIGHT};
+    const char *reset_label = p->scene_settings_reset_undo_available ? "Undo reset" :
+                              p->scene_settings_reset_confirmation ? "Confirm" : "Reset";
+    int reset_state = p->scene_settings_reset_confirmation ?
+        danger_text_button(UINT64_C(0x53455454494E4752), reset,
+                           reset_label, true) :
+        text_button(UINT64_C(0x53455454494E4752), reset, reset_label, false);
+    if (reset_state & BS_CLICKED) {
+        if (p->scene_settings_reset_undo_available) {
+            if (scene_settings_apply_snapshot(editable_settings, p->scene.id,
+                                              &p->scene_settings_reset_undo)) {
+                p->scene_settings_reset_undo_available = false;
+                commit_active_cue_settings(track, p->scene.id);
+                mark_project_dirty(track);
+                notice_push(UI_NOTICE_SUCCESS, "Scene settings restored",
+                            "The values from before Reset are active again.", NULL, false);
+            }
+        } else if (p->scene_settings_reset_confirmation) {
+            Scene_Settings_Snapshot previous;
+            if (scene_settings_capture(editable_settings, p->scene.id, &previous) &&
+                scene_settings_reset_scene(editable_settings, p->scene.id)) {
+                p->scene_settings_reset_undo = previous;
+                p->scene_settings_reset_undo_available = true;
+                p->scene_settings_reset_confirmation = false;
+                notice_dismiss(&p->scene_settings_reset_notice_id);
+                commit_active_cue_settings(track, p->scene.id);
+                mark_project_dirty(track);
+                notice_push(UI_NOTICE_SUCCESS, "Scene settings reset",
+                            "Use Undo reset to restore the previous values.", NULL, false);
+            }
+        } else {
+            p->scene_settings_reset_confirmation = true;
+            p->scene_settings_reset_notice_id = notice_push(
+                UI_NOTICE_WARNING, "Confirm scene reset",
+                "Click Confirm to replace this scene's tuned values with defaults.",
+                NULL, true);
         }
+    }
+    if (scene_settings_can_expand_window()) {
+        if (text_button(UINT64_C(0x53455454494E4745), expand,
+                        "Expand", false) & BS_CLICKED) {
+            scene_settings_expand_window();
+        }
+        tooltip(expand, "Expand the application window for this inspector",
+                SIDE_BOTTOM, false);
+    } else {
+        disabled_text_button(expand,
+                             p->scene_settings_window_expanded ? "Expanded" : "Fit", false);
+        tooltip(expand, p->scene_settings_window_expanded ?
+                "The application window is already expanded" :
+                "The inspector is fitted inside the current window",
+                SIDE_BOTTOM, false);
     }
     if (text_button(UINT64_C(0x53455454494E4748), hide,
                     "Hide", false) & BS_CLICKED) {
@@ -4536,6 +4766,11 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     size_t *selected = &track->selected_scene_preset[scene_index];
     if (preset_count == 0) *selected = 0;
     else if (*selected >= preset_count) *selected = preset_count - 1;
+    if (p->scene_preset_delete_confirmation &&
+        (p->scene_preset_delete_scene != p->scene.id ||
+         p->scene_preset_delete_index != *selected)) {
+        p->scene_preset_delete_confirmation = false;
+    }
     float preset_y = button_y + 44.0f;
     char preset_status[64];
     snprintf(preset_status, sizeof(preset_status), "PRESETS  %zu / %u",
@@ -4564,7 +4799,13 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             track->scene_presets.items[scene_index][*selected].name, true);
     } else {
         disabled_text_button(previous, "<", false);
-        disabled_text_button(preset_name, "No saved presets", false);
+        DrawRectangleLinesEx(preset_name, 1.0f, ColorAlpha(COLOR_UI_RULE, 0.72f));
+        Vector2 empty_size = MeasureTextEx(ui_font(), "Save a preset to see it here",
+                                           UI_FONT_CAPTION, 0.0f);
+        DrawTextEx(ui_font(), "Save a preset to see it here",
+                   (Vector2){preset_name.x + (preset_name.width - empty_size.x)*0.5f,
+                             preset_name.y + (preset_name.height - empty_size.y)*0.5f},
+                   UI_FONT_CAPTION, 0.0f, COLOR_UI_MUTED);
         disabled_text_button(next, ">", false);
     }
 
@@ -4591,15 +4832,33 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                                           *selected, editable_settings)) {
             mark_project_dirty(track);
         }
-        if ((text_button(UINT64_C(0x505245534554444C), remove,
-                         "Delete", false) & BS_CLICKED) != 0 &&
-            scene_settings_preset_remove(&track->scene_presets, scene_index,
-                                         *selected)) {
-            if (*selected > 0 && *selected >= track->scene_presets.counts[scene_index]) {
-                (*selected)--;
+        const char *delete_label = p->scene_preset_delete_confirmation ?
+                                   "Confirm" : "Delete";
+        int delete_state = p->scene_preset_delete_confirmation ?
+            danger_text_button(UINT64_C(0x505245534554444C), remove,
+                               delete_label, true) :
+            text_button(UINT64_C(0x505245534554444C), remove,
+                        delete_label, false);
+        if ((delete_state & BS_CLICKED) != 0) {
+            if (!p->scene_preset_delete_confirmation) {
+                p->scene_preset_delete_confirmation = true;
+                p->scene_preset_delete_scene = p->scene.id;
+                p->scene_preset_delete_index = *selected;
+            } else if (scene_settings_preset_remove(
+                           &track->scene_presets, scene_index, *selected)) {
+                p->scene_preset_delete_confirmation = false;
+                if (*selected > 0 &&
+                    *selected >= track->scene_presets.counts[scene_index]) {
+                    (*selected)--;
+                }
+                mark_project_dirty(track);
             }
-            mark_project_dirty(track);
         }
+        tooltip(apply, "Load this preset into the active scene", SIDE_BOTTOM, false);
+        tooltip(replace, "Replace this preset with the current values", SIDE_BOTTOM, false);
+        tooltip(remove, p->scene_preset_delete_confirmation ?
+                "Click again to permanently remove this preset" :
+                "Remove the selected preset", SIDE_BOTTOM, false);
     } else {
         disabled_text_button(apply, "Load", false);
         disabled_text_button(replace, "Update", false);
@@ -4621,11 +4880,12 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
 
     const float content_top = action_y + 42.0f;
     const float footer_height = 44.0f;
-    const float content_height = fmaxf(0.0f, boundary.height -
-                                       (content_top - boundary.y) - footer_height);
     const float row_height = 76.0f;
     size_t setting_count = scene_settings_count(p->scene.id);
     float total_height = (float)setting_count*row_height;
+    float available_content_height = fmaxf(0.0f, boundary.height -
+                                           (content_top - boundary.y) - footer_height);
+    const float content_height = fminf(available_content_height, total_height);
     float max_scroll = fmaxf(0.0f, total_height - content_height);
     Vector2 mouse = GetMousePosition();
     Rectangle content = {boundary.x, content_top, boundary.width, content_height};
@@ -4645,7 +4905,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             y > content.y + content.height) continue;
         DrawTextEx(ui_font(), descriptor->label,
                    (Vector2){boundary.x + padding, y + 5.0f},
-                   16.0f, 0.0f, COLOR_UI_INK);
+                   UI_FONT_LABEL, 0.0f, COLOR_UI_INK);
         char value_text[32];
         float value = scene_settings_get(editable_settings, p->scene.id, index);
         if (descriptor->kind == SCENE_SETTING_TOGGLE) {
@@ -4661,11 +4921,11 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             snprintf(value_text, sizeof(value_text), "%.*f",
                      (int)descriptor->precision, value);
         }
-        Vector2 value_size = MeasureTextEx(ui_font(), value_text, 15.0f, 0.0f);
+        Vector2 value_size = MeasureTextEx(ui_font(), value_text, UI_FONT_VALUE, 0.0f);
         DrawTextEx(ui_font(), value_text,
                    (Vector2){boundary.x + boundary.width - padding - value_size.x,
                              y + 6.0f},
-                   15.0f, 0.0f, COLOR_ACCENT);
+                   UI_FONT_VALUE, 0.0f, COLOR_ACCENT);
         Rectangle slider = {boundary.x + padding, y + 31.0f,
                             boundary.width - padding*2.0f, 30.0f};
         bool changed;
@@ -4707,7 +4967,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     DrawTextEx(ui_font(), track->cue_settings_active ?
                "Editing this cue snapshot" : "Presets saved with this track",
                (Vector2){boundary.x + padding,
-                         boundary.y + boundary.height - 29.0f},
+                         content.y + content.height + 15.0f},
                14.0f, 0.0f, COLOR_UI_MUTED);
 }
 
@@ -4760,7 +5020,7 @@ static void scene_browser(Rectangle boundary)
     float row_height = (boundary.height - header_height - footer_height - padding*2.0f
                       - gap*(rows - 1))/(float)rows;
     if (row_height > 38.0f) row_height = 38.0f;
-    if (row_height < 30.0f) return;
+    if (row_height < 24.0f) row_height = 24.0f;
     float column_width = (boundary.width - padding*2.0f - gap)/(float)columns;
     for (Scene_Id id = 0; id < COUNT_SCENES; ++id) {
         size_t column = (size_t)id%columns;
@@ -4773,13 +5033,11 @@ static void scene_browser(Rectangle boundary)
         };
         if (text_button(UINT64_C(0x5343454E45000000) + (uint64_t)id,
                         row, scene_name(id), p->scene.id == id) & BS_CLICKED) {
-            if (scene_instance_select(&p->scene, id, scene_seed_for_track(track))) {
-                if (track != NULL) {
-                    track_select_base_scene(track, id);
-                }
-                mark_project_dirty(track);
-            }
+            (void)select_base_scene(id);
         }
+        char shortcut[16];
+        snprintf(shortcut, sizeof(shortcut), "Scene [%u]", (unsigned)id + 1U);
+        tooltip(row, shortcut, SIDE_RIGHT, false);
     }
 
     Rectangle import_button = {
@@ -5045,15 +5303,52 @@ static const char *notice_severity_label(Ui_Notice_Severity severity)
     return "NOTICE";
 }
 
+static Color notice_severity_color(Ui_Notice_Severity severity)
+{
+    switch (severity) {
+    case UI_NOTICE_INFO: return COLOR_ACCENT;
+    case UI_NOTICE_SUCCESS: return COLOR_UI_SUCCESS;
+    case UI_NOTICE_WARNING: return COLOR_UI_WARNING;
+    case UI_NOTICE_ERROR: return COLOR_UI_DANGER;
+    case UI_NOTICE_SEVERITY_COUNT: break;
+    }
+    return COLOR_UI_INK;
+}
+
+static void draw_notice_wrapped_text(const char *text, Vector2 position,
+                                     float maximum_width, float font_size,
+                                     size_t maximum_lines, Color color)
+{
+    if (text == NULL || text[0] == '\0' || maximum_lines == 0) return;
+    Caption_Raylib_Measurement measurement = {ui_font(), font_size, 1.0f};
+    Caption_Layout layout;
+    if (caption_layout_utf8(text, maximum_width, caption_measure_raylib,
+                            &measurement, &layout) != CAPTION_LAYOUT_OK) return;
+    size_t line_count = layout.line_count < maximum_lines ?
+                        layout.line_count : maximum_lines;
+    for (size_t i = 0; i < line_count; ++i) {
+        DrawTextEx(ui_font(), layout.lines[i].text,
+                   (Vector2){position.x, position.y + (float)i*(font_size + 2.0f)},
+                   font_size, 1.0f, color);
+    }
+}
+
 static void notice_tray(Rectangle preview_boundary)
 {
     (void)ui_notice_tick(&p->notices, GetFrameTime());
     const float width = fminf(390.0f, preview_boundary.width - 32.0f);
-    const float height = 92.0f;
+    if (width < 220.0f) return;
+    const float height = 142.0f;
     const float gap = 10.0f;
     const float margin = 16.0f;
-    const size_t visible_count = p->notices.count < 3 ? p->notices.count : 3;
+    size_t tray_capacity = preview_boundary.height > margin ?
+        (size_t)((preview_boundary.height - margin)/(height + gap)) : 1u;
+    if (tray_capacity < 1u) tray_capacity = 1u;
+    if (tray_capacity > 3u) tray_capacity = 3u;
+    const size_t visible_count = p->notices.count < tray_capacity ?
+                                 p->notices.count : tray_capacity;
     uint64_t dismiss_id = 0;
+    uint64_t retry_id = 0;
     for (size_t row = 0; row < visible_count; ++row) {
         size_t index = p->notices.count - 1 - row;
         const Ui_Notice *notice = &p->notices.notices[index];
@@ -5063,28 +5358,32 @@ static void notice_tray(Rectangle preview_boundary)
             .width = width,
             .height = height,
         };
+        Color severity_color = notice_severity_color(notice->severity);
         DrawRectangleRec(card, (Color){247, 247, 248, 248});
         DrawRectangleLinesEx(card, 1.0f, (Color){20, 20, 20, 255});
-        DrawRectangle((int)card.x, (int)card.y, 5, (int)card.height, COLOR_ACCENT);
+        DrawRectangle((int)card.x, (int)card.y, 5, (int)card.height, severity_color);
         DrawTextEx(ui_font(), notice_severity_label(notice->severity),
                    (Vector2){card.x + 16.0f, card.y + 11.0f}, 14.0f, 1.0f,
-                   COLOR_ACCENT);
+                   severity_color);
         DrawTextEx(ui_font(), notice->title,
                    (Vector2){card.x + 82.0f, card.y + 9.0f}, 18.0f, 1.0f,
                    (Color){20, 20, 20, 255});
-        BeginScissorMode((int)card.x + 16, (int)card.y + 34,
-                         (int)card.width - 102, (int)card.height - 40);
-        DrawTextEx(ui_font(), notice->detail,
-                   (Vector2){card.x + 16.0f, card.y + 38.0f}, 15.0f, 1.0f,
-                   (Color){70, 70, 72, 255});
+        const float text_width = card.width - 32.0f;
+        draw_notice_wrapped_text(notice->detail,
+                                 (Vector2){card.x + 16.0f, card.y + 36.0f},
+                                 text_width, 14.0f, 3,
+                                 (Color){70, 70, 72, 255});
         if (notice->path[0] != '\0') {
-            DrawTextEx(ui_font(), notice->path,
-                       (Vector2){card.x + 16.0f, card.y + 62.0f}, 13.0f, 1.0f,
+            const char *path_label = GetFileName(notice->path);
+            DrawTextEx(ui_font(), path_label,
+                       (Vector2){card.x + 16.0f, card.y + 89.0f}, 12.0f, 1.0f,
                        (Color){92, 92, 96, 255});
+            tooltip((Rectangle){card.x + 12.0f, card.y + 86.0f,
+                                text_width, 18.0f}, notice->path,
+                    SIDE_BOTTOM, false);
         }
-        EndScissorMode();
         Rectangle dismiss = {
-            card.x + card.width - 76.0f, card.y + card.height - 32.0f, 64.0f, 23.0f,
+            card.x + card.width - 76.0f, card.y + card.height - 30.0f, 64.0f, 22.0f,
         };
         int state = button_with_id(UINT64_C(0x4E4F544943450000) ^ notice->id, dismiss);
         DrawRectangleLinesEx(dismiss, state & BS_HOVEROVER ? 2.0f : 1.0f,
@@ -5093,8 +5392,52 @@ static void notice_tray(Rectangle preview_boundary)
                    (Vector2){dismiss.x + 8.0f, dismiss.y + 5.0f}, 13.0f, 1.0f,
                    (Color){20, 20, 20, 255});
         if (state & BS_CLICKED) dismiss_id = notice->id;
+        if (notice->path[0] != '\0') {
+            Rectangle copy = {dismiss.x - 78.0f, dismiss.y, 70.0f, dismiss.height};
+            int copy_state = button_with_id(
+                UINT64_C(0x4E4F544943454350) ^ notice->id, copy);
+            DrawRectangleLinesEx(copy, copy_state & BS_HOVEROVER ? 2.0f : 1.0f,
+                                 COLOR_UI_INK);
+            DrawTextEx(ui_font(), "Copy path",
+                       (Vector2){copy.x + 7.0f, copy.y + 5.0f}, 12.0f, 1.0f,
+                       COLOR_UI_INK);
+            if (copy_state & BS_CLICKED) SetClipboardText(notice->path);
+        }
+        bool retry_available = ui_notice_is_actionable_failure(notice) &&
+            strncmp(notice->title, "Analysis", 8) == 0 && current_track() != NULL &&
+            !assist_job_is_active(p->assist_job_state) && p->assist_candidate == NULL;
+        if (retry_available) {
+            Rectangle retry = {card.x + 16.0f, dismiss.y, 58.0f, dismiss.height};
+            int retry_state = button_with_id(
+                UINT64_C(0x4E4F544943455254) ^ notice->id, retry);
+            DrawRectangleRec(retry, retry_state & BS_HOVEROVER ?
+                             COLOR_TRACK_BUTTON_HOVEROVER : COLOR_UI_RAISED);
+            DrawRectangleLinesEx(retry, 1.0f, COLOR_ACCENT);
+            DrawTextEx(ui_font(), "Retry",
+                       (Vector2){retry.x + 11.0f, retry.y + 5.0f}, 12.0f, 1.0f,
+                       COLOR_ACCENT);
+            if (retry_state & BS_CLICKED) retry_id = notice->id;
+        }
     }
     if (dismiss_id != 0) (void)ui_notice_dismiss(&p->notices, dismiss_id);
+    if (retry_id != 0) {
+        (void)ui_notice_dismiss(&p->notices, retry_id);
+        p->assist_panel_open = true;
+        p->lyrics_editor_open = false;
+        p->export_panel_open = false;
+        p->assist_confirmation_pending = true;
+    }
+    if (p->notices.count > visible_count) {
+        char hidden[48];
+        snprintf(hidden, sizeof(hidden), "+%zu more notice%s",
+                 p->notices.count - visible_count,
+                 p->notices.count - visible_count == 1 ? "" : "s");
+        DrawTextEx(ui_font(), hidden,
+                   (Vector2){preview_boundary.x + preview_boundary.width - width,
+                             preview_boundary.y + margin +
+                             visible_count*(height + gap)},
+                   UI_FONT_CAPTION, 1.0f, COLOR_UI_MUTED);
+    }
 }
 
 #define play_button(track, boundary) \
@@ -5505,15 +5848,30 @@ MUSIALIZER_PLUG bool plug_confirm_close(void)
     if (dirty_projects == 0 && !dirty_draft && !staged_suggestions &&
         !analysis_running && !export_running) return true;
 
-    char message[512];
-    snprintf(message, sizeof(message),
-             "%zu open track project%s still have unsaved canonical edits.%s%s%s%s\n\nQuit, cancel active jobs, and discard any unsaved work?",
-             dirty_projects, dirty_projects == 1 ? "" : "s",
-             dirty_draft ? "\nThe active lyric draft has not been applied." : "",
-             staged_suggestions ? "\nValidated Assist suggestions have not been applied." : "",
-             analysis_running ? "\nAn external analysis job is still running and will be cancelled." : "",
-             export_running ? "\nA video export is still running and will be cancelled." : "");
-    return tinyfd_messageBox("Unsaved Musializer work", message,
+    char message[768];
+    size_t used = 0;
+    used += (size_t)snprintf(message + used, sizeof(message) - used,
+                            "Resolve these items before quitting, or discard them now:\n");
+    if (dirty_draft && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Apply or discard the active lyric draft.");
+    if (staged_suggestions && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Apply or discard the validated Assist result.");
+    if (dirty_projects > 0 && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Save %zu unnamed or unresolved track project%s.",
+        dirty_projects, dirty_projects == 1 ? "" : "s");
+    if (analysis_running && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Cancel the running analysis job.");
+    if (export_running && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Cancel the running video export.");
+    if (used < sizeof(message)) (void)snprintf(
+        message + used, sizeof(message) - used,
+        "\n\nQuit anyway and discard or cancel the items above?");
+    return tinyfd_messageBox("Unresolved Musializer work", message,
                              "yesno", "warning", 0) == 1;
 }
 
@@ -5570,6 +5928,10 @@ static void start_capture(void)
     format.bitsPerSample = 32;
     if (!drwav_init_file_write(&p->wav, recording_file_path, &format, NULL)) {
         TraceLog(LOG_ERROR, "DRWAVE: Failed to initialize output file %s", recording_file_path);
+        p->capturing = false;
+        notice_push(UI_NOTICE_ERROR, "Microphone capture could not start",
+                    "The recording file could not be created in the current directory.",
+                    recording_file_path, true);
         return;
     }
 
@@ -5584,6 +5946,9 @@ static void start_capture(void)
     if (result != MA_SUCCESS) {
         TraceLog(LOG_ERROR, "MINIAUDIO: Failed to initialize capture device: %s", ma_result_description(result));
         drwav_uninit(&p->wav);
+        p->capturing = false;
+        notice_push(UI_NOTICE_ERROR, "Microphone capture could not start",
+                    ma_result_description(result), NULL, true);
         return;
     }
 
@@ -5599,6 +5964,9 @@ static void start_capture(void)
         TraceLog(LOG_ERROR, "MINIAUDIO: Failed to start device: %s", ma_result_description(result));
         ma_device_uninit(&p->microphone);
         drwav_uninit(&p->wav);
+        p->capturing = false;
+        notice_push(UI_NOTICE_ERROR, "Microphone capture could not start",
+                    ma_result_description(result), NULL, true);
         return;
     }
 
@@ -5919,7 +6287,8 @@ static void preview_screen(void)
             EndScissorMode();
 
             float sidebar_height = h - timeline_height;
-            float scene_panel_height = fminf(292.0f, fmaxf(0.0f, sidebar_height - 120.0f));
+            float scene_panel_height = fminf(292.0f,
+                fmaxf(fminf(216.0f, sidebar_height), sidebar_height - 120.0f));
             float tracks_panel_height = sidebar_height - scene_panel_height;
             tracks_panel((CLITERAL(Rectangle) {
                 .x = 0,
@@ -6022,9 +6391,6 @@ static void preview_screen(void)
 #ifdef MUSIALIZER_MICROPHONE
 static void capture_screen(void)
 {
-    int w = GetScreenWidth();
-    int h = GetScreenHeight();
-
     if (p->microphone_working) {
         if (IsKeyPressed(KEY_CAPTURE) || IsKeyPressed(KEY_ESCAPE)) {
             // Microphone is working, so it needs to be uninited
@@ -6055,23 +6421,10 @@ static void capture_screen(void)
             p->capturing = false;
         }
 
-        // TODO: report capture device error via the popup mechanism.
-        const char *label = "Capture Device Error: Check the Logs";
-        Color color = RED;
-        int fontSize = p->font.baseSize;
-        Vector2 size = MeasureTextEx(p->font, label, fontSize, 0);
-        Vector2 position = {
-            w/2 - size.x/2,
-            h/2 - size.y/2,
-        };
-        DrawTextEx(p->font, label, position, fontSize, 0, color);
-
-        label = "(Press ESC to Continue)";
-        fontSize = p->font.baseSize*2/3;
-        size = MeasureTextEx(p->font, label, fontSize, 0);
-        position.x = w/2 - size.x/2,
-        position.y = h/2 - size.y/2 + fontSize,
-        DrawTextEx(p->font, label, position, fontSize, 0, color);
+        // start_capture() reports initialization failures through the normal
+        // notice tray and leaves capture mode immediately. This branch is only
+        // a defensive escape for corrupted hot-reload state.
+        p->capturing = false;
     }
 }
 #endif // MUSIALIZER_MICROPHONE

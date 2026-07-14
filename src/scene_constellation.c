@@ -66,10 +66,11 @@ static float constellation_band(const Scene_Frame *frame, size_t index)
     return constellation_clamp01(frame->audio.bands[index%frame->audio.bands_count]);
 }
 
-static Vector3 constellation_base_position(uint64_t seed, size_t index, float time,
+static Vector3 constellation_base_position(uint64_t seed, size_t index,
+                                           size_t node_count, float time,
                                            float amplitude)
 {
-    float y = 1.0f - 2.0f*((float)index + 0.5f)/(float)CONSTELLATION_NODE_COUNT;
+    float y = 1.0f - 2.0f*((float)index + 0.5f)/(float)node_count;
     float radius = sqrtf(fmaxf(0.0f, 1.0f - y*y));
     float longitude = (float)index*2.39996323f
                     + constellation_unit(seed, index*3U + 1U)*0.28f;
@@ -83,7 +84,10 @@ static Vector3 constellation_base_position(uint64_t seed, size_t index, float ti
 }
 
 static float constellation_event_strength(const Scene_Frame *frame, size_t node,
-                                           uint32_t *dominant_type, uint64_t *dominant_id)
+                                           size_t node_count, float event_duration,
+                                           size_t event_reach,
+                                           uint32_t *dominant_type,
+                                           uint64_t *dominant_id)
 {
     if (frame->events.events == NULL || frame->events.count == 0) return 0.0f;
     size_t count = frame->events.count;
@@ -93,11 +97,11 @@ static float constellation_event_strength(const Scene_Frame *frame, size_t node,
         const Event_Record *event = &frame->events.events[i];
         if (!event_record_is_valid(event)) continue;
         double age = frame->time_seconds - event->timestamp_seconds;
-        if (age < 0.0 || age > 2.4) continue;
+        if (age < 0.0 || age > event_duration) continue;
         size_t event_node = (size_t)(constellation_mix(event->id ^
-                                   ((uint64_t)event->type << 48)) % CONSTELLATION_NODE_COUNT);
+                                   ((uint64_t)event->type << 48)) % node_count);
         size_t distance = node > event_node ? node - event_node : event_node - node;
-        if (distance > 2 && distance < CONSTELLATION_NODE_COUNT - 2) continue;
+        if (distance > event_reach && distance < node_count - event_reach) continue;
         float payload = fabsf(event->values[0]);
         float strength = expf(-(float)age*2.1f)*(0.45f + constellation_clamp01(payload)*0.55f);
         if (distance != 0) strength *= 0.34f;
@@ -135,10 +139,22 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_SCALE);
     float glow_scale = scene_settings_get(
         renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_GLOW);
+    float event_duration = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_EVENT_DURATION);
+    size_t event_reach = (size_t)lroundf(scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_EVENT_REACH));
+    float hue_swing = scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_HUE_SWING);
+    size_t density = (size_t)lroundf(scene_settings_get(
+        renderer->settings, SCENE_CONSTELLATION, CONSTELLATION_SETTING_DENSITY));
+    if (density < 1U) density = 1U;
+    if (density > 3U) density = 3U;
+    size_t node_count = CONSTELLATION_NODE_COUNT*density/3U;
+    if (event_reach*2U >= node_count) event_reach = node_count/2U - 1U;
     float time = (float)frame->time_seconds*motion_scale;
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
     float base_hue = fmodf(201.0f + constellation_unit(constellation->seed, 9)*95.0f
-                         + time*1.8f + frame->semantic.valence*70.0f*semantic_weight,
+                         + time*1.8f + frame->semantic.valence*hue_swing*semantic_weight,
                            360.0f);
     Color background = ColorFromHSV(base_hue, 0.72f,
                                     0.035f + constellation->motion.energy*0.035f);
@@ -191,12 +207,15 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
     float strengths[CONSTELLATION_NODE_COUNT];
     uint32_t types[CONSTELLATION_NODE_COUNT];
     uint64_t ids[CONSTELLATION_NODE_COUNT];
-    for (size_t i = 0; i < CONSTELLATION_NODE_COUNT; ++i) {
+    for (size_t i = 0; i < node_count; ++i) {
         float band = constellation_band(frame, i);
         types[i] = 0;
         ids[i] = 0;
-        strengths[i] = constellation_event_strength(frame, i, &types[i], &ids[i]);
-        positions[i] = constellation_base_position(constellation->seed, i, time, band);
+        strengths[i] = constellation_event_strength(
+            frame, i, node_count, event_duration, event_reach,
+            &types[i], &ids[i]);
+        positions[i] = constellation_base_position(
+            constellation->seed, i, node_count, time, band);
         if (strengths[i] > 0.0f) {
             float phase = constellation_unit(ids[i], i + 31U)*6.2831853f;
             float displacement = strengths[i]*(0.4f + constellation->motion.energy*0.55f);
@@ -209,9 +228,10 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         positions[i].z *= field_scale;
     }
 
-    for (size_t i = 0; i < CONSTELLATION_NODE_COUNT; ++i) {
-        size_t neighbors[2] = { (i + 1)%CONSTELLATION_NODE_COUNT,
-                                (i + 13)%CONSTELLATION_NODE_COUNT };
+    for (size_t i = 0; i < node_count; ++i) {
+        size_t long_step = node_count > 36U ? 13U : 7U;
+        size_t neighbors[2] = { (i + 1)%node_count,
+                                (i + long_step)%node_count };
         for (size_t edge = 0; edge < 2; ++edge) {
             size_t other = neighbors[edge];
             float active = fmaxf(strengths[i], strengths[other]);
@@ -225,7 +245,7 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
         }
     }
 
-    for (size_t i = 0; i < CONSTELLATION_NODE_COUNT; ++i) {
+    for (size_t i = 0; i < node_count; ++i) {
         float band = constellation_band(frame, i);
         float brightness = 0.47f + band*0.3f + strengths[i]*0.52f;
         Color color = constellation_event_color(types[i],
@@ -238,6 +258,21 @@ static void constellation_draw(const void *state, const Scene_Frame *frame,
                             ColorAlpha(RAYWHITE, strengths[i]*0.6f));
         }
     }
+    BeginBlendMode(BLEND_ADDITIVE);
+    for (size_t i = 0; i < node_count; ++i) {
+        float band = constellation_band(frame, i);
+        float flare = band*0.35f + strengths[i]*0.85f +
+                      constellation->motion.onset_pulse*0.12f;
+        if (flare < 0.08f || glow_scale <= 0.001f) continue;
+        Color glow = constellation_event_color(
+            types[i], fmodf(base_hue + (float)i*2.1f, 360.0f), 0.9f);
+        float base_radius = (0.08f + band*0.10f + strengths[i]*0.22f)*glow_scale;
+        DrawSphere(positions[i], base_radius*1.45f,
+                   ColorAlpha(glow, fminf(0.22f, flare*0.16f)));
+        DrawSphereWires(positions[i], base_radius*(2.0f + flare), 6, 8,
+                        ColorAlpha(glow, fminf(0.48f, flare*0.34f)));
+    }
+    EndBlendMode();
     EndMode3D();
 
     rlDrawRenderBatchActive();

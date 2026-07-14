@@ -16,18 +16,24 @@ class SceneQualityRegressionTests(unittest.TestCase):
             "scene_song_atlas.c",
             "scene_spectral_terrarium.c",
             "scene_constellation.c",
+            "scene_cadence.c",
+            "scene_loom.c",
         ]
         for filename in scene_sources:
             with self.subTest(scene=filename):
                 source = (ROOT / "src" / filename).read_text(encoding="utf-8")
                 self.assertIn("scene_settings_get(", source)
 
-    def test_scene_inspector_resizes_only_when_monitor_space_allows(self):
+    def test_scene_inspector_resizes_only_after_explicit_expand(self):
         source = (ROOT / "src/plug.c").read_text(encoding="utf-8")
 
         self.assertIn("scene_settings_window_can_expand(", source)
         self.assertIn("GetMonitorWidth(monitor)", source)
         self.assertIn("SetWindowSize(p->scene_settings_expanded_width", source)
+        open_start = source.index("static void set_scene_settings_open(bool open)")
+        close_branch = source.index("p->scene_settings_open = false;", open_start)
+        self.assertNotIn("SetWindowSize(", source[open_start:close_branch])
+        self.assertIn('"Expand"', source)
         self.assertIn("scene_settings_panel((Rectangle){", source)
         self.assertIn("workspace_width = settings_layout.workspace_width", source)
         self.assertIn('p->scene_settings_open ? "Hide" : "Tune"', source)
@@ -124,12 +130,8 @@ class SceneQualityRegressionTests(unittest.TestCase):
     def test_song_atlas_heightfield_faces_camera_and_batches_map_lines(self):
         source = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")
 
-        upward_winding = re.compile(
-            r"atlas_rl_vertex\(a, ca\);\s*atlas_rl_vertex\(b, cb\);\s*"
-            r"atlas_rl_vertex\(c, cc\);\s*atlas_rl_vertex\(b, cb\);\s*"
-            r"atlas_rl_vertex\(d, cd\);\s*atlas_rl_vertex\(c, cc\);"
-        )
-        self.assertRegex(source, upward_winding)
+        self.assertGreaterEqual(source.count("atlas_lit_triangle(a, b, c"), 2)
+        self.assertGreaterEqual(source.count("atlas_lit_triangle(b, d, c"), 2)
         # The whole-track path and live-input fallback each submit all contour
         # lines in one batch; neither regresses to a draw call per landmark.
         self.assertEqual(source.count("rlBegin(RL_LINES)"), 2)
@@ -143,6 +145,44 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIn("remaining*0.45f", source)
         self.assertIn("target_z = 1.40f - focus_slices*ATLAS_SLICE_SPACING", source)
         self.assertNotIn(".target = { sinf(journey*0.31f)*0.34f, -0.78f, -9.8f }", source)
+
+    def test_creative_scene_mechanisms_are_renderer_backed(self):
+        pulse = (ROOT / "src/scene_pulse_field.c").read_text(encoding="utf-8")
+        ascii_scene = (ROOT / "src/scene_ascii_field.c").read_text(encoding="utf-8")
+        orbital = (ROOT / "src/scene_orbital_lattice.c").read_text(encoding="utf-8")
+        atlas = (ROOT / "src/scene_song_atlas.c").read_text(encoding="utf-8")
+        terrarium = (ROOT / "src/scene_spectral_terrarium.c").read_text(encoding="utf-8")
+        constellation = (ROOT / "src/scene_constellation.c").read_text(encoding="utf-8")
+        cadence = (ROOT / "src/scene_cadence.c").read_text(encoding="utf-8")
+        loom = (ROOT / "src/scene_loom.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        self.assertIn("cosf((float)fold*theta", pulse)
+        self.assertIn("spectrum_history", ascii_scene)
+        self.assertIn("orbital_draw_swaying_link", orbital)
+        self.assertIn("atlas_triangle_light", atlas)
+        self.assertIn("neighbors += 1", terrarium)
+        self.assertIn("BeginBlendMode(BLEND_ADDITIVE)", constellation)
+        self.assertIn("cadence_split_words", cadence)
+        self.assertIn("frame->audio.beat_phase", cadence)
+        self.assertIn("semantic_lane_sample", loom)
+        self.assertIn("frame->duration_seconds", loom)
+        self.assertIn("p->scene.id != SCENE_CADENCE", plug)
+        self.assertIn("fminf(216.0f, sidebar_height)", plug)
+
+    def test_signature_scenes_are_registered_everywhere(self):
+        scene_header = (ROOT / "src/scene.h").read_text(encoding="utf-8")
+        registry = (ROOT / "src/scene.c").read_text(encoding="utf-8")
+        settings = (ROOT / "src/scene_settings.c").read_text(encoding="utf-8")
+        build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        for upper, stable in (("CADENCE", "cadence"), ("LOOM", "loom")):
+            self.assertIn(f"SCENE_{upper}", scene_header)
+            self.assertIn(f"scene_{stable}_descriptor", registry)
+            self.assertIn(f"settings.{stable}.", settings)
+            self.assertIn(f'"./src/scene_{stable}.c"', build)
+            self.assertIn(f'case SCENE_{upper}: return "{stable}"', plug)
 
 
 if __name__ == "__main__":

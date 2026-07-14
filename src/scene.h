@@ -22,6 +22,8 @@ typedef enum {
     SCENE_SONG_ATLAS,
     SCENE_SPECTRAL_TERRARIUM,
     SCENE_CONSTELLATION,
+    SCENE_CADENCE,
+    SCENE_LOOM,
     COUNT_SCENES,
 } Scene_Id;
 
@@ -38,6 +40,7 @@ typedef struct {
 
 typedef struct {
     double time_seconds;
+    double duration_seconds;
     float delta_seconds;
     uint64_t frame_index;
     Scene_Audio_Frame audio;

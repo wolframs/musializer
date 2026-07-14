@@ -23,18 +23,25 @@ The upstream demo below remains a lovely snapshot of where it began.
 ## What it can do
 
 - Play WAV, OGG, MP3, QOA, and FLAC files with live audio-reactive visuals.
-- Switch among seven built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
-  ASCII Field, Song Atlas, Spectral Terrarium, and Constellation.
-- Tune every scene from a live parameter inspector. Song Atlas includes broad
+- Switch among nine built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
+  ASCII Field, Song Atlas, Spectral Terrarium, Constellation, Cadence, and Loom.
+- Tune every scene from a live parameter inspector. Spectrum exposes separate
+  taper, semantic hue, and glow shaping; Spectral Terrarium exposes ecosystem
+  speed, creature speed, population, and habitat glass; Constellation exposes
+  star density plus event reach, duration, and hue response. Song Atlas includes broad
   terrain/camera ranges, 1x-3x sampling detail, manual or music-reactive hue,
   camera-speed controls, and Filled/Wireframe surface modes; exact values,
   numbered per-scene presets, and per-scene resets are saved with the track and
   reused by offline export.
-- Import an image as a color-aware, audio-reactive ASCII field with animated
-  glyph waves and compression-resilient CRT scanlines; author timeline events
-  and edit timed lyrics in the application.
-- Navigate with a whole-track waveform, draggable hairline playhead, exact
-  tenth/one/ten-second seek controls, and matching keyboard steps.
+- Turn timed lyric words into beat-choreographed kinetic geometry with Cadence,
+  or accepted semantic energy/tension/valence into a growing whole-track textile
+  with Loom.
+- Use ASCII Field as a procedural rolling spectrogram, or import an image as a
+  color-aware glyph canvas with live spectral density, animated glyph waves,
+  and compression-resilient CRT scanlines; author timeline events and edit
+  timed lyrics in the application.
+- Navigate with a depth-shaded whole-track waveform, draggable capped hairline
+  playhead, one-second buttons, and exact tenth/one/ten-second keyboard steps.
 - Generate local measured section suggestions, transcribe lyrics with Whisper,
   review those timings with headless Codex, and optionally ask Xiaomi MiMo V2.5
   through OpenRouter for a semantic description of how the music feels.
@@ -138,12 +145,14 @@ document.
 
 The normal workflow is:
 
-1. Choose a scene from the left rail. Keys <kbd>1</kbd> through <kbd>7</kbd>
+1. Choose a scene from the left rail. Keys <kbd>1</kbd> through <kbd>9</kbd>
    switch scenes directly.
 2. Select **Tune** beside the scene list to open its parameter inspector. The
-   window expands to the right when the current monitor has room; otherwise
-   the track rail and preview compact without hiding the controls. Drag a
-   slider for live feedback or use **Reset** to restore that scene's defaults.
+   inspector initially fits inside the existing window; choose **Expand** when
+   you explicitly want the application to use available monitor space. The
+   track rail compacts before the preview falls below 30% of the window. Drag a
+   slider for live feedback. **Reset** requires confirmation and exposes a
+   one-shot **Undo reset** action.
    **Save new** captures a per-scene preset; **Load**, **Update**, and
    **Delete** manage the selected preset.
 3. Open **Lyrics** to write or import lyric cues and adjust their start/end
@@ -160,14 +169,18 @@ The normal workflow is:
 6. Add manual visualization events with **+ Feel** and **+ Custom**, or import
    an image into ASCII Field.
 7. Open **Export**, choose resolution, frame rate, and quality, then select the
-   destination. Progress reports the exact frame count and ETA; cancellation
-   does not replace an existing video.
+   destination. The action is disabled with an explanation when FFmpeg is not
+   discoverable, before a destination picker opens. Progress reports the exact
+   frame count and ETA; cancellation does not replace an existing video.
 8. Save with <kbd>Ctrl</kbd>+<kbd>S</kbd>, or use
    <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> for **Save As**.
 
 Canonical edits autosave after a short idle period. Unapplied lyric drafts,
 staged assistance, running jobs, active exports, and unsaved projects are
 guarded before context changes or quit, so partial work is not silently lost.
+Notices use distinct info/success/warning/error colors, wrap their detail text,
+show hidden queue depth, and let actionable Assist failures reopen the review
+step or copy the immutable artifact/log path.
 
 Timed lyrics use the same caption layer in preview and export. Long cues wrap
 to three centered lines with a visible ellipsis. The bundled font atlas covers
@@ -196,11 +209,17 @@ polled without blocking playback, and a staged lyric lane cannot replace an
 active authored lyric draft. Model output is validated, staged, and never
 mutates the project automatically.
 
-The more experimental scenes now have deliberately different jobs: **ASCII
-Field** preserves an imported image's aspect, tonal structure, and source color
-as a stable glyph canvas; **Orbital Lattice** turns band energy into damped,
-bounded orbital motion; and **Song Atlas** analyzes the complete decoded track
-into a time-by-frequency terrain with onset landmarks and a moving playhead.
+The more experimental scenes have deliberately different jobs. **ASCII Field**
+is a rolling spectral glyph field that can blend an imported image's aspect,
+tonal structure, and source color into that live canvas. **Orbital Lattice**
+turns band energy into damped crystalline motion and flexible links. **Song
+Atlas** analyzes the complete decoded track into a slope-lit time-by-frequency
+terrain. **Cadence** estimates word windows inside accepted line-level lyric
+cues and assembles each word from beat-responsive character swarms. **Loom**
+samples accepted semantic events across the full track and weaves energy,
+tension, and valence into thread density, interlace, and color temperature.
+Without lyrics or semantic analysis, Cadence and Loom retain deterministic
+audio-reactive ambient/fallback behavior rather than requiring a model service.
 
 Set the optional credential in the process environment or in an ignored `.env`
 at the repository root:
@@ -309,7 +328,8 @@ $ ./build/musializer --project path/to/show.musi --render output.mp4
 ```
 
 Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
-`terrarium`, and `constellation`. Repeatable `--event type:seconds:id:value`
+`terrarium`, `constellation`, `cadence`, and `loom`. Repeatable
+`--event type:seconds:id:value`
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg
 finishes, making them suitable for scripts and smoke tests.

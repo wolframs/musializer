@@ -9,10 +9,14 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
     Scene_Settings settings;
     scene_settings_init(&settings);
     EXPECT_TRUE(scene_settings_valid(&settings));
-    EXPECT_EQ_SIZE(scene_settings_count(0), 3);
+    EXPECT_EQ_SIZE(scene_settings_count(0), 7);
     EXPECT_EQ_SIZE(scene_settings_count(1), 5);
     EXPECT_EQ_SIZE(scene_settings_count(2), 5);
     EXPECT_EQ_SIZE(scene_settings_count(4), 10);
+    EXPECT_EQ_SIZE(scene_settings_count(5), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(6), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(7), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(8), 7);
     EXPECT_EQ_SIZE(scene_settings_count(99), 0);
     EXPECT_NEAR(scene_settings_get(&settings, 1, 1), 24.0f, 0.0f);
     const Scene_Setting_Descriptor *height = scene_settings_descriptor(
@@ -93,6 +97,27 @@ TEST(scene_settings_legacy_atlas_snapshots_default_new_controls)
                 0.0f, 0.0f);
 }
 
+TEST(scene_settings_legacy_three_control_snapshots_default_new_controls)
+{
+    const size_t scenes[] = {0, 5, 6};
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    for (size_t at = 0; at < sizeof(scenes)/sizeof(scenes[0]); ++at) {
+        size_t scene = scenes[at];
+        Scene_Settings_Snapshot legacy = {
+            .captured = true,
+            .count = 3,
+            .values = {1.0f, 1.0f, 1.0f},
+        };
+        EXPECT_TRUE(scene_settings_snapshot_valid(scene, &legacy));
+        REQUIRE_TRUE(scene_settings_apply_snapshot(&settings, scene, &legacy));
+        const Scene_Setting_Descriptor *added = scene_settings_descriptor(scene, 3);
+        REQUIRE_TRUE(added != NULL);
+        EXPECT_NEAR(scene_settings_get(&settings, scene, 3),
+                    added->default_value, 0.000001f);
+    }
+}
+
 TEST(scene_settings_presets_save_replace_apply_and_remove_per_scene)
 {
     Scene_Settings settings;
@@ -144,7 +169,7 @@ TEST(scene_settings_constant_mapping_round_trip_is_atomic)
     size_t count = 999;
     REQUIRE_TRUE(scene_settings_export_mappings(
         &source, mappings, MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE, &count));
-    EXPECT_EQ_SIZE(count, 33);
+    EXPECT_EQ_SIZE(count, 59);
     EXPECT_TRUE(scene_settings_mappings_supported(mappings, count));
     REQUIRE_TRUE(scene_settings_import_mappings(&decoded, mappings, count));
     EXPECT_NEAR(scene_settings_get(&decoded, 2, 0), 0.42f, 0.000001f);
@@ -195,6 +220,9 @@ TEST(scene_settings_layout_expands_or_compacts_without_collapsing_workspace)
 
     REQUIRE_TRUE(scene_settings_ui_layout(960.0f, true, &open));
     EXPECT_TRUE(open.workspace_width >= 620.0f);
+    REQUIRE_TRUE(scene_settings_ui_layout(640.0f, true, &open));
+    EXPECT_TRUE(open.workspace_width - open.tracks_width >= 640.0f*0.30f);
+    EXPECT_TRUE(open.tracks_width >= 168.0f);
     EXPECT_FALSE(scene_settings_ui_layout(NAN, true, &open));
 
     EXPECT_TRUE(scene_settings_window_can_expand(100, 1280, 0, 1920, 340));

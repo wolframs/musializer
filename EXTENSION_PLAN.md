@@ -814,10 +814,10 @@ failure-path test.
   exposes ten controls for terrain, camera, contours, hue, sampling detail,
   motion, and Filled/Wireframe surface style.
 - Added a right-side inspector with exact numeric readouts, drag sliders,
-  per-scene Reset, and dirty-state/autosave integration. **Tune** expands the
-  window by 340 logical pixels when the current monitor has room; otherwise a
-  shared responsive layout compacts the track rail and preview while retaining
-  a minimum 620-pixel workspace.
+  per-scene Reset, and dirty-state/autosave integration. **Tune** fits inside
+  the current window; a visible **Expand** action can add 340 logical pixels
+  when the monitor has room. The responsive layout compacts the track rail
+  before the preview falls below 30% of the window.
 - Kept preview and export on one parameterized renderer path. Motion remains
   sample-clock deterministic, integer-like settings are quantized at the UI
   boundary, invalid/nonfinite values fall back to documented defaults, and
@@ -917,6 +917,41 @@ failure-path test.
   H.264 High/yuv420p BT.709 plus AAC render. Its 146 decoded video frames (the
   MP3 includes decoder padding) matched the pre-move render byte-for-byte by
   `framemd5`.
+
+### 2026-07-14 - Creative scene mechanisms and signature scenes
+
+- Populated the previously inert continuous beat-phase scene input with a
+  bounded onset-interval tracker. It uses a deterministic neutral clock before
+  learning, folds octave-equivalent intervals, and resets after seek/transport
+  discontinuities.
+- Reworked the seven established scenes at their visual-mechanism layer: rose
+  symmetry for Pulse Field, procedural spectral history for ASCII Field,
+  additive light for Spectrum/Constellation, flexible Orbital links with
+  faceted nodes, slope lighting for Song Atlas, and spectral-centroid flocking
+  for the Terrarium creatures.
+- Added Cadence as scene eight. It derives approximate word windows from each
+  line cue, draws individual Unicode codepoints as deterministic assembling
+  geometry, and uses beat phase/onsets for anticipation and focus. The ordinary
+  caption overlay is suppressed only for Cadence to avoid duplicating lyrics.
+- Added Loom as scene nine. It samples the accepted semantic event lane over
+  the complete track duration and turns energy, tension, valence, and confidence
+  into a left-to-right woven structure; measured audio supplies a local fallback
+  when no semantic lane is present.
+- Added seven bounded parameters to each signature scene and integrated both
+  with presets, parameterized scene cues, strict project mappings, CLI names,
+  keys 8/9, assisted-scene schemas, and all platform source lists. The complete
+  nine-scene setting set uses 59 of the v1 format's 64 canonical mapping slots,
+  so the project schema does not require a capacity increase.
+- Deliberately deferred global post-processing, persistent feedback buffers,
+  transition morphing, and true word-level project timing until their seek,
+  compositor, and migration contracts can be addressed independently.
+- Validation passed 170/170 C tests independently in debug, release, and
+  ASan/UBSan profiles; the complete 69-test Python product suite; all four
+  application profiles; and the portable distribution build and archive
+  allowlist inspection. Nine six-second 640x360/24 fps scene renders each
+  produced exactly 144 H.264 High/yuv420p BT.709 frames. Repeat Cadence and
+  Loom exports had matching decoded-frame hashes, and representative frames
+  from all nine scenes were visually inspected together.
 
 ## Milestones
 

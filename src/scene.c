@@ -10,6 +10,8 @@ extern const Scene_Descriptor scene_ascii_field_descriptor;
 extern const Scene_Descriptor scene_song_atlas_descriptor;
 extern const Scene_Descriptor scene_spectral_terrarium_descriptor;
 extern const Scene_Descriptor scene_constellation_descriptor;
+extern const Scene_Descriptor scene_cadence_descriptor;
+extern const Scene_Descriptor scene_loom_descriptor;
 
 static const Scene_Descriptor *const scene_registry[COUNT_SCENES] = {
     [SCENE_SPECTRUM] = &scene_spectrum_descriptor,
@@ -19,6 +21,8 @@ static const Scene_Descriptor *const scene_registry[COUNT_SCENES] = {
     [SCENE_SONG_ATLAS] = &scene_song_atlas_descriptor,
     [SCENE_SPECTRAL_TERRARIUM] = &scene_spectral_terrarium_descriptor,
     [SCENE_CONSTELLATION] = &scene_constellation_descriptor,
+    [SCENE_CADENCE] = &scene_cadence_descriptor,
+    [SCENE_LOOM] = &scene_loom_descriptor,
 };
 
 static bool scene_id_valid(Scene_Id id)

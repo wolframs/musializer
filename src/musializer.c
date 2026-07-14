@@ -96,7 +96,7 @@ static void print_command_line_help(FILE *stream, const char *program)
         "  --project FILE          Open a .musi project\n"
         "  --save-project FILE     Atomically save the current workspace\n"
         "  --scene NAME            spectrum, pulse, orbital, ascii, atlas,\n"
-        "                          terrarium, or constellation\n"
+        "                          terrarium, constellation, cadence, or loom\n"
         "  --ascii-image FILE      Import an image and select ASCII Field\n"
         "  --event SPEC            Add type:seconds:id:value to the manual lane\n"
         "  --analysis-bridge FILE  Import a verified analysis bridge\n"

@@ -47,15 +47,25 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
                          frame->semantic.valence*60.0f*frame->semantic.confidence : 0.0f;
     float interpretation = frame->semantic.available ?
                            frame->semantic.tension*frame->semantic.confidence : 0.0f;
+    size_t low_count = count/5U;
+    if (low_count < 1U) low_count = 1U;
+    float bass = 0.0f;
+    float treble = 0.0f;
+    for (size_t i = 0; i < low_count; ++i) bass += frame->audio.bands[i];
+    for (size_t i = count - low_count; i < count; ++i) treble += frame->audio.bands[i];
+    bass /= (float)low_count;
+    treble /= (float)low_count;
+    int fold = 3 + (int)lroundf(fminf(1.0f, treble/(bass + treble + 0.001f))*6.0f);
     float rotation = pulse->rotation + (float)frame->time_seconds*motion*12.0f +
                      frame->audio.spectral_flux*motion*45.0f +
                      interpretation*motion*14.0f;
+    BeginBlendMode(BLEND_ADDITIVE);
     for (size_t i = rings; i > 0; --i) {
         size_t band_index = (i - 1)*count/rings;
         float amplitude = frame->audio.bands[band_index];
         float phase = (float)(frame->time_seconds*motion*(0.25 + 0.015*i));
         float wobble = sinf(phase*2.0f*PI + (float)i)*extent*0.025f*amplitude;
-        float radius = extent*((float)i/rings) + wobble;
+        float base_radius = extent*((float)i/rings) + wobble;
         float start_angle = rotation + (float)i*7.5f;
         float sweep = (220.0f + amplitude*140.0f)*arc;
         if (sweep < 20.0f) sweep = 20.0f;
@@ -64,8 +74,29 @@ static void pulse_field_draw(const void *state, const Scene_Frame *frame, const 
         Color color = ColorFromHSV(fmodf((float)i/rings*280.0f + rotation +
                                         semantic_hue + 360.0f, 360.0f),
                                    0.72f, 0.95f);
-        DrawRing(center, radius - thickness*0.5f, radius + thickness*0.5f, start_angle, start_angle + sweep, 96, ColorAlpha(color, 0.25f + amplitude*0.75f));
+        int segments = 112;
+        float rose_depth = 0.045f + amplitude*0.17f + interpretation*0.06f;
+        Vector2 previous = {0};
+        for (int segment = 0; segment <= segments; ++segment) {
+            float amount = (float)segment/(float)segments;
+            float degrees = start_angle + sweep*amount;
+            float theta = degrees*DEG2RAD;
+            float petals = cosf((float)fold*theta + (float)i*0.19f);
+            float spiral = sinf(theta*0.5f + frame->audio.beat_phase*2.0f*PI);
+            float radius = base_radius*(1.0f + petals*rose_depth) +
+                           spiral*extent*0.018f*interpretation;
+            Vector2 point = {
+                center.x + cosf(theta)*radius,
+                center.y + sinf(theta)*radius,
+            };
+            if (segment > 0) {
+                DrawLineEx(previous, point, thickness,
+                           ColorAlpha(color, 0.18f + amplitude*0.62f));
+            }
+            previous = point;
+        }
     }
+    EndBlendMode();
 }
 
 const Scene_Descriptor scene_pulse_field_descriptor = {

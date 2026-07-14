@@ -19,9 +19,17 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
         renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_TRAIL);
     float saturation_scale = scene_settings_get(
         renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_SATURATION);
+    float glow_softness = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_GLOW_SOFTNESS);
+    float hue_swing = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_HUE_SWING);
+    float core_glow = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_CORE_GLOW);
+    float bar_taper = scene_settings_get(
+        renderer->settings, SCENE_SPECTRUM, SPECTRUM_SETTING_BAR_TAPER);
     float cell_width = boundary.width/bands_count;
     float semantic_weight = frame->semantic.available ? frame->semantic.confidence : 0.0f;
-    float semantic_hue = frame->semantic.valence*55.0f*semantic_weight;
+    float semantic_hue = frame->semantic.valence*hue_swing*semantic_weight;
     float saturation = (0.75f + frame->semantic.tension*0.2f*semantic_weight)*
                        saturation_scale;
     if (saturation > 1.0f) saturation = 1.0f;
@@ -39,14 +47,16 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height,
         };
-        float thick = cell_width/3*sqrtf(t);
+        float thick = cell_width/3*powf(t, bar_taper);
         DrawLineEx(startPos, endPos, thick, color);
     }
 
     Texture2D texture = { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
 
     SetShaderValue(renderer->circle_shader, renderer->circle_radius_location, (float[1]){ 0.3f }, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(renderer->circle_shader, renderer->circle_power_location, (float[1]){ 3.0f }, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(renderer->circle_shader, renderer->circle_power_location,
+                   &glow_softness, SHADER_UNIFORM_FLOAT);
+    BeginBlendMode(BLEND_ADDITIVE);
     BeginShaderMode(renderer->circle_shader);
     for (size_t i = 0; i < bands_count; ++i) {
         float start = fminf(1.0f, trails[i]*amplitude_scale);
@@ -86,7 +96,9 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
     EndShaderMode();
 
     SetShaderValue(renderer->circle_shader, renderer->circle_radius_location, (float[1]){ 0.07f }, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(renderer->circle_shader, renderer->circle_power_location, (float[1]){ 5.0f }, SHADER_UNIFORM_FLOAT);
+    float core_softness = glow_softness + 2.0f;
+    SetShaderValue(renderer->circle_shader, renderer->circle_power_location,
+                   &core_softness, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(renderer->circle_shader);
     for (size_t i = 0; i < bands_count; ++i) {
         float t = fminf(1.0f, bands[i]*amplitude_scale);
@@ -96,7 +108,7 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
             boundary.x + i*cell_width + cell_width/2,
             boundary.y + boundary.height - boundary.height*2/3*t,
         };
-        float radius = cell_width*6*sqrtf(t)*trail_scale;
+        float radius = cell_width*6*sqrtf(t)*core_glow;
         Vector2 position = {
             .x = center.x - radius,
             .y = center.y - radius,
@@ -104,6 +116,16 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
         DrawTextureEx(texture, position, 0, 2*radius, color);
     }
     EndShaderMode();
+    if (frame->audio.onset) {
+        float flash_height = boundary.height*(0.035f + frame->audio.spectral_flux*0.16f);
+        Color flash = ColorAlpha(RAYWHITE,
+                                 fminf(0.22f, 0.08f + frame->audio.spectral_flux));
+        DrawRectangleGradientV((int)boundary.x,
+                               (int)(boundary.y + boundary.height - flash_height),
+                               (int)boundary.width, (int)flash_height,
+                               ColorAlpha(flash, 0.0f), flash);
+    }
+    EndBlendMode();
 }
 
 const Scene_Descriptor scene_spectrum_descriptor = {

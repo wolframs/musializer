@@ -40,6 +40,25 @@ static float orbital_time_phase(double time_seconds, double radians_per_second)
     return (float)phase;
 }
 
+static void orbital_draw_swaying_link(Vector3 from, Vector3 to, float radius,
+                                      float sway, float phase, Color color)
+{
+    enum { SEGMENTS = 7 };
+    Vector3 previous = from;
+    for (int segment = 1; segment <= SEGMENTS; ++segment) {
+        float t = (float)segment/(float)SEGMENTS;
+        float arch = 4.0f*t*(1.0f - t);
+        Vector3 point = {
+            from.x + (to.x - from.x)*t,
+            from.y + (to.y - from.y)*t + arch*sway,
+            from.z + (to.z - from.z)*t +
+                arch*sway*0.45f*sinf(phase + t*PI),
+        };
+        scene_draw_tube(previous, point, radius, 6, color);
+        previous = point;
+    }
+}
+
 static void orbital_lattice_init(void *state, uint64_t seed)
 {
     orbital_lattice_motion_init(state, seed);
@@ -205,6 +224,19 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
                 size*(1.45f + treble*0.65f),
             };
             DrawCubeV(position, cube_size, color);
+            Vector3 facet_position = {
+                position.x - size*0.10f,
+                position.y + size*0.13f,
+                position.z + size*0.08f,
+            };
+            Vector3 facet_size = {
+                cube_size.x*0.48f,
+                cube_size.y*0.42f,
+                cube_size.z*0.36f,
+            };
+            DrawCubeV(facet_position, facet_size,
+                      ColorAlpha(ColorBrightness(color, 0.34f),
+                                 0.34f + amplitude*0.34f));
             if (ring_motion.distance < 11.0f || amplitude > 0.55f) {
                 DrawCubeWiresV(position, cube_size,
                                ColorAlpha(RAYWHITE, fog*0.32f));
@@ -214,17 +246,21 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
             if (node > 0 && link_scale > 0.001f) {
                 Color edge = ColorAlpha(color, fog*(0.10f + energy*0.13f));
                 edge = ColorAlpha(edge, fminf(1.0f, link_scale));
-                scene_draw_tube(previous, position,
-                                (0.006f + energy*0.006f)*link_scale, 6, edge);
+                orbital_draw_swaying_link(
+                    previous, position,
+                    (0.006f + energy*0.006f)*link_scale,
+                    (0.025f + flux*0.11f)*sinf(angle + breathe_phase),
+                    angle + seed_phase, edge);
             }
             previous = position;
         }
         if (link_scale > 0.001f) {
-            scene_draw_tube(previous, first,
-                            (0.006f + energy*0.006f)*link_scale, 6,
-                            ColorAlpha(RAYWHITE,
-                                       fminf(1.0f, link_scale)*
-                                       (1.0f - depth_t)*ring_motion.visibility*0.13f));
+            orbital_draw_swaying_link(
+                previous, first, (0.006f + energy*0.006f)*link_scale,
+                (0.025f + flux*0.11f)*sinf(twist + breathe_phase), twist,
+                ColorAlpha(RAYWHITE,
+                           fminf(1.0f, link_scale)*
+                           (1.0f - depth_t)*ring_motion.visibility*0.13f));
         }
     }
     EndMode3D();

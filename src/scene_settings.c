@@ -14,6 +14,10 @@ static const Scene_Setting_Descriptor spectrum_settings[] = {
     SETTING("settings.spectrum.amplitude", "Amplitude", 0.40f, 2.00f, 1.00f, 2),
     SETTING("settings.spectrum.trail", "Trail size", 0.25f, 2.50f, 1.00f, 2),
     SETTING("settings.spectrum.saturation", "Saturation", 0.25f, 1.25f, 1.00f, 2),
+    SETTING("settings.spectrum.glow_softness", "Glow softness", 1.00f, 8.00f, 3.00f, 2),
+    SETTING("settings.spectrum.hue_swing", "Semantic hue swing", 0.00f, 120.00f, 55.00f, 0),
+    SETTING("settings.spectrum.core_glow", "Core glow size", 0.00f, 3.00f, 1.00f, 2),
+    SETTING("settings.spectrum.bar_taper", "Bar taper", 0.30f, 1.50f, 0.50f, 2),
 };
 
 static const Scene_Setting_Descriptor pulse_settings[] = {
@@ -56,12 +60,40 @@ static const Scene_Setting_Descriptor terrarium_settings[] = {
     SETTING("settings.terrarium.motion", "Camera motion", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.terrarium.growth", "Plant growth", 0.40f, 1.80f, 1.00f, 2),
     SETTING("settings.terrarium.particles", "Particle size", 0.00f, 2.20f, 1.00f, 2),
+    SETTING("settings.terrarium.sim_speed", "Ecosystem motion", 0.20f, 2.50f, 1.00f, 2),
+    SETTING("settings.terrarium.creature_speed", "Creature speed", 0.20f, 2.00f, 1.00f, 2),
+    SETTING("settings.terrarium.glass_opacity", "Habitat glass", 0.00f, 0.40f, 0.13f, 2),
+    SETTING("settings.terrarium.density", "Population density", 0.30f, 1.00f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor constellation_settings[] = {
     SETTING("settings.constellation.motion", "Camera motion", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.constellation.scale", "Field scale", 0.50f, 1.60f, 1.00f, 2),
     SETTING("settings.constellation.glow", "Node glow", 0.00f, 2.20f, 1.00f, 2),
+    SETTING("settings.constellation.event_duration", "Event glow duration", 0.50f, 5.00f, 2.40f, 2),
+    SETTING("settings.constellation.event_reach", "Event spread", 1.00f, 6.00f, 2.00f, 0),
+    SETTING("settings.constellation.hue_swing", "Semantic hue swing", 0.00f, 140.00f, 70.00f, 0),
+    SETTING("settings.constellation.density", "Star density", 1.00f, 3.00f, 3.00f, 0),
+};
+
+static const Scene_Setting_Descriptor cadence_settings[] = {
+    SETTING("settings.cadence.scale", "Type scale", 0.55f, 1.35f, 1.00f, 2),
+    SETTING("settings.cadence.swarm", "Swarm spread", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.cadence.focus", "Focus speed", 0.50f, 3.00f, 1.00f, 2),
+    SETTING("settings.cadence.beat", "Beat breathing", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.cadence.glow", "Particle glow", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.cadence.spacing", "Letter spacing", 0.50f, 2.00f, 1.00f, 2),
+    SETTING("settings.cadence.hue_swing", "Semantic hue swing", 0.00f, 160.00f, 80.00f, 0),
+};
+
+static const Scene_Setting_Descriptor loom_settings[] = {
+    SETTING("settings.loom.density", "Thread density", 0.50f, 2.00f, 1.00f, 2),
+    SETTING("settings.loom.weight", "Thread weight", 0.40f, 2.50f, 1.00f, 2),
+    SETTING("settings.loom.complexity", "Weave complexity", 0.50f, 2.00f, 1.00f, 2),
+    SETTING("settings.loom.edge", "Growth edge", 0.50f, 2.00f, 1.00f, 2),
+    SETTING("settings.loom.saturation", "Saturation", 0.30f, 1.30f, 1.00f, 2),
+    SETTING("settings.loom.motion", "Beat lift", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.loom.glints", "Onset glints", 0.00f, 2.00f, 1.00f, 2),
 };
 
 typedef struct Scene_Setting_Table {
@@ -78,6 +110,8 @@ static const Scene_Setting_Table tables[SCENE_SETTINGS_SCENE_COUNT] = {
     { terrarium_settings, sizeof(terrarium_settings)/sizeof(terrarium_settings[0]) },
     { constellation_settings,
       sizeof(constellation_settings)/sizeof(constellation_settings[0]) },
+    { cadence_settings, sizeof(cadence_settings)/sizeof(cadence_settings[0]) },
+    { loom_settings, sizeof(loom_settings)/sizeof(loom_settings[0]) },
 };
 
 static bool value_in_range(float value, const Scene_Setting_Descriptor *descriptor)
@@ -179,8 +213,10 @@ bool scene_settings_snapshot_valid(size_t scene_index,
 {
     if (snapshot == NULL || scene_index >= SCENE_SETTINGS_SCENE_COUNT) return false;
     if (!snapshot->captured) return snapshot->count == 0;
-    bool legacy_atlas = scene_index == 4 && snapshot->count == 8;
-    if (snapshot->count != tables[scene_index].count && !legacy_atlas) return false;
+    bool legacy_snapshot = (scene_index == 4 && snapshot->count == 8) ||
+                           ((scene_index == 0 || scene_index == 5 || scene_index == 6) &&
+                            snapshot->count == 3);
+    if (snapshot->count != tables[scene_index].count && !legacy_snapshot) return false;
     for (size_t index = 0; index < snapshot->count; ++index) {
         if (!value_in_range(snapshot->values[index],
                             &tables[scene_index].items[index])) return false;
@@ -423,6 +459,12 @@ bool scene_settings_ui_layout(float window_width, bool inspector_open,
     float tracks_width = inspector_open ? workspace_width*0.25f : 320.0f;
     if (tracks_width < 240.0f) tracks_width = 240.0f;
     if (tracks_width > 320.0f) tracks_width = 320.0f;
+    // At very narrow embedder widths, preserve the visualizer as the primary
+    // surface while retaining a compact (rather than vanished) project rail.
+    float minimum_preview = window_width*0.30f;
+    if (inspector_open && workspace_width - tracks_width < minimum_preview) {
+        tracks_width = fmaxf(168.0f, workspace_width - minimum_preview);
+    }
     *layout = (Scene_Settings_Ui_Layout) {
         .inspector_width = inspector_width,
         .workspace_width = workspace_width,
