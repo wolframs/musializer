@@ -172,21 +172,32 @@ static Vector2 pentagram_project(Vector2 point, Vector2 center,
 
 // Smoothed band energy sampled by angle around the nest. The mirror map
 // folds the circle so bass and treble meet seamlessly instead of jumping at
-// an angular seam, and adjacent bands interpolate for a continuous contour.
+// an angular seam. A triangular window spanning several neighboring bands
+// low-passes the contour: per-band jitter would scribble the curve with one
+// wiggle per band, while the windowed average yields a few smooth spectral
+// lobes that breathe with the mix.
 static float pentagram_trail_at(const Scene_Frame *frame, float angle)
 {
-    if (frame->audio.trails == NULL || frame->audio.bands_count == 0) return 0.0f;
+    int count = (int)frame->audio.bands_count;
+    if (frame->audio.trails == NULL || count <= 0) return 0.0f;
     float turns = angle/(2.0f*PI);
     turns -= floorf(turns);
     float mirrored = 1.0f - fabsf(2.0f*turns - 1.0f);
-    float position = mirrored*(float)(frame->audio.bands_count - 1);
-    size_t low = (size_t)position;
-    if (low >= frame->audio.bands_count) low = frame->audio.bands_count - 1;
-    size_t high = low + 1 < frame->audio.bands_count ? low + 1 : low;
-    float fraction = position - (float)low;
-    float below = pentagram_clamp01(frame->audio.trails[low]);
-    float above = pentagram_clamp01(frame->audio.trails[high]);
-    return below + (above - below)*fraction;
+    float position = mirrored*(float)(count - 1);
+    float window = fmaxf(1.0f, (float)count/6.0f);
+    float total = 0.0f;
+    float weight_sum = 0.0f;
+    for (int band = (int)floorf(position - window);
+         band <= (int)ceilf(position + window); ++band) {
+        float weight = 1.0f - fabsf((float)band - position)/(window + 1.0f);
+        if (weight <= 0.0f) continue;
+        int index = band < 0 ? -band : band;
+        if (index >= count) index = 2*(count - 1) - index;  // reflect at edges
+        if (index < 0 || index >= count) continue;
+        total += pentagram_clamp01(frame->audio.trails[index])*weight;
+        weight_sum += weight;
+    }
+    return weight_sum > 0.0f ? total/weight_sum : 0.0f;
 }
 
 // Radial displacement, in log-space units, that bends the invariant geometry
