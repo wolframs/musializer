@@ -110,6 +110,88 @@ class RenderProductSmokeTests(unittest.TestCase):
                          if path.name.startswith(".musializer-")]
             self.assertEqual(leftovers, [])
 
+    def test_render_window_matches_the_same_span_of_a_full_export(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            audio = directory / "window source.mp3"
+            full = directory / "full.mp4"
+            windowed = directory / "window.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i",
+                    "sine=frequency=311.13:sample_rate=48000:duration=2.0",
+                    "-af", "apulsator=hz=1.5", "-ac", "2",
+                    "-codec:a", "libmp3lame", "-q:a", "2", str(audio),
+                ],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            base = [
+                "xvfb-run", "-a", str(APP), str(audio),
+                "--scene", "constellation",
+                "--resolution", "640x360", "--fps", "24",
+                "--quality", "balanced",
+            ]
+            completed = subprocess.run(
+                base + ["--render", str(full)],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            if completed.returncode != 0 and (
+                "Could not initialize audio device" in completed.stderr
+                or "Could not initialize the rendering window" in completed.stderr
+            ):
+                self.skipTest("host has no usable graphical/audio runtime")
+            self.assertEqual(
+                completed.returncode, 0,
+                msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+            completed = subprocess.run(
+                base + ["--render-window", "1.0", "0.5", "--render", str(windowed)],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(
+                completed.returncode, 0,
+                msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+            )
+
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_streams", "-of", "json",
+                    str(windowed),
+                ],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            streams = {stream["codec_type"]: stream
+                       for stream in json.loads(probe.stdout)["streams"]}
+            self.assertEqual(int(streams["video"]["nb_frames"]), 12)
+            self.assertAlmostEqual(float(streams["video"]["duration"]),
+                                   0.5, places=6)
+            self.assertAlmostEqual(float(streams["audio"]["duration"]),
+                                   0.5, delta=0.0015)
+
+            # The windowed frames must be the same source frames the full
+            # export produced for that span. Two separate H.264 encodes can
+            # never match byte-for-byte, so compare decoded content: pure
+            # encoder noise sits far above 35 dB, while diverged analyzer,
+            # beat, or scene state visibly restructures the frames and sinks
+            # the minimum PSNR.
+            psnr = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-i", str(windowed),
+                    "-i", str(full), "-filter_complex",
+                    "[1:v]trim=start_frame=24:end_frame=36,"
+                    "setpts=PTS-STARTPTS[ref];[0:v][ref]psnr",
+                    "-f", "null", "-",
+                ],
+                check=True, capture_output=True, text=True, timeout=60,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+            summary = [line for line in psnr.stderr.splitlines()
+                       if "Parsed_psnr" in line and "min:" in line]
+            self.assertTrue(summary, msg=psnr.stderr)
+            minimum = float(summary[-1].split("min:")[1].split()[0])
+            self.assertGreater(minimum, 35.0)
+
 
 if __name__ == "__main__":
     unittest.main()

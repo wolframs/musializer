@@ -129,6 +129,82 @@ TEST(render_export_transport_ends_at_audio_duration_without_decay_tail)
     EXPECT_EQ_U64(total, 1);
 }
 
+TEST(render_export_window_maps_to_exact_frames_and_clamps)
+{
+    uint64_t start = 0;
+    uint64_t end = 0;
+
+    // The full track expressed as a window is the identity transport.
+    REQUIRE_TRUE(render_export_window_frames(240, 24, 0.0, 10.0, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 0);
+    EXPECT_EQ_U64(end, 240);
+
+    // Interior windows use absolute frame indices on the full timeline.
+    REQUIRE_TRUE(render_export_window_frames(4661, 24, 35.0, 20.0, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 840);
+    EXPECT_EQ_U64(end, 1320);
+
+    // A start inside a frame floors to the frame containing it.
+    REQUIRE_TRUE(render_export_window_frames(240, 24, 0.1, 1.0, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 2);
+    EXPECT_EQ_U64(end, 26);
+
+    // A sub-frame duration still renders one whole frame.
+    REQUIRE_TRUE(render_export_window_frames(240, 24, 1.0, 0.001, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 24);
+    EXPECT_EQ_U64(end, 25);
+
+    // Durations past the end of the track clamp without overflow.
+    REQUIRE_TRUE(render_export_window_frames(240, 24, 9.0, 100.0, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 216);
+    EXPECT_EQ_U64(end, 240);
+    REQUIRE_TRUE(render_export_window_frames(240, 24, 0.0, 1.0e300, &start, &end) ==
+                 RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 0);
+    EXPECT_EQ_U64(end, 240);
+}
+
+TEST(render_export_window_rejects_degenerate_ranges_atomically)
+{
+    uint64_t start = 77;
+    uint64_t end = 78;
+
+    // Starting at or after the end of the track cannot render anything.
+    EXPECT_TRUE(render_export_window_frames(240, 24, 10.0, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(240, 24, 11.0, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+
+    // Non-positive, non-finite, and negative ranges are rejected.
+    EXPECT_TRUE(render_export_window_frames(240, 24, -0.5, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(240, 24, 0.0, 0.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(240, 24, 0.0, -2.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(240, 24, NAN, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(240, 24, 0.0, INFINITY, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+    EXPECT_TRUE(render_export_window_frames(0, 24, 0.0, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_WINDOW);
+
+    // Invalid transports and null outputs keep their own error classes.
+    EXPECT_TRUE(render_export_window_frames(240, 0, 0.0, 1.0, &start, &end) ==
+                RENDER_EXPORT_ERROR_FRAME_RATE);
+    EXPECT_TRUE(render_export_window_frames(240, 24, 0.0, 1.0, NULL, &end) ==
+                RENDER_EXPORT_ERROR_NULL);
+
+    // Failures never touch the outputs.
+    EXPECT_EQ_U64(start, 77);
+    EXPECT_EQ_U64(end, 78);
+}
+
 TEST(render_export_transport_duration_text_is_exact_bounded_and_atomic)
 {
     char duration[32] = "unchanged";

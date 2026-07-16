@@ -986,6 +986,30 @@ failure-path test.
   72 -> 80), scene-plan schema enum, external-analysis scene list, CLI help
   and `pentagram` selector, key 0 shortcut, and platform source lists.
 
+### 2026-07-17 - Windowed CLI export
+
+- Added `--render-window START DURATION`: the export loop fast-forwards
+  analysis, beat tracking, scene updates, and cue switching through every
+  frame before the window (240 frames per UI tick, no drawing or encoding),
+  then draws and encodes only the window. Windowed frames are therefore the
+  same deterministic frames a full export produces for that span; FFmpeg
+  receives exactly the window's decoded-audio slice, and the `-t` cap uses
+  the window frame count.
+- The frame mapping lives in `render_export_window_frames`: the start floors
+  to the containing frame, the span rounds up so sub-frame durations render
+  one frame, the end clamps to the timeline, and non-finite or out-of-range
+  windows fail with a dedicated error before any staging file is created.
+  Unit tests pin the boundary cases; a product smoke test renders a full and
+  a windowed export of the same synthesized audio and requires matching
+  frame counts, an exact audio duration, and a minimum PSNR of 35 dB against
+  the full export's span (separate H.264 encodes cannot be compared
+  byte-for-byte).
+- Validated on a real track: windowed renders are hash-identical across
+  runs, and a stateful scene (Constellation) shows flat ~44 dB PSNR against
+  the full export with no drift across the window, confirming fast-forward
+  state parity. UI-side export remains full-track; the window is a CLI
+  surface for section previews and automation.
+
 ## Milestones
 
 ### M0 - Preserve the baseline

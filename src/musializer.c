@@ -3,6 +3,7 @@
 #include <string.h>
 #include <complex.h>
 #include <errno.h>
+#include <math.h>
 
 #include <raylib.h>
 
@@ -70,6 +71,18 @@ static bool parse_positive_u32(const char *text, uint32_t *value)
     return true;
 }
 
+static bool parse_seconds(const char *text, double *seconds)
+{
+    if (text == NULL || seconds == NULL || text[0] == '\0') return false;
+    char *end = NULL;
+    errno = 0;
+    double parsed = strtod(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' ||
+        !isfinite(parsed) || parsed < 0.0) return false;
+    *seconds = parsed;
+    return true;
+}
+
 static bool parse_resolution(const char *text, uint32_t *width, uint32_t *height)
 {
     if (text == NULL || width == NULL || height == NULL) return false;
@@ -105,6 +118,8 @@ static void print_command_line_help(FILE *stream, const char *program)
         "\n"
         "Export:\n"
         "  --render FILE           Render MP4 and exit\n"
+        "  --render-window S D     Render only D seconds starting at S.\n"
+        "                          Frames match the same span of a full render\n"
         "  --resolution WIDTHxHEIGHT\n"
         "  --fps N\n"
         "  --quality NAME          balanced, high, or master\n"
@@ -192,6 +207,9 @@ int main(int argc, char **argv)
     uint32_t render_height = 0;
     uint32_t render_fps = 0;
     const char *render_quality = NULL;
+    bool render_window_set = false;
+    double render_window_start = 0.0;
+    double render_window_duration = 0.0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
@@ -227,6 +245,20 @@ int main(int argc, char **argv)
             } else {
                 render_output = argv[++i];
             }
+            continue;
+        }
+        if (strcmp(argv[i], "--render-window") == 0) {
+            if (i + 2 >= argc ||
+                !parse_seconds(argv[i + 1], &render_window_start) ||
+                !parse_seconds(argv[i + 2], &render_window_duration) ||
+                render_window_duration <= 0.0) {
+                TraceLog(LOG_WARNING,
+                         "Invalid render window; expected START_SECONDS DURATION_SECONDS");
+                command_line_error = true;
+            } else {
+                render_window_set = true;
+            }
+            i += i + 2 < argc ? 2 : (argc - 1 - i);
             continue;
         }
         if (strcmp(argv[i], "--resolution") == 0) {
@@ -298,6 +330,14 @@ int main(int argc, char **argv)
         !plug_configure_render(render_width, render_height, render_fps, render_quality)) {
         TraceLog(LOG_WARNING,
                  "Invalid render configuration; quality is balanced, high, or master");
+        command_line_error = true;
+    }
+
+    if (!command_line_error && render_window_set &&
+        !plug_configure_render_window(render_window_start,
+                                      render_window_duration)) {
+        TraceLog(LOG_WARNING,
+                 "Invalid render window; start and duration must be finite seconds");
         command_line_error = true;
     }
 

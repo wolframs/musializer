@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,7 @@ const char *render_export_result_string(Render_Export_Result result)
         "ok", "null argument", "invalid output resolution", "invalid frame rate",
         "invalid quality", "invalid supersampling", "integer overflow",
         "invalid output path", "output buffer is too small",
+        "render window is outside the track or not a positive finite range",
     };
     return enum_in_range((int)result, (int)(sizeof(names)/sizeof(names[0]))) ?
            names[result] : "unknown render export error";
@@ -141,6 +143,35 @@ Render_Export_Result render_export_sample_cursor(uint64_t frame_index,
     uint64_t result = frame_index*sample_rate/fps;
     if (result > frame_count) result = frame_count;
     *sample_cursor = result;
+    return RENDER_EXPORT_OK;
+}
+
+Render_Export_Result render_export_window_frames(uint64_t total_frames,
+                                                 uint32_t fps,
+                                                 double start_seconds,
+                                                 double duration_seconds,
+                                                 uint64_t *start_frame,
+                                                 uint64_t *end_frame)
+{
+    if (start_frame == NULL || end_frame == NULL) return RENDER_EXPORT_ERROR_NULL;
+    if (fps == 0 || fps > 240) return RENDER_EXPORT_ERROR_FRAME_RATE;
+    if (total_frames == 0 ||
+        !isfinite(start_seconds) || !isfinite(duration_seconds) ||
+        start_seconds < 0.0 || duration_seconds <= 0.0) {
+        return RENDER_EXPORT_ERROR_WINDOW;
+    }
+    // The start position stays comfortably inside double's exact-integer
+    // range because it is bounded by total_frames, itself derived from a
+    // decodable audio length.
+    double start_position = start_seconds*(double)fps;
+    if (!(start_position < (double)total_frames)) return RENDER_EXPORT_ERROR_WINDOW;
+    uint64_t start = (uint64_t)start_position;
+    uint64_t remaining = total_frames - start;
+    double span = ceil(duration_seconds*(double)fps);
+    uint64_t frames = span >= (double)remaining ? remaining : (uint64_t)span;
+    if (frames == 0) frames = 1;
+    *start_frame = start;
+    *end_frame = start + frames;
     return RENDER_EXPORT_OK;
 }
 

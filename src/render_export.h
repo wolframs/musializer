@@ -45,6 +45,7 @@ typedef enum Render_Export_Result {
     RENDER_EXPORT_ERROR_OVERFLOW,
     RENDER_EXPORT_ERROR_PATH,
     RENDER_EXPORT_ERROR_BUFFER,
+    RENDER_EXPORT_ERROR_WINDOW,
 } Render_Export_Result;
 
 typedef enum Render_Export_Wait_Action {
@@ -78,6 +79,19 @@ Render_Export_Result render_export_sample_cursor(uint64_t frame_index,
                                                  uint32_t fps,
                                                  uint64_t frame_count,
                                                  uint64_t *sample_cursor);
+
+// Resolves a render window given in seconds onto the exact deterministic
+// transport. The start floors to the frame whose interval contains it, the
+// span rounds up so a sub-frame duration still renders one frame, and the
+// end clamps to the timeline. Fails when the window is not a positive finite
+// range beginning before the end of the track. Outputs are untouched on
+// failure.
+Render_Export_Result render_export_window_frames(uint64_t total_frames,
+                                                 uint32_t fps,
+                                                 double start_seconds,
+                                                 double duration_seconds,
+                                                 uint64_t *start_frame,
+                                                 uint64_t *end_frame);
 
 // Formats the exact video transport duration for FFmpeg's output `-t` cap.
 // Nine fractional digits are sufficient for every supported integer FPS.

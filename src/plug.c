@@ -157,6 +157,16 @@ typedef struct {
     Render_Resolution render_resolution;
     Render_Frame_Rate render_frame_rate;
     uint64_t render_total_frames;
+    // Half-open [start, end) frame window on the full deterministic
+    // timeline. Frames before the window are fast-forwarded (analysis, beat,
+    // scene, and cue state advance exactly as in a full export) without
+    // drawing or encoding, so window frames stay bit-identical to the same
+    // frames of a full render.
+    uint64_t render_start_frame;
+    uint64_t render_end_frame;
+    bool render_window_requested;
+    double render_window_start_seconds;
+    double render_window_duration_seconds;
     uint64_t render_job_nonce;
     double render_started_at;
     float render_restore_position;
@@ -4913,6 +4923,41 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
         p->render_failed = true;
         return false;
     }
+    uint64_t window_start_frame = 0;
+    uint64_t window_end_frame = total_frames;
+    uint64_t window_start_sample = 0;
+    uint64_t window_end_sample = wave.frameCount;
+    if (p->render_window_requested) {
+        Render_Export_Result window_result = render_export_window_frames(
+            total_frames, p->render_config.fps,
+            p->render_window_start_seconds, p->render_window_duration_seconds,
+            &window_start_frame, &window_end_frame);
+        if (window_result == RENDER_EXPORT_OK) {
+            window_result = render_export_sample_cursor(
+                window_start_frame, wave.sampleRate, p->render_config.fps,
+                wave.frameCount, &window_start_sample);
+        }
+        if (window_result == RENDER_EXPORT_OK) {
+            window_result = render_export_sample_cursor(
+                window_end_frame, wave.sampleRate, p->render_config.fps,
+                wave.frameCount, &window_end_sample);
+        }
+        if (window_result != RENDER_EXPORT_OK ||
+            window_end_sample <= window_start_sample) {
+            UnloadWaveSamples(wave_samples);
+            UnloadWave(wave);
+            start_preview_track(track);
+            if (restore_position > 0.0f) SeekMusicStream(track->music, restore_position);
+            if (!restore_playing) PauseMusicStream(track->music);
+            notice_push(UI_NOTICE_ERROR, "Render window is invalid",
+                        render_export_result_string(
+                            window_result == RENDER_EXPORT_OK ?
+                            RENDER_EXPORT_ERROR_WINDOW : window_result),
+                        NULL, true);
+            p->render_failed = true;
+            return false;
+        }
+    }
     RenderTexture2D target = load_offline_render_target(&p->render_config);
     if (!IsRenderTextureValid(target) || !rlFramebufferComplete(target.id)) {
         if (target.id != 0) UnloadRenderTexture(target);
@@ -4958,7 +5003,18 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
             break;
         }
     }
-    if (!audio_path_ready || !ExportWave(wave, decoded_audio_path)) {
+    // FFmpeg must hear exactly the audio the window frames span, so a
+    // windowed export stages only that slice of the decoded wave. Analysis
+    // still consumes the full wave from the start of the track.
+    Wave staged_wave = wave;
+    if (window_end_sample > window_start_sample &&
+        (window_start_sample > 0 || window_end_sample < wave.frameCount)) {
+        staged_wave.frameCount = (unsigned int)(window_end_sample - window_start_sample);
+        staged_wave.data = (unsigned char *)wave.data +
+                           (size_t)window_start_sample*wave.channels*
+                           (wave.sampleSize/8u);
+    }
+    if (!audio_path_ready || !ExportWave(staged_wave, decoded_audio_path)) {
         bool staging_cleaned = !audio_path_ready ||
                                remove_render_staging_file(decoded_audio_path);
         UnloadRenderTexture(target);
@@ -4983,6 +5039,8 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
     p->wave_samples = wave_samples;
     p->screen = target;
     p->render_total_frames = total_frames;
+    p->render_start_frame = window_start_frame;
+    p->render_end_frame = window_end_frame;
     p->render_restore_position = restore_position;
     p->render_restore_playing = restore_playing;
     p->render_started_at = GetTime();
@@ -4995,7 +5053,8 @@ static bool start_rendering_track_to(Track *track, const char *output_path)
     scene_switch_reset(&track->scene_switches);
     track->cue_settings_active = false;
     p->ffmpeg = ffmpeg_start_rendering(output_path, &p->render_config,
-                                       p->render_audio_path, total_frames,
+                                       p->render_audio_path,
+                                       window_end_frame - window_start_frame,
                                        p->render_job_nonce);
     p->render_failed = p->ffmpeg == NULL;
     SetTargetFPS(0);
@@ -5062,6 +5121,21 @@ MUSIALIZER_PLUG bool plug_configure_render(uint32_t width, uint32_t height,
     if (track != NULL) track->render_config = config;
     set_active_render_config(config);
     mark_project_dirty(track);
+    return true;
+}
+
+MUSIALIZER_PLUG bool plug_configure_render_window(double start_seconds,
+                                                  double duration_seconds)
+{
+    // Exact frame bounds need the decoded duration, so full validation
+    // happens against the real transport when the render starts.
+    if (!isfinite(start_seconds) || !isfinite(duration_seconds) ||
+        start_seconds < 0.0 || duration_seconds <= 0.0) {
+        return false;
+    }
+    p->render_window_requested = true;
+    p->render_window_start_seconds = start_seconds;
+    p->render_window_duration_seconds = duration_seconds;
     return true;
 }
 
@@ -5146,6 +5220,9 @@ static void finish_rendering_track(Track *track)
     SetTargetFPS(PREVIEW_FPS);
     p->rendering = false;
     p->render_finishing = false;
+    p->render_start_frame = 0;
+    p->render_end_frame = 0;
+    p->render_window_requested = false;
     start_preview_track(track);
     if (p->render_restore_position > 0.0f) {
         SeekMusicStream(track->music, p->render_restore_position);
@@ -5709,7 +5786,7 @@ static void rendering_screen(void)
         return;
     }
 
-    if (p->scene_frame_index >= p->render_total_frames) {
+    if (p->scene_frame_index >= p->render_end_frame) {
         if (!p->render_finishing) {
             p->render_finishing = true;
         } else {
@@ -5727,11 +5804,18 @@ static void rendering_screen(void)
     }
 
     double elapsed = fmax(0.0, GetTime() - p->render_started_at);
-    double progress = p->render_total_frames > 0 ?
-                      (double)p->scene_frame_index/p->render_total_frames : 0.0;
+    uint64_t window_frames = p->render_end_frame > p->render_start_frame ?
+                             p->render_end_frame - p->render_start_frame : 0;
+    bool fast_forwarding = p->scene_frame_index < p->render_start_frame;
+    uint64_t encoded_frames = fast_forwarding ? 0 :
+                              p->scene_frame_index - p->render_start_frame;
+    double progress = window_frames > 0 ?
+                      (double)encoded_frames/window_frames : 0.0;
     if (progress > 1.0) progress = 1.0;
     double remaining = progress > 0.001 ? elapsed*(1.0 - progress)/progress : 0.0;
-    const char *label = p->render_finishing ? "Finishing encoder" : "Exporting video";
+    const char *label = p->render_finishing ? "Finishing encoder" :
+                        fast_forwarding ? "Preparing window state" :
+                        "Exporting video";
     Vector2 title_size = MeasureTextEx(ui_font(), label, 34.0f, 1.0f);
     DrawTextEx(ui_font(), label,
                (Vector2){w/2.0f - title_size.x/2.0f, h/2.0f - 92.0f},
@@ -5740,12 +5824,17 @@ static void rendering_screen(void)
     char detail[256];
     if (p->render_finishing) {
         snprintf(detail, sizeof(detail), "%llu frames encoded  |  finalizing MP4",
-                 (unsigned long long)p->render_total_frames);
+                 (unsigned long long)window_frames);
+    } else if (fast_forwarding) {
+        snprintf(detail, sizeof(detail),
+                 "%llu / %llu deterministic frames prepared",
+                 (unsigned long long)p->scene_frame_index,
+                 (unsigned long long)p->render_start_frame);
     } else {
         snprintf(detail, sizeof(detail),
                  "%llu / %llu frames  |  %02u:%02u elapsed  |  about %02u:%02u remaining",
-                 (unsigned long long)p->scene_frame_index,
-                 (unsigned long long)p->render_total_frames,
+                 (unsigned long long)encoded_frames,
+                 (unsigned long long)window_frames,
                  (unsigned)(elapsed/60.0), (unsigned)fmod(elapsed, 60.0),
                  (unsigned)(remaining/60.0), (unsigned)fmod(remaining, 60.0));
     }
@@ -5774,6 +5863,13 @@ static void rendering_screen(void)
     }
 
     if (p->render_finishing) return;
+
+    // Frames before the window advance analysis, beat tracking, scene state,
+    // and cue switching exactly as a full export would, but skip drawing and
+    // encoding. Batching several per tick keeps the fast-forward brief while
+    // cancellation and progress stay responsive.
+    unsigned frame_steps = p->scene_frame_index < p->render_start_frame ? 240 : 1;
+    while (frame_steps-- > 0) {
 
     if (p->scene_frame_index > 0) {
         uint64_t next_cursor = 0;
@@ -5810,6 +5906,12 @@ static void rendering_screen(void)
     double scene_time = (double)p->scene_frame_index/p->render_config.fps;
     apply_auto_scene_switch(track, scene_time);
 
+    if (p->scene_frame_index < p->render_start_frame) {
+        Scene_Frame frame = make_scene_frame(spectrum, scene_time, scene_dt);
+        scene_instance_update(&p->scene, &frame);
+        continue;
+    }
+
     BeginTextureMode(p->screen);
     ClearBackground(COLOR_BACKGROUND);
     scene_render((Rectangle){0, 0, (float)p->screen.texture.width,
@@ -5837,6 +5939,9 @@ static void rendering_screen(void)
         return;
     }
     UnloadImage(image);
+    break;
+
+    }  // frame_steps loop: fast-forward batches, or exactly one drawn frame
 }
 
 static void load_assets(void)

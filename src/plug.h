@@ -74,6 +74,7 @@ typedef struct {
     PLUG(plug_load_analysis_bridge, bool, const char*) \
     PLUG(plug_set_auto_scenes, bool, bool) \
     PLUG(plug_configure_render, bool, uint32_t, uint32_t, uint32_t, const char*) \
+    PLUG(plug_configure_render_window, bool, double, double) \
     PLUG(plug_start_render, bool, const char*) \
     PLUG(plug_render_active, bool, void) \
     PLUG(plug_render_failed, bool, void) \

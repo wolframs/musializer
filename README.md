@@ -335,6 +335,8 @@ $ ./build/musializer path/to/song.wav --scene atlas \
 $ ./build/musializer path/to/song.mp3 --scene atlas \
     --quality high --save-project path/to/show.musi
 $ ./build/musializer --project path/to/show.musi --render output.mp4
+$ ./build/musializer path/to/song.mp3 --scene pentagram \
+    --render-window 35 20 --render preview-section.mp4
 ```
 
 Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
@@ -343,6 +345,14 @@ Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg
 finishes, making them suitable for scripts and smoke tests.
+
+`--render-window START DURATION` (seconds) exports only that span of the
+track. The engine first fast-forwards analysis, beat tracking, and scene
+state through the preceding frames exactly as a full export would, so the
+windowed frames match the same span of a full render; only the drawing and
+encoding are skipped. The output MP4 carries exactly the window's audio
+slice, the window clamps to the end of the track, and a start at or past
+the track end fails before any file is touched.
 
 `--analysis-bridge` checks the bridge audio SHA-256 before importing lyric,
 semantic, or scene lanes. `--auto-scenes` opts into its section recommendations
