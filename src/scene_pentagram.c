@@ -170,6 +170,58 @@ static Vector2 pentagram_project(Vector2 point, Vector2 center,
     };
 }
 
+// Smoothed band energy sampled by angle around the nest. The mirror map
+// folds the circle so bass and treble meet seamlessly instead of jumping at
+// an angular seam, and adjacent bands interpolate for a continuous contour.
+static float pentagram_trail_at(const Scene_Frame *frame, float angle)
+{
+    if (frame->audio.trails == NULL || frame->audio.bands_count == 0) return 0.0f;
+    float turns = angle/(2.0f*PI);
+    turns -= floorf(turns);
+    float mirrored = 1.0f - fabsf(2.0f*turns - 1.0f);
+    float position = mirrored*(float)(frame->audio.bands_count - 1);
+    size_t low = (size_t)position;
+    if (low >= frame->audio.bands_count) low = frame->audio.bands_count - 1;
+    size_t high = low + 1 < frame->audio.bands_count ? low + 1 : low;
+    float fraction = position - (float)low;
+    float below = pentagram_clamp01(frame->audio.trails[low]);
+    float above = pentagram_clamp01(frame->audio.trails[high]);
+    return below + (above - below)*fraction;
+}
+
+// Radial displacement, in log-space units, that bends the invariant geometry
+// into the shape of the current spectrum. Outer structures flex more than
+// inner ones, and spectral flux sharpens the excursion on hits. Everything is
+// a pure function of the current frame, so seeking and export stay exact.
+static float pentagram_shape(const Scene_Frame *frame, float angle, float depth,
+                             float coupling)
+{
+    float trail = pentagram_trail_at(frame, angle);
+    float flux = pentagram_clamp01(frame->audio.spectral_flux);
+    return coupling*trail*(0.12f + 0.38f*pentagram_clamp01(depth))*
+           (0.75f + flux*0.50f);
+}
+
+static Vector2 pentagram_flex(Vector2 point, float disp)
+{
+    float radius = sqrtf(point.x*point.x + point.y*point.y);
+    if (radius <= 0.0005f || !isfinite(disp)) return point;
+    float factor = (radius + disp)/radius;
+    return (Vector2){ point.x*factor, point.y*factor };
+}
+
+static Vector2 pentagram_station_point(const Pentagram_State *pentagram,
+                                       const Scene_Frame *frame, size_t orbit,
+                                       size_t step, Vector2 center, float cos_r,
+                                       float sin_r, float scale, float coupling)
+{
+    Vector2 station = pentagram->stations[orbit][step];
+    float disp = pentagram_shape(frame, atan2f(station.y, station.x),
+                                 pentagram->orbit_depth[orbit], coupling);
+    return pentagram_project(pentagram_flex(station, disp), center,
+                             cos_r, sin_r, scale);
+}
+
 // Dwell on a station, then hop: a smoothstep of a smoothstep keeps the spark
 // parked near integer positions and quick across the chord between them.
 static float pentagram_hop_ease(float fraction)
@@ -232,25 +284,45 @@ static void pentagram_draw(const void *state, const Scene_Frame *frame,
     float rotation = time*0.042f*motion + pentagram_unit(pentagram->seed, 8)*2.0f*PI;
     float cos_r = cosf(rotation);
     float sin_r = sinf(rotation);
-    float scale = 0.44f*span/pentagram->extent*field_scale;
+    // The whole nest breathes with signal level; per-band flexing happens
+    // point-by-point below via pentagram_shape.
+    float scale = 0.44f*span/pentagram->extent*field_scale*
+                  (1.0f + rms*0.05f*pulse_scale);
 
     BeginBlendMode(BLEND_ADDITIVE);
 
     for (size_t curve = 0; curve < nest_count; ++curve) {
+        float depth = ((float)curve + 0.6f)/(float)PENTAGRAM_CURVE_CAPACITY;
         float trail = pentagram_band(frame->audio.trails, frame->audio.bands_count,
                                      curve);
-        float depth = ((float)curve + 0.6f)/(float)PENTAGRAM_CURVE_CAPACITY;
+        // Each beat launches a brightness wave from the golden center that
+        // travels outward through the nest, carried by beat phase alone.
+        float ripple_distance = depth - beat_phase;
+        float ripple = expf(-ripple_distance*ripple_distance/0.018f)*
+                       (0.25f + flux*0.75f)*pulse_scale;
         Color line = ColorFromHSV(fmodf(base_hue + depth*58.0f, 360.0f),
                                   0.58f + trail*0.24f,
-                                  fminf(1.0f, 0.30f + trail*0.55f + onset_flash*0.10f));
-        float alpha = fminf(0.85f, 0.32f + trail*0.48f + flux*0.10f);
-        float thickness = fmaxf(1.0f, span*0.0019f*(0.60f + trail*0.85f));
+                                  fminf(1.0f, 0.30f + trail*0.55f + ripple*0.22f
+                                            + onset_flash*0.10f));
+        float alpha = fminf(0.9f, 0.32f + trail*0.48f + ripple*0.30f + flux*0.10f);
+        float thickness = fmaxf(1.0f, span*0.0019f*(0.60f + trail*0.85f
+                                                  + ripple*0.55f));
+        float last_angle = (float)(PENTAGRAM_CURVE_SAMPLES - 1)*
+                           (2.0f*PI/(float)PENTAGRAM_CURVE_SAMPLES);
         Vector2 previous = pentagram_project(
-            pentagram->curves[curve][PENTAGRAM_CURVE_SAMPLES - 1],
+            pentagram_flex(pentagram->curves[curve][PENTAGRAM_CURVE_SAMPLES - 1],
+                           pentagram_shape(frame, last_angle, depth, pulse_scale)
+                         + ripple*0.05f),
             center, cos_r, sin_r, scale);
         for (size_t sample = 0; sample < PENTAGRAM_CURVE_SAMPLES; ++sample) {
-            Vector2 point = pentagram_project(pentagram->curves[curve][sample],
-                                              center, cos_r, sin_r, scale);
+            // Samples were traced at exactly this angle in init, so the
+            // spectral contour lands on the curve without any refit.
+            float angle = (float)sample*(2.0f*PI/(float)PENTAGRAM_CURVE_SAMPLES);
+            float disp = pentagram_shape(frame, angle, depth, pulse_scale)
+                       + ripple*0.05f;
+            Vector2 point = pentagram_project(
+                pentagram_flex(pentagram->curves[curve][sample], disp),
+                center, cos_r, sin_r, scale);
             DrawLineEx(previous, point, thickness, ColorAlpha(line, alpha));
             previous = point;
         }
@@ -259,8 +331,9 @@ static void pentagram_draw(const void *state, const Scene_Frame *frame,
     for (size_t orbit = 0; orbit < orbit_count; ++orbit) {
         Vector2 points[PENTAGRAM_ORBIT_PERIOD];
         for (size_t step = 0; step < PENTAGRAM_ORBIT_PERIOD; ++step) {
-            points[step] = pentagram_project(pentagram->stations[orbit][step],
-                                             center, cos_r, sin_r, scale);
+            points[step] = pentagram_station_point(pentagram, frame, orbit, step,
+                                                   center, cos_r, sin_r, scale,
+                                                   pulse_scale);
         }
         float trail = pentagram_band(frame->audio.trails, frame->audio.bands_count,
                                      orbit);
@@ -302,12 +375,17 @@ static void pentagram_draw(const void *state, const Scene_Frame *frame,
         float hops = time*motion*(0.42f + pentagram->orbit_rate[orbit]*0.38f)
                    + pentagram->orbit_offset[orbit];
         size_t active = (size_t)((uint64_t)hops%PENTAGRAM_ORBIT_PERIOD);
-        float eased = pentagram_hop_ease(hops - floorf(hops));
-        Vector2 from = pentagram_project(pentagram->stations[orbit][active],
-                                         center, cos_r, sin_r, scale);
-        Vector2 to = pentagram_project(
-            pentagram->stations[orbit][(active + 1)%PENTAGRAM_ORBIT_PERIOD],
-            center, cos_r, sin_r, scale);
+        // Each beat lunges the spark forward along its chord; the underlying
+        // phase still advances with time only, so the lunge is an additive,
+        // seek-safe offset on top of the deterministic hop.
+        float eased = pentagram_clamp01(pentagram_hop_ease(hops - floorf(hops))
+                                      + beat_pop*pulse_scale*0.22f);
+        Vector2 from = pentagram_station_point(pentagram, frame, orbit, active,
+                                               center, cos_r, sin_r, scale,
+                                               pulse_scale);
+        Vector2 to = pentagram_station_point(
+            pentagram, frame, orbit, (active + 1)%PENTAGRAM_ORBIT_PERIOD,
+            center, cos_r, sin_r, scale, pulse_scale);
         Vector2 head = {
             from.x + (to.x - from.x)*eased,
             from.y + (to.y - from.y)*eased,

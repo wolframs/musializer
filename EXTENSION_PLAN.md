@@ -968,8 +968,17 @@ failure-path test.
   audio-dependent state), so seeking and offline export are deterministic;
   audio contributes only additive per-frame offsets, band-lit nest curves,
   and beat-phase pulse pops. Eight bounded parameters (speed, nest curves,
-  orbit count, spark glow, chord brightness, hue, beat response, field
+  orbit count, spark glow, chord brightness, hue, music coupling, field
   scale) follow the descriptor/preset/mapping conventions.
+- A same-day musicality pass made the geometry itself spectral: every level
+  curve and orbit station flexes radially by the smoothed band energy
+  sampled at its angle (a seam-free mirrored angle-to-band map with linear
+  interpolation), each beat launches a Gaussian brightness ripple that
+  travels outward through the nest on beat phase alone, sparks lunge along
+  their chords on the beat, and the whole nest breathes with RMS. All of it
+  remains a pure function of the current frame; repeat renders stayed
+  hash-identical and the mean inter-frame luma delta rose from 0.055 to
+  0.138 on the beat-heavy validation clip.
 - Registration required the tenth scene slot everywhere at once: Scene_Id
   and Analysis_Scene enums (appended, order-synced), scene registry,
   settings tables, `SCENE_SETTINGS_SCENE_COUNT` 9 -> 10 with derived

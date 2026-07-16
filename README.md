@@ -226,7 +226,10 @@ audio-reactive ambient/fallback behavior rather than requiring a model service.
 `y[k+1] = (1 + y[k])/y[k-1]`, whose every orbit provably closes after exactly
 five steps: nested invariant-curve ovals surround the golden-ratio fixed
 point while five-station orbits hop their pentagram chords in time with the
-music, with the nest lit by per-band spectral energy.
+music. The nest is shaped by the sound itself: every invariant curve flexes
+radially with the smoothed spectrum sampled around its circumference, each
+beat sends a brightness ripple outward from the golden center, and sparks
+lunge along their chords on the beat.
 
 Set the optional credential in the process environment or in an ignored `.env`
 at the repository root:
