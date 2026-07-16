@@ -86,4 +86,8 @@ void ui_widgets_draw_wrapped_text(Font font, const char *text, Vector2 position,
                                   float maximum_width, float font_size,
                                   size_t maximum_lines, Color color);
 
+void ui_widgets_format_timestamp(double seconds, char *output, size_t capacity);
+void ui_widgets_track_label(Font font, const char *text, Vector2 position,
+                            float fontSize, Color tint);
+
 #endif // MUSIALIZER_UI_WIDGETS_H_

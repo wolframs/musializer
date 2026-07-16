@@ -264,3 +264,46 @@ void ui_widgets_draw_wrapped_text(Font font, const char *text, Vector2 position,
                    font_size, 1.0f, color);
     }
 }
+
+void ui_widgets_format_timestamp(double seconds, char *output, size_t capacity)
+{
+    if (seconds < 0.0) seconds = 0.0;
+    unsigned minutes = (unsigned)(seconds/60.0);
+    double within_minute = seconds - (double)minutes*60.0;
+    snprintf(output, capacity, "%02u:%06.3f", minutes, within_minute);
+}
+
+void ui_widgets_track_label(Font font, const char *text, Vector2 position,
+                            float fontSize, Color tint)
+{
+    if (font.texture.id == 0) font = GetFontDefault();  // Security check in case of not valid font
+
+    float spacing = 0;
+
+    int size = TextLength(text);    // Total size in bytes of the text, scanned by codepoints in loop
+
+    int textOffsetY = 0;            // Offset between lines (on linebreak '\n')
+    float textOffsetX = 0.0f;       // Offset X to next character to draw
+
+    float scaleFactor = fontSize/font.baseSize;         // Character quad scaling factor
+
+    for (int i = 0; i < size;)
+    {
+        // Get next codepoint from byte string and glyph index in font
+        int codepointByteCount = 0;
+        int codepoint = GetCodepointNext(&text[i], &codepointByteCount);
+        int index = GetGlyphIndex(font, codepoint);
+
+        if (codepoint == '\n') codepoint = ' '; // Treat newlines as spaces
+
+        if ((codepoint != ' ') && (codepoint != '\t'))
+        {
+            DrawTextCodepoint(font, codepoint, (Vector2){ position.x + textOffsetX, position.y + textOffsetY }, fontSize, tint);
+        }
+
+        if (font.glyphs[index].advanceX == 0) textOffsetX += ((float)font.recs[index].width*scaleFactor + spacing);
+        else textOffsetX += ((float)font.glyphs[index].advanceX*scaleFactor + spacing);
+
+        i += codepointByteCount;   // Move text bytes counter to next codepoint
+    }
+}
