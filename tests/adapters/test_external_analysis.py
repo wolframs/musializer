@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import os
 import subprocess
@@ -112,6 +113,69 @@ class ExternalAnalysisTests(unittest.TestCase):
             external._run(["whisper-cli", "private.wav"], timeout=2, runner=runner)
         self.assertNotIn("secret lyric", str(raised.exception))
         self.assertNotIn("private.wav", str(raised.exception))
+
+    def test_failed_child_output_lands_only_in_the_named_diagnostic_sink(self):
+        def runner(argv, **_kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, "partial stdout", "ERROR: invalid_json_schema details")
+
+        sink = self.root / "lyrics.review.diagnostic.log"
+        with self.assertRaisesRegex(RuntimeError, "codex exited with code 1") as raised:
+            external._run(["codex", "exec", "-"], timeout=5, runner=runner,
+                          diagnostic_sink=sink)
+        # The summary error stays clean of child output but points at the sink.
+        self.assertNotIn("invalid_json_schema", str(raised.exception))
+        self.assertIn(sink.name, str(raised.exception))
+        diagnostic = sink.read_text(encoding="utf-8")
+        self.assertIn("codex: exited with code 1", diagnostic)
+        self.assertIn("ERROR: invalid_json_schema details", diagnostic)
+        self.assertIn("partial stdout", diagnostic)
+
+    def test_failed_child_without_sink_keeps_historical_opaque_error(self):
+        def runner(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 1, "private", "private too")
+
+        with self.assertRaisesRegex(RuntimeError, "codex exited with code 1") as raised:
+            external._run(["codex", "exec", "-"], timeout=5, runner=runner)
+        self.assertNotIn("private", str(raised.exception))
+
+    def test_diagnostic_sink_bounds_oversized_child_output(self):
+        def runner(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "x"*(external.DIAGNOSTIC_TAIL_LIMIT*3))
+
+        sink = self.root / "bounded.diagnostic.log"
+        with self.assertRaises(RuntimeError):
+            external._run(["codex"], timeout=5, runner=runner, diagnostic_sink=sink)
+        self.assertLess(sink.stat().st_size,
+                        external.DIAGNOSTIC_TAIL_LIMIT + 512)
+
+    def test_codex_output_schema_stays_structured_output_compatible(self):
+        # codex exec forwards the schema to a structured-output endpoint that
+        # rejects several JSON Schema keywords outright; uniqueItems silently
+        # broke every Timed lyrics run until 2026-07-16. Enforce the subset
+        # here and rely on _validate_codex_review for uniqueness.
+        schema_path = ROOT / "schemas/codex-lyric-review-output-v1.schema.json"
+        schema_text = schema_path.read_text(encoding="utf-8")
+        for keyword in ("patternProperties", "contains", '"if"', '"then"',
+                        '"oneOf"', '"not"'):
+            self.assertNotIn(keyword, schema_text)
+        self.assertNotIn('"uniqueItems":', schema_text)
+        validator = inspect.getsource(external._validate_codex_review)
+        self.assertIn("len(set(indices)) != len(indices)", validator)
+
+    def test_codex_review_success_removes_stale_diagnostics(self):
+        source_path = self.write_json("lyrics.json", lyrics_document())
+        output = self.root / "review.json"
+        stale = self.root / "review.diagnostic.log"
+        stale.write_text("codex: exited with code 1\n", encoding="utf-8")
+
+        def runner(argv, **kwargs):
+            result_path = Path(argv[argv.index("-o") + 1])
+            analysis_io.atomic_write_json(result_path, {"lines": [], "notes": []})
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        external.run_codex_review(source_path, output, runner=runner)
+        self.assertFalse(stale.exists())
 
     def test_local_child_environment_strips_credentials(self):
         with mock.patch.dict(os.environ, {

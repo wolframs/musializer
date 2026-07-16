@@ -112,6 +112,17 @@ indices and stay within their timing envelope. The review is a separate
 `lyric_review` lane; it never overwrites Whisper evidence and is rejected if it
 adds uncited lines.
 
+The output schema forwarded to `codex exec --output-schema` must stay inside
+the structured-output keyword subset; `uniqueItems` in particular is rejected
+by the endpoint with `invalid_json_schema` (this silently failed every lyric
+review until 2026-07-16). Uniqueness and all other stricter bounds are
+enforced locally by the review validator. When the Codex child exits
+abnormally, a bounded tail of its output is preserved as
+`lyrics.review.diagnostic.log` beside the other per-job artifacts (the same
+directory that already holds the private Whisper evidence); the summary job
+log stays free of child output. The diagnostic is removed again by the next
+successful review.
+
 The deterministic section planner combines measured section boundaries,
 measured feature changes, lyric gaps, and (when explicitly supplied) subjective
 semantic changes. The `assist sections` mode may supply measured evidence and
