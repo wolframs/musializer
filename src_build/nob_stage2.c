@@ -106,6 +106,7 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/lyrics.c",
         "./src/caption_layout.c",
         "./src/ui_notice.c",
+        "./src/ui_widgets.c",
         "./src/project.c",
         "./src/project_io.c",
         "./src/render_export.c",

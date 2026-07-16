@@ -30,6 +30,8 @@
 #include "sha256.h"
 #include "track_timeline.h"
 #include "ui_notice.h"
+#include "ui_theme.h"
+#include "ui_widgets.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
 // #define NOB_WARN_DEPRECATED
@@ -97,51 +99,6 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
 #define PLUG_STATE_VERSION 25
 
-#define COLOR_ACCENT                  GetColor(0x002FA7FF)
-#define COLOR_BACKGROUND              GetColor(0x151515FF)
-#define COLOR_UI_SURFACE              GetColor(0xF7F7F8FF)
-#define COLOR_UI_RAISED               GetColor(0xFFFFFFFF)
-#define COLOR_UI_INK                  GetColor(0x141414FF)
-#define COLOR_UI_MUTED                GetColor(0x66666BFF)
-#define COLOR_UI_DISABLED             GetColor(0x929298FF)
-#define COLOR_UI_RULE                 GetColor(0xD2D2D6FF)
-#define COLOR_UI_DANGER               GetColor(0xC62828FF)
-#define COLOR_UI_WARNING              GetColor(0xB26A00FF)
-#define COLOR_UI_SUCCESS              GetColor(0x18794EFF)
-#define COLOR_TRACK_PANEL_BACKGROUND  COLOR_UI_SURFACE
-#define COLOR_TRACK_BUTTON_BACKGROUND COLOR_UI_RAISED
-#define COLOR_TRACK_BUTTON_HOVEROVER  GetColor(0xE7EAF2FF)
-#define COLOR_TRACK_BUTTON_SELECTED   COLOR_ACCENT
-#define COLOR_TIMELINE_CURSOR         COLOR_ACCENT
-#define COLOR_TIMELINE_BACKGROUND     COLOR_UI_SURFACE
-#define COLOR_HUD_BUTTON_BACKGROUND   COLOR_TRACK_BUTTON_BACKGROUND
-#define COLOR_HUD_BUTTON_HOVEROVER    COLOR_TRACK_BUTTON_HOVEROVER
-#define COLOR_TOOLTIP_BACKGROUND      COLOR_UI_INK
-#define COLOR_TOOLTIP_FOREGROUND      WHITE
-#define HUD_TIMER_SECS 1.0f
-#define HUD_BUTTON_SIZE 50
-#define HUD_BUTTON_MARGIN 50
-#define HUD_ICON_SCALE 0.5
-#define HUD_POPUP_LIFETIME_SECS 2.0f
-#define HUD_POPUP_SLIDEIN_SECS 0.1f
-#define TOOLTIP_PADDING 20.0f
-#define TRACKLABEL_SCROLL_SECS 0.05f
-
-#define UI_FONT_HEADER 19.0f
-#define UI_FONT_LABEL 16.0f
-#define UI_FONT_CAPTION 13.0f
-#define UI_FONT_VALUE 15.0f
-#define UI_PANEL_PADDING 10.0f
-#define UI_CONTROL_GAP 8.0f
-#define UI_BUTTON_HEIGHT 36.0f
-#define UI_COMPACT_BUTTON_HEIGHT 30.0f
-
-#define KEY_TOGGLE_PLAY KEY_SPACE
-#define KEY_RENDER      KEY_R
-#define KEY_FULLSCREEN  KEY_F
-#define KEY_CAPTURE     KEY_C
-#define KEY_TOGGLE_MUTE KEY_M
-
 typedef struct {
     char *file_path;
     Music music;
@@ -187,13 +144,6 @@ typedef struct {
     size_t count;
     size_t capacity;
 } Tracks;
-
-typedef enum {
-    SIDE_LEFT,
-    SIDE_RIGHT,
-    SIDE_TOP,
-    SIDE_BOTTOM,
-} Side;
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -343,10 +293,7 @@ typedef struct {
 
     Ui_Notice_Queue notices;
 
-    bool tooltip_show;
-    char tooltip_buffer[256];
-    Side tooltip_align;
-    Rectangle tooltip_element_boundary;
+    Ui_Widgets widgets;
 
 #ifdef MUSIALIZER_MICROPHONE
     bool capturing;
@@ -1202,137 +1149,20 @@ static void notice_dismiss(uint64_t *notice_id)
     *notice_id = 0;
 }
 
-static inline float signf(float x)
-{
-    if (x < 0.0) return -1;
-    if (x > 0.0) return 1;
-    return 0.0;
-}
-
-static void snap_segment_inside_other_segment(float ls, float rs, float *lt, float *rt)
-{
-    float dt = *rt - *lt;
-    if (rs < *lt || rs < *rt) {
-        *rt = rs;
-        *lt = rs - dt;
-    }
-
-    if (*lt < ls || *rt < ls) {
-        *lt = ls;
-        *rt = ls + dt;
-    }
-}
-
-static void snap_boundary_inside_screen(Rectangle *boundary)
-{
-    float ls = 0;
-    float rs = GetScreenWidth();
-    float ts = 0;
-    float bs = GetScreenHeight();
-
-    float lt = boundary->x;
-    float rt = boundary->x + boundary->width;
-    float tt = boundary->y;
-    float bt = boundary->y + boundary->height;
-
-    snap_segment_inside_other_segment(ls, rs, &lt, &rt);
-    snap_segment_inside_other_segment(ts, bs, &tt, &bt);
-
-    boundary->x = lt;
-    boundary->y = tt;
-    boundary->width = rt - lt;
-    boundary->height = bt - tt;
-}
-
-static void align_to_side_of_rect(Rectangle who, Rectangle *what, Side where)
-{
-    switch (where) {
-        case SIDE_BOTTOM: {
-            float cx = who.x + who.width/2;
-            float cy = who.y + who.height + TOOLTIP_PADDING;
-            what->x = cx - what->width/2;
-            what->y = cy;
-        } break;
-
-        case SIDE_TOP: {
-            float cx = who.x + who.width/2;
-            float cy = who.y - TOOLTIP_PADDING - what->height;
-            what->x = cx - what->width/2;
-            what->y = cy;
-        } break;
-
-        case SIDE_RIGHT: {
-            float cx = who.x + who.width + TOOLTIP_PADDING;
-            float cy = who.y + who.height/2;
-            what->x = cx;
-            what->y = cy - what->height/2;
-        } break;
-
-        case SIDE_LEFT: {
-            float cx = who.x - TOOLTIP_PADDING - what->width;
-            float cy = who.y + who.height/2;
-            what->x = cx;
-            what->y = cy - what->height/2;
-        } break;
-
-        default: {
-            assert(0 && "unreachable");
-        }
-    }
-}
-
 static void begin_tooltip_frame(void)
 {
-    p->tooltip_show = false;
+    ui_widgets_begin_tooltip_frame(&p->widgets);
 }
 
 static void end_tooltip_frame(void)
 {
-    if (!p->tooltip_show) return;
-
-    float fontSize = 30;
-    float spacing = 0.0;
-    Vector2 margin = {20.0, 10.0};
-    Vector2 text_size = MeasureTextEx(ui_font(), p->tooltip_buffer, fontSize, spacing);
-
-    Rectangle tooltip_boundary = {
-        .width = text_size.x + margin.x*2.0,
-        .height = text_size.y + margin.y*2.0,
-    };
-
-    align_to_side_of_rect(p->tooltip_element_boundary, &tooltip_boundary, p->tooltip_align);
-    snap_boundary_inside_screen(&tooltip_boundary);
-
-    DrawRectangleRec(tooltip_boundary, COLOR_TOOLTIP_BACKGROUND);
-    Vector2 position = {
-        .x = tooltip_boundary.x + tooltip_boundary.width/2 - text_size.x/2,
-        .y = tooltip_boundary.y + tooltip_boundary.height/2 - text_size.y/2,
-    };
-    DrawTextEx(ui_font(), p->tooltip_buffer, position, fontSize, spacing,
-               COLOR_TOOLTIP_FOREGROUND);
+    ui_widgets_end_tooltip_frame(&p->widgets, ui_font());
 }
 
 static void tooltip(Rectangle boundary, const char *text, Side align, bool persists)
 {
-    if (!(CheckCollisionPointRec(GetMousePosition(), boundary) || persists)) return;
-    p->tooltip_show = true;
-    // TODO: this may not work properly if text contains UTF-8
-    snprintf(p->tooltip_buffer, sizeof(p->tooltip_buffer), "%s", text);
-    p->tooltip_align = align;
-    p->tooltip_element_boundary = boundary;
+    ui_widgets_tooltip(&p->widgets, boundary, text, align, persists);
 }
-
-typedef enum {
-    BS_NONE      = 0,
-    BS_HOVEROVER = 1,
-    BS_CLICKED   = 2,
-    BS_PRESSED   = 4,
-} Button_State;
-
-typedef enum {
-    BUTTON_STYLE_NEUTRAL,
-    BUTTON_STYLE_DANGER,
-} Button_Style;
 
 static int button_with_id(uint64_t id, Rectangle boundary);
 static bool start_assist_job(Assist_Mode mode, Track *track);
@@ -1354,69 +1184,22 @@ static bool stage_candidate_analysis_lanes(
     Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES],
     size_t *staged_count, char staged_audio_sha256[SHA256_HEX_SIZE]);
 
-static int styled_text_button(uint64_t id, Rectangle boundary, const char *label,
-                              bool selected, Button_Style style)
-{
-    int state = button_with_id(id, boundary);
-    Color signal = style == BUTTON_STYLE_DANGER ? COLOR_UI_DANGER :
-                                                   COLOR_TRACK_BUTTON_SELECTED;
-    Color background = selected ? signal : COLOR_TRACK_BUTTON_BACKGROUND;
-    if (state & BS_HOVEROVER) {
-        background = selected ? ColorBrightness(signal, 0.12f) :
-                                COLOR_TRACK_BUTTON_HOVEROVER;
-    }
-    if (state & BS_PRESSED) background = ColorBrightness(background, -0.08f);
-    DrawRectangleRec(boundary, background);
-    DrawRectangleLinesEx(boundary, state & BS_PRESSED ? 2.0f : 1.0f,
-                         selected ? signal :
-                         style == BUTTON_STYLE_DANGER ? ColorAlpha(signal, 0.72f) :
-                                                        COLOR_UI_RULE);
-    float font_size = fminf(boundary.height*0.52f, 22.0f);
-    Vector2 size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
-    float available_width = boundary.width - 12.0f;
-    if (size.x > available_width && size.x > 0.0f) {
-        font_size *= available_width/size.x;
-        size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
-    }
-    float press_offset = state & BS_PRESSED ? 1.0f : 0.0f;
-    DrawTextEx(ui_font(), label,
-               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
-                         boundary.y + (boundary.height - size.y)*0.5f + press_offset},
-               font_size, 0.0f, selected ? WHITE : COLOR_UI_INK);
-    return state;
-}
-
 static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
 {
-    return styled_text_button(id, boundary, label, selected, BUTTON_STYLE_NEUTRAL);
+    return ui_widgets_text_button(&p->active_button_id, ui_font(), id, boundary,
+                                  label, selected);
 }
 
 static int danger_text_button(uint64_t id, Rectangle boundary,
                               const char *label, bool armed)
 {
-    return styled_text_button(id, boundary, label, armed, BUTTON_STYLE_DANGER);
+    return ui_widgets_danger_text_button(&p->active_button_id, ui_font(), id,
+                                         boundary, label, armed);
 }
 
 static void disabled_text_button(Rectangle boundary, const char *label, bool selected)
 {
-    Color background = selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.62f) :
-                                  ColorAlpha(COLOR_TRACK_BUTTON_BACKGROUND, 0.72f);
-    Color foreground = selected ? ColorAlpha(WHITE, 0.82f) : COLOR_UI_DISABLED;
-    DrawRectangleRec(boundary, background);
-    DrawRectangleLinesEx(boundary, 1.0f,
-                         selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.7f) :
-                                    ColorAlpha(COLOR_UI_RULE, 0.8f));
-    float font_size = fminf(boundary.height*0.52f, 22.0f);
-    Vector2 size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
-    float available_width = boundary.width - 12.0f;
-    if (size.x > available_width && size.x > 0.0f) {
-        font_size *= available_width/size.x;
-        size = MeasureTextEx(ui_font(), label, font_size, 0.0f);
-    }
-    DrawTextEx(ui_font(), label,
-               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
-                         boundary.y + (boundary.height - size.y)*0.5f},
-               font_size, 0.0f, foreground);
+    ui_widgets_disabled_text_button(ui_font(), boundary, label, selected);
 }
 
 static Color event_type_color(uint32_t type)
@@ -2783,35 +2566,14 @@ static void timeline(Rectangle timeline_boundary, Track *track)
 
 static int button_with_id(uint64_t id, Rectangle boundary)
 {
-    (void)id;
-    Vector2 mouse = GetMousePosition();
-    int hoverover = CheckCollisionPointRec(mouse, boundary);
-
-    int clicked = 0;
-    if (p->active_button_id == 0) {
-        if (hoverover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            p->active_button_id = id;
-        }
-    } else if (p->active_button_id == id) {
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            p->active_button_id = 0;
-            if (hoverover) clicked = 1;
-        }
-    }
-
-    int pressed = hoverover && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-    return (pressed<<2) | (clicked<<1) | hoverover;
+    return ui_widgets_button_with_id(&p->active_button_id, id, boundary);
 }
 
-#define DJB2_INIT 5381
+#define DJB2_INIT UI_WIDGETS_DJB2_INIT
 
 static uint64_t djb2(uint64_t hash, const void *buf, size_t buf_sz)
 {
-    const uint8_t *bytes = buf;
-    for (size_t i = 0; i < buf_sz; ++i) {
-        hash = hash*33 + bytes[i];
-    }
-    return hash;
+    return ui_widgets_djb2(hash, buf, buf_sz);
 }
 
 static bool assist_job_start_failed(const char *detail, bool log_available)
@@ -5158,11 +4920,7 @@ static int fullscreen_button_with_loc(const char *file, int line, Rectangle full
 
 static float slider_get_value(float x, float lox, float hix)
 {
-    if (x < lox) x = lox;
-    if (x > hix) x = hix;
-    x -= lox;
-    x /= hix - lox;
-    return x;
+    return ui_widgets_slider_get_value(x, lox, hix);
 }
 
 static bool horz_slider(Rectangle boundary, float *value, bool *dragging)
