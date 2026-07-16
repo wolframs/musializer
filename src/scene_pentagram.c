@@ -375,11 +375,11 @@ static void pentagram_draw(const void *state, const Scene_Frame *frame,
         float hops = time*motion*(0.42f + pentagram->orbit_rate[orbit]*0.38f)
                    + pentagram->orbit_offset[orbit];
         size_t active = (size_t)((uint64_t)hops%PENTAGRAM_ORBIT_PERIOD);
-        // Each beat lunges the spark forward along its chord; the underlying
-        // phase still advances with time only, so the lunge is an additive,
-        // seek-safe offset on top of the deterministic hop.
-        float eased = pentagram_clamp01(pentagram_hop_ease(hops - floorf(hops))
-                                      + beat_pop*pulse_scale*0.22f);
+        // Path position must stay monotonic: a decaying beat term added here
+        // once made sparks slide backward along their chords after every
+        // lunge. Beat energy belongs to the radial push and size pop below,
+        // where decay is a pulse rather than a retreat.
+        float eased = pentagram_hop_ease(hops - floorf(hops));
         Vector2 from = pentagram_station_point(pentagram, frame, orbit, active,
                                                center, cos_r, sin_r, scale,
                                                pulse_scale);
@@ -396,7 +396,7 @@ static void pentagram_draw(const void *state, const Scene_Frame *frame,
         float push_y = head.y - center.y;
         float push_length = sqrtf(push_x*push_x + push_y*push_y);
         if (push_length > 1.0f) {
-            float push = pulse_scale*(flux*0.55f + beat_pop*0.30f)*span*0.016f;
+            float push = pulse_scale*(flux*0.55f + beat_pop*0.45f)*span*0.016f;
             head.x += push_x/push_length*push;
             head.y += push_y/push_length*push;
         }

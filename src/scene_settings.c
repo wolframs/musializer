@@ -116,7 +116,7 @@ static const Scene_Setting_Descriptor pentagram_settings[] = {
     SETTING("settings.pentagram.orbits", "Orbit count", 4.00f, 24.00f, 14.00f, 0),
     SETTING("settings.pentagram.glow", "Spark glow", 0.00f, 2.20f, 1.00f, 2),
     SETTING("settings.pentagram.chords", "Pentagram lines", 0.00f, 2.00f, 1.00f, 2),
-    SETTING("settings.pentagram.hue", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.pentagram.hue", "Hue shift (deg)", -180.0f, 180.0f, -91.0f, 0),
     SETTING("settings.pentagram.pulse", "Music coupling", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.pentagram.zoom", "Field scale", 0.60f, 1.50f, 1.00f, 2),
 };
