@@ -731,6 +731,8 @@ static bool scene_id_from_name(const char *name, Scene_Id *result)
         id = SCENE_CADENCE;
     } else if (strcmp(name, "loom") == 0) {
         id = SCENE_LOOM;
+    } else if (strcmp(name, "pentagram") == 0 || strcmp(name, "pentagram-orbits") == 0) {
+        id = SCENE_PENTAGRAM;
     } else {
         return false;
     }
@@ -766,23 +768,6 @@ MUSIALIZER_PLUG bool plug_select_scene(const char *name)
         mark_project_dirty(track);
     }
     return selected;
-}
-
-static const char *scene_stable_name(Scene_Id id)
-{
-    switch (id) {
-    case SCENE_SPECTRUM: return "spectrum";
-    case SCENE_PULSE_FIELD: return "pulse";
-    case SCENE_ORBITAL_LATTICE: return "orbital";
-    case SCENE_ASCII_FIELD: return "ascii";
-    case SCENE_SONG_ATLAS: return "atlas";
-    case SCENE_SPECTRAL_TERRARIUM: return "terrarium";
-    case SCENE_CONSTELLATION: return "constellation";
-    case SCENE_CADENCE: return "cadence";
-    case SCENE_LOOM: return "loom";
-    case COUNT_SCENES: break;
-    }
-    return "spectrum";
 }
 
 static void apply_auto_scene_switch(Track *track, double time_seconds)
@@ -1061,6 +1046,7 @@ static void update_scene_shortcuts(void)
     if (IsKeyPressed(KEY_SEVEN)) selected = SCENE_CONSTELLATION;
     if (IsKeyPressed(KEY_EIGHT)) selected = SCENE_CADENCE;
     if (IsKeyPressed(KEY_NINE)) selected = SCENE_LOOM;
+    if (IsKeyPressed(KEY_ZERO)) selected = SCENE_PENTAGRAM;
     if (selected != COUNT_SCENES) (void)select_base_scene(selected);
 }
 

@@ -12,6 +12,7 @@ extern const Scene_Descriptor scene_spectral_terrarium_descriptor;
 extern const Scene_Descriptor scene_constellation_descriptor;
 extern const Scene_Descriptor scene_cadence_descriptor;
 extern const Scene_Descriptor scene_loom_descriptor;
+extern const Scene_Descriptor scene_pentagram_descriptor;
 
 static const Scene_Descriptor *const scene_registry[COUNT_SCENES] = {
     [SCENE_SPECTRUM] = &scene_spectrum_descriptor,
@@ -23,6 +24,7 @@ static const Scene_Descriptor *const scene_registry[COUNT_SCENES] = {
     [SCENE_CONSTELLATION] = &scene_constellation_descriptor,
     [SCENE_CADENCE] = &scene_cadence_descriptor,
     [SCENE_LOOM] = &scene_loom_descriptor,
+    [SCENE_PENTAGRAM] = &scene_pentagram_descriptor,
 };
 
 static bool scene_id_valid(Scene_Id id)
@@ -40,6 +42,24 @@ const char *scene_name(Scene_Id id)
 {
     const Scene_Descriptor *descriptor = scene_descriptor(id);
     return descriptor ? descriptor->name : "Unknown";
+}
+
+const char *scene_stable_name(Scene_Id id)
+{
+    switch (id) {
+    case SCENE_SPECTRUM: return "spectrum";
+    case SCENE_PULSE_FIELD: return "pulse";
+    case SCENE_ORBITAL_LATTICE: return "orbital";
+    case SCENE_ASCII_FIELD: return "ascii";
+    case SCENE_SONG_ATLAS: return "atlas";
+    case SCENE_SPECTRAL_TERRARIUM: return "terrarium";
+    case SCENE_CONSTELLATION: return "constellation";
+    case SCENE_CADENCE: return "cadence";
+    case SCENE_LOOM: return "loom";
+    case SCENE_PENTAGRAM: return "pentagram";
+    case COUNT_SCENES: break;
+    }
+    return "spectrum";
 }
 
 static bool scene_allocate_state(Scene_Instance *scene, const Scene_Descriptor *descriptor)

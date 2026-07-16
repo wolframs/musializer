@@ -15,7 +15,7 @@ typedef struct Field {
 
 static const char *const scene_names[ANALYSIS_SCENE_COUNT] = {
     "spectrum", "pulse", "orbital", "ascii", "atlas", "terrarium", "constellation",
-    "cadence", "loom"
+    "cadence", "loom", "pentagram"
 };
 
 void analysis_bridge_init(Analysis_Bridge *bridge)

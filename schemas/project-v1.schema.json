@@ -49,7 +49,7 @@
     "lyrics": {"$ref": "#/$defs/lyrics"},
     "scene_switches": {"$ref": "#/$defs/scene_switches"},
     "scene_presets": {
-      "type": "array", "maxItems": 72,
+      "type": "array", "maxItems": 80,
       "items": {"$ref": "#/$defs/scene_preset"},
       "default": [],
       "description": "Named per-scene tuning snapshots saved by the editor. Canonical writers emit this field; early v1 readers default it to an empty library."
@@ -181,7 +181,7 @@
         "blend_mode": {"enum": ["normal", "add", "multiply", "screen"]},
         "mappings": {
           "type": "array",
-          "maxItems": 108,
+          "maxItems": 120,
           "items": {"$ref": "#/$defs/mapping"}
         }
       },

@@ -110,6 +110,17 @@ static const Scene_Setting_Descriptor loom_settings[] = {
     SETTING("settings.loom.glints", "Onset glints", 0.00f, 2.00f, 1.00f, 2),
 };
 
+static const Scene_Setting_Descriptor pentagram_settings[] = {
+    SETTING("settings.pentagram.motion", "Orbit speed", 0.00f, 2.50f, 1.00f, 2),
+    SETTING("settings.pentagram.nest", "Nest curves", 2.00f, 12.00f, 9.00f, 0),
+    SETTING("settings.pentagram.orbits", "Orbit count", 4.00f, 24.00f, 14.00f, 0),
+    SETTING("settings.pentagram.glow", "Spark glow", 0.00f, 2.20f, 1.00f, 2),
+    SETTING("settings.pentagram.chords", "Pentagram lines", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.pentagram.hue", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.pentagram.pulse", "Beat response", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.pentagram.zoom", "Field scale", 0.60f, 1.50f, 1.00f, 2),
+};
+
 typedef struct Scene_Setting_Table {
     const Scene_Setting_Descriptor *items;
     size_t count;
@@ -126,6 +137,7 @@ static const Scene_Setting_Table tables[SCENE_SETTINGS_SCENE_COUNT] = {
       sizeof(constellation_settings)/sizeof(constellation_settings[0]) },
     { cadence_settings, sizeof(cadence_settings)/sizeof(cadence_settings[0]) },
     { loom_settings, sizeof(loom_settings)/sizeof(loom_settings[0]) },
+    { pentagram_settings, sizeof(pentagram_settings)/sizeof(pentagram_settings[0]) },
 };
 
 static bool value_in_range(float value, const Scene_Setting_Descriptor *descriptor)

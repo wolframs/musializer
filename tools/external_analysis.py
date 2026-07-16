@@ -43,7 +43,7 @@ SEMANTIC_NOTES_VERSION = "musializer.semantic-notes/v1"
 BRIDGE_VERSION = "MUSIALIZER_BRIDGE\t1"
 SCENES = (
     "spectrum", "pulse", "orbital", "ascii", "atlas", "terrarium",
-    "constellation", "cadence", "loom",
+    "constellation", "cadence", "loom", "pentagram",
 )
 
 # Keep the orchestrator's measured-cache contract dependency-free. These are
@@ -423,6 +423,7 @@ def _scene_for(features: dict[str, float], semantic: dict[str, Any] | None,
         ({"organic", "growth", "forest", "creature", "earth"}, "terrarium"),
         ({"journey", "landscape", "terrain", "vast", "horizon"}, "atlas"),
         ({"mechanical", "drive", "tunnel", "kinetic", "industrial"}, "orbital"),
+        ({"geometric", "mathematical", "recursive", "hypnotic", "ritual"}, "pentagram"),
     )
     for keywords, scene in keyword_scenes:
         if words.intersection(keywords):

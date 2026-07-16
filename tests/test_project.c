@@ -195,7 +195,7 @@ TEST(project_accepts_every_per_scene_preset_slot)
 {
     static const char *const scene_names[SCENE_SETTINGS_SCENE_COUNT] = {
         "spectrum", "pulse", "orbital", "ascii", "atlas",
-        "terrarium", "constellation", "cadence", "loom",
+        "terrarium", "constellation", "cadence", "loom", "pentagram",
     };
     Musi_Project project = valid_project();
     Scene_Settings settings;

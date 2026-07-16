@@ -123,7 +123,8 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/scene_constellation_motion.c",
         "./src/scene_constellation.c",
         "./src/scene_cadence.c",
-        "./src/scene_loom.c");
+        "./src/scene_loom.c",
+        "./src/scene_pentagram.c");
 }
 
 static void append_posix_plug_sources(Nob_Cmd *cmd)

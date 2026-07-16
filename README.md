@@ -23,8 +23,9 @@ The upstream demo below remains a lovely snapshot of where it began.
 ## What it can do
 
 - Play WAV, OGG, MP3, QOA, and FLAC files with live audio-reactive visuals.
-- Switch among nine built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
-  ASCII Field, Song Atlas, Spectral Terrarium, Constellation, Cadence, and Loom.
+- Switch among ten built-in scenes: Spectrum, Pulse Field, Orbital Lattice,
+  ASCII Field, Song Atlas, Spectral Terrarium, Constellation, Cadence, Loom,
+  and Pentagram Orbits.
 - Tune every scene from a live parameter inspector. Spectrum exposes separate
   taper, semantic hue, and glow shaping; Spectral Terrarium exposes ecosystem
   speed, creature speed, population, and habitat glass; Constellation exposes
@@ -221,6 +222,11 @@ samples accepted semantic events across the full track and weaves energy,
 tension, and valence into thread density, interlace, and color temperature.
 Without lyrics or semantic analysis, Cadence and Loom retain deterministic
 audio-reactive ambient/fallback behavior rather than requiring a model service.
+**Pentagram Orbits** draws the phase portrait of the Lyness recurrence
+`y[k+1] = (1 + y[k])/y[k-1]`, whose every orbit provably closes after exactly
+five steps: nested invariant-curve ovals surround the golden-ratio fixed
+point while five-station orbits hop their pentagram chords in time with the
+music, with the nest lit by per-band spectral energy.
 
 Set the optional credential in the process environment or in an ignored `.env`
 at the repository root:
@@ -329,7 +335,7 @@ $ ./build/musializer --project path/to/show.musi --render output.mp4
 ```
 
 Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
-`terrarium`, `constellation`, `cadence`, and `loom`. Repeatable
+`terrarium`, `constellation`, `cadence`, `loom`, and `pentagram`. Repeatable
 `--event type:seconds:id:value`
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg

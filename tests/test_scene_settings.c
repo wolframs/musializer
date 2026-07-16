@@ -18,6 +18,7 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
     EXPECT_EQ_SIZE(scene_settings_count(6), 8);
     EXPECT_EQ_SIZE(scene_settings_count(7), 7);
     EXPECT_EQ_SIZE(scene_settings_count(8), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(9), 8);
     EXPECT_EQ_SIZE(scene_settings_count(99), 0);
     EXPECT_NEAR(scene_settings_get(&settings, 1, 1), 24.0f, 0.0f);
     const Scene_Setting_Descriptor *height = scene_settings_descriptor(
@@ -203,7 +204,7 @@ TEST(scene_settings_constant_mapping_round_trip_is_atomic)
     size_t count = 999;
     REQUIRE_TRUE(scene_settings_export_mappings(
         &source, mappings, MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE, &count));
-    EXPECT_EQ_SIZE(count, 73);
+    EXPECT_EQ_SIZE(count, 81);
     EXPECT_TRUE(scene_settings_mappings_supported(mappings, count));
     REQUIRE_TRUE(scene_settings_import_mappings(&decoded, mappings, count));
     EXPECT_NEAR(scene_settings_get(&decoded, 2, 0), 0.42f, 0.000001f);

@@ -953,6 +953,30 @@ failure-path test.
   Loom exports had matching decoded-frame hashes, and representative frames
   from all nine scenes were visually inspected together.
 
+### 2026-07-16 - Pentagram Orbits: the Lyness map as scene ten
+
+- Added Pentagram Orbits, a phase-portrait scene built on the Lyness
+  recurrence `y[k+1] = (1 + y[k])/y[k-1]` (Zamolodchikov periodicity of the
+  A2 Y-system: every positive orbit closes after exactly five steps). Scene
+  init traces level curves of the conserved quantity
+  `K = (x+1)(y+1)(x+y+1)/(x*y)` in log coordinates, where ln K is convex
+  with its unique minimum at the golden-ratio fixed point, so ray bisection
+  from the center is guaranteed to find each curve. Each orbit seeds one
+  phase point on a level curve and lets the recurrence place the remaining
+  four stations.
+- All motion phase is a pure function of seed and time (no integrated
+  audio-dependent state), so seeking and offline export are deterministic;
+  audio contributes only additive per-frame offsets, band-lit nest curves,
+  and beat-phase pulse pops. Eight bounded parameters (speed, nest curves,
+  orbit count, spark glow, chord brightness, hue, beat response, field
+  scale) follow the descriptor/preset/mapping conventions.
+- Registration required the tenth scene slot everywhere at once: Scene_Id
+  and Analysis_Scene enums (appended, order-synced), scene registry,
+  settings tables, `SCENE_SETTINGS_SCENE_COUNT` 9 -> 10 with derived
+  mapping/preset capacities (project schema maxItems 108 -> 120 and
+  72 -> 80), scene-plan schema enum, external-analysis scene list, CLI help
+  and `pentagram` selector, key 0 shortcut, and platform source lists.
+
 ## Milestones
 
 ### M0 - Preserve the baseline

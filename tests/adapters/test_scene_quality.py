@@ -42,7 +42,7 @@ class SceneQualityRegressionTests(unittest.TestCase):
         )
         project_header = (ROOT / "src/project.h").read_text(encoding="utf-8")
 
-        expected = 9 * 8
+        expected = 10 * 8
         self.assertEqual(schema["properties"]["scene_presets"]["maxItems"], expected)
         self.assertIn(
             "(SCENE_SETTINGS_SCENE_COUNT*SCENE_SETTINGS_PRESETS_PER_SCENE)",
@@ -60,6 +60,7 @@ class SceneQualityRegressionTests(unittest.TestCase):
             "scene_constellation.c",
             "scene_cadence.c",
             "scene_loom.c",
+            "scene_pentagram.c",
         ]
         for filename in scene_sources:
             with self.subTest(scene=filename):

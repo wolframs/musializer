@@ -24,6 +24,7 @@ typedef enum {
     SCENE_CONSTELLATION,
     SCENE_CADENCE,
     SCENE_LOOM,
+    SCENE_PENTAGRAM,
     COUNT_SCENES,
 } Scene_Id;
 
@@ -86,6 +87,7 @@ typedef struct Scene_Descriptor {
 
 const Scene_Descriptor *scene_descriptor(Scene_Id id);
 const char *scene_name(Scene_Id id);
+const char *scene_stable_name(Scene_Id id);
 
 bool scene_instance_init(Scene_Instance *scene, Scene_Id id, uint64_t seed);
 bool scene_instance_rebind(Scene_Instance *scene);
