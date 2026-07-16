@@ -58,13 +58,37 @@ MEASURED_HOP = 1024
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+DIAGNOSTIC_TAIL_LIMIT = 16384
+
+
+def _write_diagnostic(sink: Path, name: str, detail: str,
+                      stdout: str | None, stderr: str | None) -> bool:
+    """Persist a bounded child-output tail beside the other job artifacts.
+
+    The sink must live in the per-job directory, which already holds the
+    private evidence the child consumed, so this records no new content
+    class; it only makes an opaque exit explainable after the fact.
+    """
+    sections = [f"{name}: {detail}"]
+    for label, text in (("stderr", stderr), ("stdout", stdout)):
+        if text:
+            sections.append(f"--- {label} (last {DIAGNOSTIC_TAIL_LIMIT} chars) ---")
+            sections.append(text[-DIAGNOSTIC_TAIL_LIMIT:])
+    try:
+        sink.write_text("\n".join(sections) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 def _run(
     argv: Sequence[str], *, timeout: float, stdin: str | None = None,
     cwd: Path | None = None, env: dict[str, str] | None = None,
-    runner: Runner = subprocess.run,
+    runner: Runner = subprocess.run, diagnostic_sink: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if not argv or timeout <= 0 or not math.isfinite(timeout):
         raise AnalysisValidationError("external command and positive finite timeout are required")
+    name = Path(argv[0]).name
     try:
         result = runner(
             list(argv), input=stdin, text=True, capture_output=True,
@@ -72,13 +96,25 @@ def _run(
             env=env,
         )
     except subprocess.TimeoutExpired as error:
-        raise RuntimeError(f"{Path(argv[0]).name} exceeded its {timeout:g}s timeout") from error
+        detail = f"exceeded its {timeout:g}s timeout"
+        out = error.stdout.decode("utf-8", "replace") if isinstance(error.stdout, bytes) else error.stdout
+        err = error.stderr.decode("utf-8", "replace") if isinstance(error.stderr, bytes) else error.stderr
+        if diagnostic_sink is not None and _write_diagnostic(
+                diagnostic_sink, name, detail, out, err):
+            detail += f" (child output: {diagnostic_sink.name})"
+        raise RuntimeError(f"{name} {detail}") from error
     except OSError as error:
-        raise RuntimeError(f"could not start {Path(argv[0]).name}: {error}") from error
+        raise RuntimeError(f"could not start {name}: {error}") from error
     if result.returncode != 0:
-        # Child output may contain private lyrics, paths, or provider diagnostics.
-        # Keep it out of logs; callers can rerun the child explicitly to debug.
-        raise RuntimeError(f"{Path(argv[0]).name} exited with code {result.returncode}")
+        # Child output may contain private lyrics, paths, or provider
+        # diagnostics; the summary log stays clean. When the caller names a
+        # diagnostic sink inside the per-job artifact directory, a bounded
+        # output tail is preserved there so the failure stays actionable.
+        detail = f"exited with code {result.returncode}"
+        if diagnostic_sink is not None and _write_diagnostic(
+                diagnostic_sink, name, detail, result.stdout, result.stderr):
+            detail += f" (child output: {diagnostic_sink.name})"
+        raise RuntimeError(f"{name} {detail}")
     return result
 
 
@@ -293,8 +329,13 @@ def run_codex_review(
         result_path = Path(temporary) / "review.json"
         actual = [str(result_path) if value == "<temporary-output>" else
                   temporary if value == "<isolated-workdir>" else value for value in argv]
+        diagnostic_sink = output.with_name(output.stem + ".diagnostic.log")
         _run(actual, timeout=timeout, stdin=codex_review_request(source),
-             cwd=Path(temporary), env=_safe_local_env(), runner=runner)
+             cwd=Path(temporary), env=_safe_local_env(), runner=runner,
+             diagnostic_sink=diagnostic_sink)
+        # A stale diagnostic from an earlier failed attempt would misdescribe
+        # this successful run; drop it once the child has exited cleanly.
+        diagnostic_sink.unlink(missing_ok=True)
         raw = read_json(result_path)
     lines, notes = _validate_codex_review(raw, source)
     reviewed = {

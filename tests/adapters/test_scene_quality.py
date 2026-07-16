@@ -231,14 +231,13 @@ class SceneQualityRegressionTests(unittest.TestCase):
         registry = (ROOT / "src/scene.c").read_text(encoding="utf-8")
         settings = (ROOT / "src/scene_settings.c").read_text(encoding="utf-8")
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
-        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
 
         for upper, stable in (("CADENCE", "cadence"), ("LOOM", "loom")):
             self.assertIn(f"SCENE_{upper}", scene_header)
             self.assertIn(f"scene_{stable}_descriptor", registry)
             self.assertIn(f"settings.{stable}.", settings)
             self.assertIn(f'"./src/scene_{stable}.c"', build)
-            self.assertIn(f'case SCENE_{upper}: return "{stable}"', plug)
+            self.assertIn(f'case SCENE_{upper}: return "{stable}"', registry)
 
 
 if __name__ == "__main__":
