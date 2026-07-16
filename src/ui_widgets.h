@@ -7,6 +7,7 @@
 
 #include <raylib.h>
 
+#include "caption_layout.h"
 #include "ui_theme.h"
 
 // Side of an anchor rectangle on which a tooltip is aligned. Shared by the
@@ -71,5 +72,18 @@ void ui_widgets_disabled_text_button(Font font, Rectangle boundary,
                                      const char *label, bool selected);
 
 float ui_widgets_slider_get_value(float x, float lox, float hix);
+
+// Raylib-backed text measurement adapter for caption_layout, shared by the
+// notice tray and any panel that wraps UTF-8 text to a pixel width.
+typedef struct {
+    Font font;
+    float font_size;
+    float spacing;
+} Ui_Widgets_Caption_Measurement;
+
+float ui_widgets_caption_measure_raylib(const char *text, void *user_data);
+void ui_widgets_draw_wrapped_text(Font font, const char *text, Vector2 position,
+                                  float maximum_width, float font_size,
+                                  size_t maximum_lines, Color color);
 
 #endif // MUSIALIZER_UI_WIDGETS_H_

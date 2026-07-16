@@ -109,3 +109,15 @@ const char *ui_notice_result_string(Ui_Notice_Result r)
         "notice id space exhausted"};
     return r >= 0 && (size_t)r < sizeof(names)/sizeof(names[0]) ? names[r] : "unknown notice result";
 }
+
+const char *ui_notice_severity_label(Ui_Notice_Severity severity)
+{
+    switch (severity) {
+    case UI_NOTICE_INFO: return "INFO";
+    case UI_NOTICE_SUCCESS: return "DONE";
+    case UI_NOTICE_WARNING: return "WARNING";
+    case UI_NOTICE_ERROR: return "ERROR";
+    case UI_NOTICE_SEVERITY_COUNT: break;
+    }
+    return "NOTICE";
+}

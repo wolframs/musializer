@@ -50,4 +50,5 @@ void ui_notice_clear(Ui_Notice_Queue *queue);
 const Ui_Notice *ui_notice_find(const Ui_Notice_Queue *queue, uint64_t notice_id);
 bool ui_notice_is_actionable_failure(const Ui_Notice *notice);
 const char *ui_notice_result_string(Ui_Notice_Result result);
+const char *ui_notice_severity_label(Ui_Notice_Severity severity);
 #endif

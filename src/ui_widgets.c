@@ -239,3 +239,28 @@ float ui_widgets_slider_get_value(float x, float lox, float hix)
     x /= hix - lox;
     return x;
 }
+
+float ui_widgets_caption_measure_raylib(const char *text, void *user_data)
+{
+    Ui_Widgets_Caption_Measurement *measurement = user_data;
+    return MeasureTextEx(measurement->font, text, measurement->font_size,
+                         measurement->spacing).x;
+}
+
+void ui_widgets_draw_wrapped_text(Font font, const char *text, Vector2 position,
+                                  float maximum_width, float font_size,
+                                  size_t maximum_lines, Color color)
+{
+    if (text == NULL || text[0] == '\0' || maximum_lines == 0) return;
+    Ui_Widgets_Caption_Measurement measurement = {font, font_size, 1.0f};
+    Caption_Layout layout;
+    if (caption_layout_utf8(text, maximum_width, ui_widgets_caption_measure_raylib,
+                            &measurement, &layout) != CAPTION_LAYOUT_OK) return;
+    size_t line_count = layout.line_count < maximum_lines ?
+                        layout.line_count : maximum_lines;
+    for (size_t i = 0; i < line_count; ++i) {
+        DrawTextEx(font, layout.lines[i].text,
+                   (Vector2){position.x, position.y + (float)i*(font_size + 2.0f)},
+                   font_size, 1.0f, color);
+    }
+}

@@ -985,17 +985,11 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
     };
 }
 
-typedef struct {
-    Font font;
-    float font_size;
-    float spacing;
-} Caption_Raylib_Measurement;
+typedef Ui_Widgets_Caption_Measurement Caption_Raylib_Measurement;
 
 static float caption_measure_raylib(const char *text, void *user_data)
 {
-    Caption_Raylib_Measurement *measurement = user_data;
-    return MeasureTextEx(measurement->font, text, measurement->font_size,
-                         measurement->spacing).x;
+    return ui_widgets_caption_measure_raylib(text, user_data);
 }
 
 static void draw_scene_lyric_overlay(Rectangle boundary,
@@ -5076,14 +5070,7 @@ static bool volume_slider_with_location(const char *file, int line, Rectangle vo
 
 static const char *notice_severity_label(Ui_Notice_Severity severity)
 {
-    switch (severity) {
-    case UI_NOTICE_INFO: return "INFO";
-    case UI_NOTICE_SUCCESS: return "DONE";
-    case UI_NOTICE_WARNING: return "WARNING";
-    case UI_NOTICE_ERROR: return "ERROR";
-    case UI_NOTICE_SEVERITY_COUNT: break;
-    }
-    return "NOTICE";
+    return ui_notice_severity_label(severity);
 }
 
 static Color notice_severity_color(Ui_Notice_Severity severity)
@@ -5102,18 +5089,8 @@ static void draw_notice_wrapped_text(const char *text, Vector2 position,
                                      float maximum_width, float font_size,
                                      size_t maximum_lines, Color color)
 {
-    if (text == NULL || text[0] == '\0' || maximum_lines == 0) return;
-    Caption_Raylib_Measurement measurement = {ui_font(), font_size, 1.0f};
-    Caption_Layout layout;
-    if (caption_layout_utf8(text, maximum_width, caption_measure_raylib,
-                            &measurement, &layout) != CAPTION_LAYOUT_OK) return;
-    size_t line_count = layout.line_count < maximum_lines ?
-                        layout.line_count : maximum_lines;
-    for (size_t i = 0; i < line_count; ++i) {
-        DrawTextEx(ui_font(), layout.lines[i].text,
-                   (Vector2){position.x, position.y + (float)i*(font_size + 2.0f)},
-                   font_size, 1.0f, color);
-    }
+    ui_widgets_draw_wrapped_text(ui_font(), text, position, maximum_width,
+                                 font_size, maximum_lines, color);
 }
 
 static void notice_tray(Rectangle preview_boundary)
