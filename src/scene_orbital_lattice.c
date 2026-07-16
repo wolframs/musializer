@@ -109,6 +109,13 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_TILT);
     float hue_shift = scene_settings_get(
         renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_HUE);
+    // Reactivity couples the current (damped) audio into motion as additive
+    // offsets, and sway drives the audio-independent wander. Neither feeds the
+    // accumulating phase, so seeking still lands on the same deterministic orbit.
+    float reactivity = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_REACTIVITY);
+    float sway = scene_settings_get(
+        renderer->settings, SCENE_ORBITAL_LATTICE, ORBITAL_SETTING_SWAY);
     float seed_phase = orbital_hash_unit(lattice->seed, 0, 0)*2.0f*PI;
     float hue_base = fmodf((float)lattice->hue_degrees + hue_shift +
                            lattice->semantic_valence*55.0f + 720.0f, 360.0f);
@@ -157,7 +164,8 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     float camera_radius = 0.42f + mids*0.16f + tilt*(2.5f + mids*0.5f);
     float camera_lift = sinf(camera_orbit + seed_phase*0.37f)*
                         (0.24f + treble*0.09f) +
-                        tilt*(1.15f + sinf(camera_orbit*0.7f)*0.45f);
+                        tilt*(1.15f + sinf(camera_orbit*0.7f)*0.45f) +
+                        reactivity*flux*0.14f*sinf(camera_orbit*1.3f + seed_phase);
     Camera3D camera = {
         .position = {
             cosf(camera_orbit)*camera_radius,
@@ -181,9 +189,9 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
     rlScalef(full_aspect/target_aspect, 1.0f, 1.0f);
     rlMatrixMode(RL_MODELVIEW);
 
-    float breathe_phase = orbital_time_phase(frame->time_seconds, 0.32);
-    float drift_x_phase = orbital_time_phase(frame->time_seconds, 0.11);
-    float drift_y_phase = orbital_time_phase(frame->time_seconds, 0.09);
+    float breathe_phase = orbital_time_phase(frame->time_seconds, 0.55);
+    float drift_x_phase = orbital_time_phase(frame->time_seconds, 0.17);
+    float drift_y_phase = orbital_time_phase(frame->time_seconds, 0.13);
     for (int ring = ORBITAL_LATTICE_RING_COUNT - 1; ring >= 0; --ring) {
         Orbital_Lattice_Ring_Motion ring_motion;
         if (!orbital_lattice_motion_ring(lattice, (size_t)ring,
@@ -194,13 +202,21 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
         float ring_character = orbital_hash_unit(
             lattice->seed, (uint32_t)ring, UINT32_C(0xa7));
 
+        // Beats and flux nudge each ring's rotation and breathing without ever
+        // entering the accumulating twist_phase, so the swing is reactive yet
+        // seek-stable. Reactivity scales the audio kick; sway the free wander.
+        float twist_kick = reactivity*(flux*0.55f + pulse*0.32f)*
+                           sinf(seed_phase + (float)ring*0.9f);
         float twist = (float)lattice->twist_phase + (float)ring*0.23f +
-                      (ring_character - 0.5f)*0.22f;
+                      (ring_character - 0.5f)*0.22f + twist_kick;
         float ring_wave = sinf(breathe_phase - (float)ring*0.55f + seed_phase);
         float radius = (3.12f + bass*0.48f +
-                        ring_wave*(0.10f + pulse*0.07f))*radius_scale;
-        float center_x = sinf(drift_x_phase + (float)ring*0.37f + seed_phase)*0.18f;
-        float center_y = cosf(drift_y_phase - (float)ring*0.29f + seed_phase)*0.12f;
+                        ring_wave*(0.14f + pulse*0.10f + reactivity*0.08f))*
+                       radius_scale;
+        float center_x = sinf(drift_x_phase + (float)ring*0.37f + seed_phase)*
+                         0.34f*sway;
+        float center_y = cosf(drift_y_phase - (float)ring*0.29f + seed_phase)*
+                         0.24f*sway;
 
         Vector3 first = { 0 };
         Vector3 previous = { 0 };
@@ -212,8 +228,14 @@ static void orbital_lattice_draw(const void *state, const Scene_Frame *frame,
             float amplitude = orbital_clamp01(lattice->node_bands[band_index]);
             float scatter = orbital_hash_unit(lattice->seed, (uint32_t)ring,
                                               (uint32_t)node) - 0.5f;
-            float radial = radius + amplitude*(0.20f + energy*0.30f) +
-                           scatter*0.10f;
+            // Onsets shove every node outward together; flux ripples them out of
+            // phase around the ring. Both read as the lattice "breathing" to the
+            // beat and vanish smoothly when reactivity is dialed down.
+            float node_bounce = reactivity*(pulse*0.24f +
+                                flux*0.18f*sinf(seed_phase + node_t*2.0f*PI));
+            float radial = radius +
+                           amplitude*(0.24f + energy*0.42f + reactivity*0.22f) +
+                           scatter*0.10f + node_bounce;
             Vector3 position = {
                 center_x + cosf(angle)*radial,
                 center_y + sinf(angle)*radial,

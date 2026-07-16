@@ -135,14 +135,14 @@ static void orbital_lattice_motion_rebase(
     double motion_rate = isfinite(input->motion_rate) && input->motion_rate > 0.0f ?
                          input->motion_rate : 1.0;
     motion->camera_phase = orbital_wrap(
-        orbital_hash_unit(motion->seed, 1)*ORBITAL_TAU + time*0.045*motion_rate,
+        orbital_hash_unit(motion->seed, 1)*ORBITAL_TAU + time*0.060*motion_rate,
         ORBITAL_TAU);
     motion->travel_phase = orbital_wrap(
         orbital_hash_unit(motion->seed, 2)*ORBITAL_LATTICE_PATH_LENGTH +
         time*0.38*motion_rate,
         ORBITAL_LATTICE_PATH_LENGTH);
     motion->twist_phase = orbital_wrap(
-        orbital_hash_unit(motion->seed, 3)*ORBITAL_TAU + time*0.10*motion_rate,
+        orbital_hash_unit(motion->seed, 3)*ORBITAL_TAU + time*0.18*motion_rate,
         ORBITAL_TAU);
     motion->hue_degrees = orbital_wrap(
         205.0 + orbital_hash_unit(motion->seed, 4)*110.0 + time*1.5*motion_rate,
@@ -226,9 +226,9 @@ void orbital_lattice_motion_update(
     // at which absolute phase accumulates; seeking therefore lands on the same
     // orbit as uninterrupted preview/export instead of integrating a different
     // history-dependent camera path.
-    const double camera_speed = 0.045;
+    const double camera_speed = 0.060;
     const double travel_speed = 0.38;
-    const double twist_speed = 0.10;
+    const double twist_speed = 0.18;
     const double hue_speed = 1.5;
     const double motion_rate = isfinite(input->motion_rate) && input->motion_rate > 0.0f ?
                                input->motion_rate : 1.0;

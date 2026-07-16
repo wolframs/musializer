@@ -40,6 +40,8 @@ static const Scene_Setting_Descriptor orbital_settings[] = {
     SETTING("settings.orbital.links", "Link weight", 0.00f, 2.20f, 1.00f, 2),
     SETTING("settings.orbital.tilt", "Camera tilt", 0.00f, 2.00f, 1.00f, 2),
     SETTING("settings.orbital.hue", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.orbital.reactivity", "Beat reactivity", 0.00f, 2.00f, 1.00f, 2),
+    SETTING("settings.orbital.sway", "Drift & sway", 0.00f, 2.00f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor ascii_settings[] = {
@@ -58,10 +60,12 @@ static const Scene_Setting_Descriptor atlas_settings[] = {
     SETTING("settings.atlas.camera", "Camera height", 0.25f, 1.75f, 1.00f, 2),
     SETTING("settings.atlas.contours", "Contour weight", 0.00f, 2.50f, 1.00f, 2),
     SETTING("settings.atlas.color", "Hue shift (deg)", -180.0f, 180.0f, 0.0f, 0),
-    SETTING("settings.atlas.speed", "Camera speed", 0.00f, 2.50f, 1.00f, 2),
+    SETTING("settings.atlas.speed", "Camera drift", 0.00f, 2.50f, 1.00f, 2),
     TOGGLE("settings.atlas.wireframe", "Surface style", 0.0f),
     SETTING("settings.atlas.detail", "Sampling detail", 1.00f, 3.00f, 1.00f, 0),
     TOGGLE("settings.atlas.hue_motion", "Hue motion", 0.0f),
+    SETTING("settings.atlas.orbit", "Camera orbit", -180.0f, 180.0f, 0.0f, 0),
+    SETTING("settings.atlas.zoom", "Camera distance", 0.60f, 1.80f, 1.00f, 2),
 };
 
 static const Scene_Setting_Descriptor terrarium_settings[] = {
@@ -225,9 +229,9 @@ static bool scene_settings_count_is_legacy(size_t scene_index, size_t count)
     switch (scene_index) {
     case 0: return count == 3 || count == 7;  // spectrum
     case 1: return count == 5;                // pulse
-    case 2: return count == 5;                // orbital
+    case 2: return count == 5 || count == 7;  // orbital
     case 3: return count == 4;                // ascii
-    case 4: return count == 8;                // atlas
+    case 4: return count == 8 || count == 10; // atlas
     case 5: return count == 3 || count == 7;  // terrarium
     case 6: return count == 3 || count == 7;  // constellation
     default: return false;

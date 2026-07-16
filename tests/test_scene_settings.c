@@ -11,9 +11,9 @@ TEST(scene_settings_defaults_are_complete_valid_and_scene_specific)
     EXPECT_TRUE(scene_settings_valid(&settings));
     EXPECT_EQ_SIZE(scene_settings_count(0), 8);
     EXPECT_EQ_SIZE(scene_settings_count(1), 8);
-    EXPECT_EQ_SIZE(scene_settings_count(2), 7);
+    EXPECT_EQ_SIZE(scene_settings_count(2), 9);
     EXPECT_EQ_SIZE(scene_settings_count(3), 6);
-    EXPECT_EQ_SIZE(scene_settings_count(4), 10);
+    EXPECT_EQ_SIZE(scene_settings_count(4), 12);
     EXPECT_EQ_SIZE(scene_settings_count(5), 8);
     EXPECT_EQ_SIZE(scene_settings_count(6), 8);
     EXPECT_EQ_SIZE(scene_settings_count(7), 7);
@@ -100,10 +100,13 @@ TEST(scene_settings_legacy_atlas_snapshots_default_new_controls)
 
 TEST(scene_settings_prior_generation_snapshots_default_new_controls)
 {
-    // Snapshot counts saved before the tunability expansion: spectrum,
-    // terrarium, and constellation at 7, pulse and orbital at 5, ascii at 4.
+    // Snapshot counts saved before the tunability expansions: spectrum,
+    // terrarium, and constellation at 7, pulse and orbital at 5, ascii at 4;
+    // orbital again at 7 after its first widening but before the liveliness
+    // controls landed; atlas at 8, then 10 before its camera orbit/distance
+    // controls landed.
     const struct { size_t scene; size_t count; } legacy_counts[] = {
-        {0, 7}, {1, 5}, {2, 5}, {3, 4}, {5, 7}, {6, 7},
+        {0, 7}, {1, 5}, {2, 5}, {2, 7}, {3, 4}, {4, 8}, {4, 10}, {5, 7}, {6, 7},
     };
     Scene_Settings settings;
     scene_settings_init(&settings);
@@ -200,7 +203,7 @@ TEST(scene_settings_constant_mapping_round_trip_is_atomic)
     size_t count = 999;
     REQUIRE_TRUE(scene_settings_export_mappings(
         &source, mappings, MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE, &count));
-    EXPECT_EQ_SIZE(count, 69);
+    EXPECT_EQ_SIZE(count, 73);
     EXPECT_TRUE(scene_settings_mappings_supported(mappings, count));
     REQUIRE_TRUE(scene_settings_import_mappings(&decoded, mappings, count));
     EXPECT_NEAR(scene_settings_get(&decoded, 2, 0), 0.42f, 0.000001f);

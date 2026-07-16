@@ -574,8 +574,12 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_CONTOURS);
     float color_shift = scene_settings_get(
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_COLOR);
-    float speed_scale = scene_settings_get(
+    float drift_scale = scene_settings_get(
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_SPEED);
+    float orbit_degrees = scene_settings_get(
+        renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_ORBIT);
+    float zoom_scale = scene_settings_get(
+        renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_ZOOM);
     bool wireframe = scene_settings_get(
         renderer->settings, SCENE_SONG_ATLAS, ATLAS_SETTING_WIREFRAME) >= 0.5f;
     size_t detail_level = (size_t)lroundf(scene_settings_get(
@@ -643,7 +647,7 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
     rlSetFramebufferWidth(viewport_width);
     rlSetFramebufferHeight(viewport_height);
 
-    float journey = (float)frame->time_seconds*0.025f*speed_scale + seed_phase;
+    float journey = (float)frame->time_seconds*0.025f*drift_scale + seed_phase;
     float target_z = -5.4f;
     if (song_atlas_map_valid(renderer->song_atlas_map)) {
         float playhead = atlas_map_playhead(renderer->song_atlas_map,
@@ -665,6 +669,21 @@ static void song_atlas_draw(const void *state, const Scene_Frame *frame,
         .fovy = 49.0f + flux*2.2f,
         .projection = CAMERA_PERSPECTIVE,
     };
+
+    // Orbit rotates the vantage horizontally around the focus point; distance
+    // dollies it radially in or out. The solid terrain is z-buffered, so any
+    // azimuth reads cleanly, and orbit 0 / distance 1 leaves the framing intact.
+    float orbit = orbit_degrees*DEG2RAD;
+    float off_x = camera.position.x - camera.target.x;
+    float off_y = camera.position.y - camera.target.y;
+    float off_z = camera.position.z - camera.target.z;
+    float orbit_cos = cosf(orbit);
+    float orbit_sin = sinf(orbit);
+    camera.position.x = camera.target.x +
+                        (off_x*orbit_cos + off_z*orbit_sin)*zoom_scale;
+    camera.position.y = camera.target.y + off_y*zoom_scale;
+    camera.position.z = camera.target.z +
+                        (-off_x*orbit_sin + off_z*orbit_cos)*zoom_scale;
 
     BeginMode3D(camera);
     float viewport_aspect = (float)viewport_width/(float)viewport_height;

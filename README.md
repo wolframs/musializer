@@ -30,7 +30,8 @@ The upstream demo below remains a lovely snapshot of where it began.
   speed, creature speed, population, and habitat glass; Constellation exposes
   star density plus event reach, duration, and hue response. Song Atlas includes broad
   terrain/camera ranges, 1x-3x sampling detail, manual or music-reactive hue,
-  camera-speed controls, and Filled/Wireframe surface modes; exact values,
+  camera orbit, distance, and drift controls, and Filled/Wireframe surface
+  modes; exact values,
   numbered per-scene presets, and per-scene resets are saved with the track and
   reused by offline export.
 - Turn timed lyric words into beat-choreographed kinetic geometry with Cadence,

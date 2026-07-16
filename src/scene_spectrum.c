@@ -96,25 +96,20 @@ static void spectrum_draw(const void *state, const Scene_Frame *frame, const Sce
         };
         float radius = cell_width*3*sqrtf(end)*trail_scale;
         Vector2 origin = {0};
-        if (endPos.y >= startPos.y) {
-            Rectangle dest = {
-                .x = startPos.x - radius/2,
-                .y = startPos.y,
-                .width = radius,
-                .height = endPos.y - startPos.y
-            };
-            Rectangle source = {0, 0, 1, 0.5};
-            DrawTexturePro(texture, source, dest, origin, 0, color);
-        } else {
-            Rectangle dest = {
-                .x = endPos.x - radius/2,
-                .y = endPos.y,
-                .width = radius,
-                .height = startPos.y - endPos.y
-            };
-            Rectangle source = {0, 0.5, 1, 0.5};
-            DrawTexturePro(texture, source, dest, origin, 0, color);
-        }
+        // A soft vertical smear from the previous peak to the current one.
+        // Stretching the full radial glow (instead of slicing it at the
+        // equator) keeps both ends rounded and removes the hard bright line
+        // a half-disc otherwise leaves cutting across the head of each bar.
+        float smear_top = fminf(startPos.y, endPos.y);
+        float smear_bottom = fmaxf(startPos.y, endPos.y);
+        Rectangle dest = {
+            .x = startPos.x - radius*0.5f,
+            .y = smear_top - radius*0.5f,
+            .width = radius,
+            .height = (smear_bottom - smear_top) + radius,
+        };
+        Rectangle source = {0, 0, 1, 1};
+        DrawTexturePro(texture, source, dest, origin, 0, color);
     }
     EndShaderMode();
 
