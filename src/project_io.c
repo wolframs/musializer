@@ -1358,6 +1358,38 @@ Musi_Project_Bundle_Result musi_project_bundle_asset(
     return result;
 }
 
+Musi_Project_Bundle_Result musi_project_reference_published_asset(
+    const char *project_path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *expected_sha256,
+    char *stored_path, size_t stored_capacity,
+    char *runtime_path, size_t runtime_capacity)
+{
+    if (project_path == NULL || project_path[0] == '\0' ||
+        source_path == NULL || source_path[0] == '\0' ||
+        !project_sha256_text_valid(expected_sha256) || stored_path == NULL ||
+        stored_capacity == 0 || runtime_path == NULL || runtime_capacity == 0 ||
+        (category != MUSI_PROJECT_ASSET_AUDIO &&
+         category != MUSI_PROJECT_ASSET_IMAGE)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_ARGUMENT;
+    }
+    char *root = NULL;
+    char *child = NULL;
+    if (!project_bundle_paths(
+            project_path, category, source_path, expected_sha256,
+            stored_path, stored_capacity, runtime_path, runtime_capacity,
+            &root, &child)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_PATH;
+    }
+    free(child);
+    free(root);
+    if (!project_regular_file_exists(source_path) ||
+        !project_regular_file_exists(runtime_path) ||
+        !musi_project_existing_files_alias(source_path, runtime_path)) {
+        return MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+    }
+    return MUSI_PROJECT_BUNDLE_OK;
+}
+
 const char *musi_project_bundle_result_string(Musi_Project_Bundle_Result result)
 {
     static const char *names[] = {

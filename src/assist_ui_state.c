@@ -61,6 +61,10 @@ Assist_Panel_Content assist_panel_content(Assist_Job_State job_state,
         job_state == ASSIST_JOB_FAILING) return ASSIST_PANEL_CANCELLING;
     if (job_state == ASSIST_JOB_RUNNING) return ASSIST_PANEL_RUNNING;
     if (confirmation_pending) return ASSIST_PANEL_CONFIRMATION;
+    if (job_state == ASSIST_JOB_SUCCEEDED || job_state == ASSIST_JOB_FAILED ||
+        job_state == ASSIST_JOB_CANCELLED || job_state == ASSIST_JOB_TIMED_OUT) {
+        return ASSIST_PANEL_EMPTY;
+    }
     return ASSIST_PANEL_READY;
 }
 
@@ -132,6 +136,28 @@ const char *assist_mode_data_boundary(Assist_Mode mode)
     return "";
 }
 
+const char *assist_mode_empty_result(Assist_Mode mode)
+{
+    switch (mode) {
+    case ASSIST_MODE_LYRICS:
+        return "Whisper and Codex produced no validated lyric cues. Existing lyrics were left unchanged.";
+    case ASSIST_MODE_SECTIONS:
+        return "Measured analysis produced no validated scene changes. Existing cues were left unchanged.";
+    case ASSIST_MODE_MIMO:
+        return "MiMo produced no validated feeling cues. Existing semantic events were left unchanged.";
+    case ASSIST_MODE_ALL:
+        return "The completed workflow produced no validated editor changes. Existing content was left unchanged.";
+    case ASSIST_MODE_COUNT: break;
+    }
+    return "The completed workflow produced no validated editor changes.";
+}
+
+bool assist_result_has_changes(uint32_t authorized_lanes,
+                               uint32_t available_lanes)
+{
+    return (authorized_lanes & available_lanes) != 0;
+}
+
 bool assist_candidate_conflicts_with_lyric_draft(bool replaces_lyrics,
                                                  bool targets_active_track,
                                                  bool draft_is_dirty)
@@ -159,6 +185,7 @@ Assist_Ui_Layout assist_ui_layout(float panel_width,
     case ASSIST_PANEL_RUNNING: content_height = 84.0f; break;
     case ASSIST_PANEL_CANCELLING: content_height = 44.0f; break;
     case ASSIST_PANEL_CANDIDATE: content_height = 118.0f; break;
+    case ASSIST_PANEL_EMPTY: content_height = 84.0f; break;
     }
     layout.required_height = layout.content_y + content_height + 10.0f;
     return layout;

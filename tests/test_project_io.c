@@ -580,6 +580,19 @@ TEST(project_io_bundles_content_addressed_assets_and_rejects_escape_or_collision
         project_path, MUSI_PROJECT_ASSET_AUDIO, source, identity,
         stored, sizeof(stored), runtime, sizeof(runtime)) ==
         MUSI_PROJECT_BUNDLE_OK);
+    EXPECT_TRUE(musi_project_reference_published_asset(
+        project_path, MUSI_PROJECT_ASSET_AUDIO, runtime, identity,
+        stored, sizeof(stored), resolved, sizeof(resolved)) ==
+        MUSI_PROJECT_BUNDLE_OK);
+    EXPECT_TRUE(musi_project_existing_files_alias(runtime, resolved));
+
+    char other_project[384];
+    snprintf(other_project, sizeof(other_project), "%s/other.musi",
+             project_directory);
+    EXPECT_TRUE(musi_project_reference_published_asset(
+        other_project, MUSI_PROJECT_ASSET_AUDIO, runtime, identity,
+        stored, sizeof(stored), resolved, sizeof(resolved)) ==
+        MUSI_PROJECT_BUNDLE_ERROR_SOURCE);
 
     char escape[512];
     snprintf(escape, sizeof(escape), "%s/show.assets/audio/escape.mp3",

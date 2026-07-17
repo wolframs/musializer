@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define ASSIST_JOB_TIMEOUT_SECONDS 2400.0
 
@@ -39,6 +40,7 @@ typedef enum Assist_Panel_Content {
     ASSIST_PANEL_RUNNING,
     ASSIST_PANEL_CANCELLING,
     ASSIST_PANEL_CANDIDATE,
+    ASSIST_PANEL_EMPTY,
 } Assist_Panel_Content;
 
 typedef struct Assist_Ui_Layout {
@@ -71,6 +73,13 @@ const char *assist_mode_argument(Assist_Mode mode);
 const char *assist_mode_badge(Assist_Mode mode);
 const char *assist_mode_workflow(Assist_Mode mode);
 const char *assist_mode_data_boundary(Assist_Mode mode);
+const char *assist_mode_empty_result(Assist_Mode mode);
+
+// A completed helper is applyable only when it produced at least one lane the
+// selected workflow was authorized to replace. Empty validated results are a
+// truthful terminal outcome, not a staged no-op.
+bool assist_result_has_changes(uint32_t authorized_lanes,
+                               uint32_t available_lanes);
 
 // A staged lyric replacement must never clear an authored draft implicitly.
 bool assist_candidate_conflicts_with_lyric_draft(bool replaces_lyrics,

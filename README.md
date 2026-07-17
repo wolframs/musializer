@@ -163,6 +163,9 @@ The normal workflow is:
    interpretation, or the complete pipeline. Selecting a workflow first shows
    its local/remote data boundary. Results are validated and staged with a
    lane-specific impact summary, then require an explicit Apply confirmation.
+   A valid run with no suggestions is reported as **No editor changes found**
+   and cannot be applied as a misleading no-op. **Copy result**, **Copy log**,
+   and **Copy folder** keep the immutable job evidence reachable from the panel.
 5. Inspect generated section markers and enable **Auto scenes** if they should
    drive both preview and export. To author a scene change manually, position
    the playhead, select and tune the scene, then choose **+ Scene**. The cue
@@ -180,6 +183,9 @@ The normal workflow is:
 Canonical edits autosave after a short idle period. Unapplied lyric drafts,
 staged assistance, running jobs, active exports, and unsaved projects are
 guarded before context changes or quit, so partial work is not silently lost.
+Metadata-only autosaves reuse assets that this process already hash-verified
+and published into the project's content-addressed bundle; explicit Save and
+Save As continue to reverify the full asset content.
 Notices use distinct info/success/warning/error colors, wrap their detail text,
 show hidden queue depth, and let actionable Assist failures reopen the review
 step or copy the immutable artifact/log path.
@@ -350,9 +356,11 @@ finishes, making them suitable for scripts and smoke tests.
 track. The engine first fast-forwards analysis, beat tracking, and scene
 state through the preceding frames exactly as a full export would, so the
 windowed frames match the same span of a full render; only the drawing and
-encoding are skipped. The output MP4 carries exactly the window's audio
-slice, the window clamps to the end of the track, and a start at or past
-the track end fails before any file is touched.
+encoding are skipped. Fractional boundaries expand to the containing video
+frames so the requested interval is completely covered rather than losing its
+tail; the decoded audio slice uses those same frame boundaries. The window
+clamps to the end of the track, and a start at or past the track end fails
+before any file is touched.
 
 `--analysis-bridge` checks the bridge audio SHA-256 before importing lyric,
 semantic, or scene lanes. `--auto-scenes` opts into its section recommendations

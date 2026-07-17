@@ -1292,6 +1292,41 @@ static bool find_assist_helper(char *path, size_t capacity)
     return length > 0 && (size_t)length < capacity && FileExists(path);
 }
 
+static void draw_assist_artifact_actions(float x, float y, float gap)
+{
+    struct Artifact_Action {
+        const char *label;
+        const char *path;
+        float width;
+        uint64_t id;
+    } actions[] = {
+        {"Copy result", p->assist_bridge_path, 98.0f,
+         UINT64_C(0x4153534953545253)},
+        {"Copy log", p->assist_log_path, 86.0f,
+         UINT64_C(0x4153534953544C47)},
+        {"Copy folder", p->assist_output_dir, 98.0f,
+         UINT64_C(0x4153534953544644)},
+    };
+    for (size_t i = 0; i < NOB_ARRAY_LEN(actions); ++i) {
+        const char *path = actions[i].path;
+        bool available = path != NULL && path[0] != '\0' &&
+            (i == 2 ? DirectoryExists(path) : FileExists(path));
+        Rectangle button = {x, y, actions[i].width, UI_BUTTON_HEIGHT};
+        if (available) {
+            if (text_button(actions[i].id, button, actions[i].label, false) &
+                BS_CLICKED) {
+                SetClipboardText(path);
+            }
+            tooltip(button, path, SIDE_BOTTOM, false);
+        } else {
+            disabled_text_button(button, actions[i].label, false);
+            tooltip(button, "This job did not produce that artifact.",
+                    SIDE_BOTTOM, false);
+        }
+        x += actions[i].width + gap;
+    }
+}
+
 static void draw_assist_panel(Rectangle boundary, Track *track)
 {
     const Color signal = COLOR_ACCENT;
@@ -1439,13 +1474,17 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                  "The helper exited before producing a validated result.",
                  p->assist_log_path[0] != '\0' ? "  |  Log: " : "",
                  p->assist_log_path[0] != '\0' ? GetFileName(p->assist_log_path) : "");
+    } else if (p->assist_job_state == ASSIST_JOB_SUCCEEDED) {
+        snprintf(status, sizeof(status),
+                 "%s completed  |  No editor changes found",
+                 assist_mode_display_name(p->assist_mode));
     } else {
         snprintf(status, sizeof(status),
                  "Ready  |  Select a workflow to review its data boundary");
     }
     Color status_color = p->assist_job_state == ASSIST_JOB_FAILED ? COLOR_UI_DANGER :
-                         p->assist_job_state == ASSIST_JOB_SUCCEEDED ||
                          p->assist_candidate != NULL ? COLOR_UI_SUCCESS :
+                         p->assist_job_state == ASSIST_JOB_SUCCEEDED ? COLOR_UI_WARNING :
                          p->assist_confirmation_pending ? COLOR_UI_WARNING :
                          active ? signal : COLOR_UI_INK;
     DrawTextEx(ui_font(), status, (Vector2){boundary.x + padding, status_y},
@@ -1595,6 +1634,23 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                        (Vector2){discard.x + discard.width + gap, discard.y + 10.0f},
                        13.0f, 1.0f, COLOR_ACCENT);
         }
+        draw_assist_artifact_actions(discard.x + discard.width + gap,
+                                     apply.y, gap);
+    } else if (p->assist_job_state == ASSIST_JOB_SUCCEEDED) {
+        DrawTextEx(ui_font(), assist_mode_empty_result(p->assist_mode),
+                   (Vector2){boundary.x + padding, action_y},
+                   14.0f, 1.0f, COLOR_UI_INK);
+        draw_assist_artifact_actions(boundary.x + padding,
+                                     action_y + 34.0f, gap);
+    } else if (p->assist_job_state == ASSIST_JOB_FAILED ||
+               p->assist_job_state == ASSIST_JOB_CANCELLED ||
+               p->assist_job_state == ASSIST_JOB_TIMED_OUT) {
+        DrawTextEx(ui_font(),
+                   "Job artifacts remain available for diagnosis and support.",
+                   (Vector2){boundary.x + padding, action_y},
+                   14.0f, 1.0f, COLOR_UI_MUTED);
+        draw_assist_artifact_actions(boundary.x + padding,
+                                     action_y + 34.0f, gap);
     }
     EndScissorMode();
 }
@@ -1721,12 +1777,14 @@ static void seek_track_to(Track *track, double seconds)
     StopMusicStream(track->music);
     SeekMusicStream(track->music, (float)target);
     UpdateMusicStream(track->music);
-    PlayMusicStream(track->music);
-    if (!was_playing) PauseMusicStream(track->music);
+    // The audio callback is the sample-ring producer. Reset the analyzer while
+    // the stream is stopped, before PlayMusicStream can resume that producer.
     fft_clean();
     p->scene_clock_initialized = false;
     scene_switch_reset(&track->scene_switches);
     track->cue_settings_active = false;
+    PlayMusicStream(track->music);
+    if (!was_playing) PauseMusicStream(track->music);
 }
 
 static void seek_track_by(Track *track, double delta_seconds)
@@ -2567,6 +2625,14 @@ MUSIALIZER_PLUG bool plug_load_analysis_bridge(const char *file_path)
     Analysis_Candidate *candidate = load_analysis_candidate_for_track(
         file_path, (size_t)p->current_track, ASSIST_MODE_ALL);
     if (candidate == NULL) return false;
+    if (!assist_result_has_changes(ANALYSIS_CANDIDATE_ALL,
+                                   candidate->available_lanes)) {
+        notice_push(UI_NOTICE_INFO, "Analysis bridge contains no editor changes",
+                    "Lyrics, scenes, and semantic events were left unchanged.",
+                    file_path, false);
+        free(candidate);
+        return false;
+    }
     Track *track = current_track();
     Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES];
     size_t staged_count = 0;
@@ -2781,6 +2847,18 @@ static void poll_assist_job(void)
         p->assist_bridge_path, p->assist_track_index, p->assist_mode);
     if (candidate == NULL) {
         p->assist_job_state = ASSIST_JOB_FAILED;
+        return;
+    }
+    if (!assist_result_has_changes(assist_mode_lanes(p->assist_mode),
+                                   candidate->available_lanes)) {
+        free(candidate);
+        p->assist_apply_confirmation_pending = false;
+        p->assist_job_state = ASSIST_JOB_SUCCEEDED;
+        TraceLog(LOG_INFO, "ASSIST: completed without editor changes; result: %s",
+                 p->assist_bridge_path);
+        notice_push(UI_NOTICE_INFO, "No analysis changes found",
+                    assist_mode_empty_result(p->assist_mode),
+                    p->assist_bridge_path, false);
         return;
     }
     free(p->assist_candidate);
@@ -3032,7 +3110,9 @@ static bool build_project(Track *track, const char *project_path,
     return musi_project_validate(project).error == MUSI_PROJECT_VALID;
 }
 
-static bool save_project_to_path(Track *track, const char *path, bool show_success)
+static bool save_project_to_path(Track *track, const char *path,
+                                 bool show_success,
+                                 bool reuse_published_assets)
 {
     if (track == NULL || path == NULL || path[0] == '\0') return false;
     if (strlen(path) >= sizeof(track->project_path)) {
@@ -3057,9 +3137,19 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
         !sha256_file_hex(track->file_path, track->audio_sha256)) return false;
     char stored_audio[MUSI_PROJECT_PATH_CAPACITY];
     char bundled_audio[PLUG_RELOAD_PATH_CAPACITY];
-    Musi_Project_Bundle_Result audio_bundle = musi_project_bundle_asset(
-        path, MUSI_PROJECT_ASSET_AUDIO, track->file_path, track->audio_sha256,
-        stored_audio, sizeof(stored_audio), bundled_audio, sizeof(bundled_audio));
+    Musi_Project_Bundle_Result audio_bundle = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+    if (reuse_published_assets) {
+        audio_bundle = musi_project_reference_published_asset(
+            path, MUSI_PROJECT_ASSET_AUDIO, track->file_path,
+            track->audio_sha256, stored_audio, sizeof(stored_audio),
+            bundled_audio, sizeof(bundled_audio));
+    }
+    if (audio_bundle != MUSI_PROJECT_BUNDLE_OK) {
+        audio_bundle = musi_project_bundle_asset(
+            path, MUSI_PROJECT_ASSET_AUDIO, track->file_path,
+            track->audio_sha256, stored_audio, sizeof(stored_audio),
+            bundled_audio, sizeof(bundled_audio));
+    }
     if (audio_bundle != MUSI_PROJECT_BUNDLE_OK) {
         notice_push(UI_NOTICE_ERROR, "Project audio could not be bundled",
                     musi_project_bundle_result_string(audio_bundle), path, true);
@@ -3068,10 +3158,19 @@ static bool save_project_to_path(Track *track, const char *path, bool show_succe
     char stored_image[MUSI_PROJECT_PATH_CAPACITY] = {0};
     char bundled_image[PLUG_RELOAD_PATH_CAPACITY] = {0};
     if (ascii_art_grid_is_populated(track->ascii_columns, track->ascii_rows)) {
-        Musi_Project_Bundle_Result image_bundle = musi_project_bundle_asset(
-            path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
-            track->ascii_image_sha256, stored_image, sizeof(stored_image),
-            bundled_image, sizeof(bundled_image));
+        Musi_Project_Bundle_Result image_bundle = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+        if (reuse_published_assets) {
+            image_bundle = musi_project_reference_published_asset(
+                path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
+                track->ascii_image_sha256, stored_image, sizeof(stored_image),
+                bundled_image, sizeof(bundled_image));
+        }
+        if (image_bundle != MUSI_PROJECT_BUNDLE_OK) {
+            image_bundle = musi_project_bundle_asset(
+                path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
+                track->ascii_image_sha256, stored_image, sizeof(stored_image),
+                bundled_image, sizeof(bundled_image));
+        }
         if (image_bundle != MUSI_PROJECT_BUNDLE_OK) {
             notice_push(UI_NOTICE_ERROR, "ASCII image could not be bundled",
                         musi_project_bundle_result_string(image_bundle), path, true);
@@ -3177,14 +3276,14 @@ static bool save_project_as(Track *track)
                                        NOB_ARRAY_LEN(filters), filters,
                                        "Musializer project");
     if (path == NULL) return false;
-    return save_project_to_path(track, path, true);
+    return save_project_to_path(track, path, true, false);
 }
 
 static bool save_project(Track *track, bool show_success)
 {
     if (track == NULL) return false;
     if (track->project_path[0] == '\0') return show_success ? save_project_as(track) : false;
-    return save_project_to_path(track, track->project_path, show_success);
+    return save_project_to_path(track, track->project_path, show_success, false);
 }
 
 static bool project_open_allowed(void)
@@ -3530,7 +3629,7 @@ MUSIALIZER_PLUG bool plug_load_project(const char *file_path)
 
 MUSIALIZER_PLUG bool plug_save_project(const char *file_path)
 {
-    return save_project_to_path(current_track(), file_path, false);
+    return save_project_to_path(current_track(), file_path, false, false);
 }
 
 static void poll_project_autosave(Track *track)
@@ -3539,7 +3638,9 @@ static void poll_project_autosave(Track *track)
         !track->project_dirty || track->project_autosave_failed ||
         (track == current_track() && lyric_editor_has_unsaved_draft(track)) ||
         GetTime() - track->project_dirty_since < 1.5) return;
-    if (!save_project(track, false)) track->project_autosave_failed = true;
+    if (!save_project_to_path(track, track->project_path, false, true)) {
+        track->project_autosave_failed = true;
+    }
 }
 
 static int button_with_location(const char *file, int line, Rectangle boundary)
@@ -5415,6 +5516,11 @@ static void draw_fullscreen_assist_status(Rectangle preview_boundary)
         message = status;
     } else if (p->assist_panel_open && p->assist_job_state == ASSIST_JOB_FAILED) {
         snprintf(status, sizeof(status), "Assist failed  |  F to inspect the job log");
+        message = status;
+    } else if (p->assist_panel_open &&
+               p->assist_job_state == ASSIST_JOB_SUCCEEDED) {
+        snprintf(status, sizeof(status),
+                 "Assist found no editor changes  |  F to inspect artifacts");
         message = status;
     }
     if (message == NULL || preview_boundary.width < 320.0f) return;

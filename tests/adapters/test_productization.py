@@ -106,8 +106,8 @@ class DistributionManifestTests(unittest.TestCase):
             "StopMusicStream(track->music)",
             "SeekMusicStream(track->music",
             "UpdateMusicStream(track->music)",
-            "PlayMusicStream(track->music)",
             "fft_clean()",
+            "PlayMusicStream(track->music)",
         ]
         positions = [seek_body.index(token) for token in ordered]
         self.assertEqual(positions, sorted(positions))
@@ -143,6 +143,9 @@ class DistributionManifestTests(unittest.TestCase):
         save_end = plug.index("static bool save_project_as(", save_start)
         save = plug[save_start:save_end]
         self.assertGreaterEqual(save.count("musi_project_bundle_asset("), 2)
+        self.assertGreaterEqual(
+            save.count("musi_project_reference_published_asset("), 2
+        )
         self.assertLess(
             save.index("musi_project_bundle_asset("),
             save.index("musi_project_atomic_write("),
@@ -150,6 +153,14 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertNotIn("not project-portable yet", save)
         self.assertIn("MUSI_ASSET_IMPORTED", plug)
         self.assertIn("musi_project_resolve_bundled_asset_path", plug)
+
+        autosave_start = plug.index("static void poll_project_autosave(")
+        autosave_end = plug.index("static int button_with_location", autosave_start)
+        autosave = plug[autosave_start:autosave_end]
+        self.assertIn(
+            "save_project_to_path(track, track->project_path, false, true)",
+            autosave,
+        )
 
     def test_assist_state_policy_is_wired_into_every_product_target(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
@@ -160,6 +171,10 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn("assist_start_block(", plug)
         self.assertIn("disabled_text_button(", plug)
         self.assertIn("p->assist_confirmation_pending = true", plug)
+        self.assertIn("assist_result_has_changes(", plug)
+        self.assertIn('"Copy result"', plug)
+        self.assertIn('"Copy log"', plug)
+        self.assertIn('"Copy folder"', plug)
         self.assertIn("ASSIST_JOB_CANCELLING", plug)
         self.assertIn("request_assist_job_cancel();", plug)
         self.assertIn("draw_fullscreen_assist_status(preview_boundary);", plug)

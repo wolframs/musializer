@@ -15,9 +15,12 @@ import hashlib
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -61,6 +64,133 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 DIAGNOSTIC_TAIL_LIMIT = 16384
 
 
+class _BoundedTail:
+    """Continuously drained child output with a strict in-memory byte bound."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.data = bytearray()
+
+    def append(self, chunk: bytes) -> None:
+        self.data.extend(chunk)
+        overflow = len(self.data) - self.limit
+        if overflow > 0:
+            del self.data[:overflow]
+
+    def text(self) -> str:
+        return bytes(self.data).decode("utf-8", "replace")
+
+
+def _drain_child_stream(stream: Any, tail: _BoundedTail) -> None:
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            tail.append(chunk)
+    finally:
+        stream.close()
+
+
+def _write_child_stdin(stream: Any, content: str) -> None:
+    try:
+        stream.write(content.encode("utf-8"))
+        stream.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        stream.close()
+
+
+def _terminate_child_tree(process: subprocess.Popen[bytes]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _terminate_remaining_posix_group(process: subprocess.Popen[bytes]) -> None:
+    if os.name != "posix":
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _join_workers_bounded(workers: Sequence[threading.Thread],
+                          timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
+
+
+def _run_bounded_process(
+    argv: Sequence[str], *, timeout: float, stdin: str | None,
+    cwd: Path | None, env: dict[str, str] | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a real child while draining stdout/stderr into bounded tails."""
+    options: dict[str, Any] = {
+        "stdin": subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "cwd": str(cwd) if cwd else None,
+        "env": env,
+    }
+    if os.name == "posix":
+        options["start_new_session"] = True
+    elif os.name == "nt":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(list(argv), **options)
+    assert process.stdout is not None and process.stderr is not None
+    stdout_tail = _BoundedTail(DIAGNOSTIC_TAIL_LIMIT)
+    stderr_tail = _BoundedTail(DIAGNOSTIC_TAIL_LIMIT)
+    readers = [
+        threading.Thread(target=_drain_child_stream,
+                         args=(process.stdout, stdout_tail), daemon=True),
+        threading.Thread(target=_drain_child_stream,
+                         args=(process.stderr, stderr_tail), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    writer: threading.Thread | None = None
+    if stdin is not None:
+        assert process.stdin is not None
+        writer = threading.Thread(target=_write_child_stdin,
+                                  args=(process.stdin, stdin), daemon=True)
+        writer.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _terminate_child_tree(process)
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+        _join_workers_bounded([*([] if writer is None else [writer]), *readers])
+        raise subprocess.TimeoutExpired(
+            list(argv), timeout, output=stdout_tail.text(),
+            stderr=stderr_tail.text(),
+        ) from error
+    # A command is not allowed to report success while leaving descendants
+    # behind. On POSIX each child owns a private process group, so any process
+    # still holding the capture pipes after the direct child exits is stopped.
+    # Windows descendants remain inside the desktop worker's Job Object; the
+    # bounded joins let the root helper exit so the C host can verify/close it.
+    _terminate_remaining_posix_group(process)
+    _join_workers_bounded([*([] if writer is None else [writer]), *readers])
+    return subprocess.CompletedProcess(
+        list(argv), returncode, stdout_tail.text(), stderr_tail.text())
+
+
 def _write_diagnostic(sink: Path, name: str, detail: str,
                       stdout: str | None, stderr: str | None) -> bool:
     """Persist a bounded child-output tail beside the other job artifacts.
@@ -90,11 +220,16 @@ def _run(
         raise AnalysisValidationError("external command and positive finite timeout are required")
     name = Path(argv[0]).name
     try:
-        result = runner(
-            list(argv), input=stdin, text=True, capture_output=True,
-            timeout=timeout, check=False, cwd=str(cwd) if cwd else None,
-            env=env,
-        )
+        if runner is subprocess.run:
+            result = _run_bounded_process(
+                argv, timeout=timeout, stdin=stdin, cwd=cwd, env=env)
+        else:
+            # Injected runners are used only by deterministic offline tests.
+            result = runner(
+                list(argv), input=stdin, text=True, capture_output=True,
+                timeout=timeout, check=False, cwd=str(cwd) if cwd else None,
+                env=env,
+            )
     except subprocess.TimeoutExpired as error:
         detail = f"exceeded its {timeout:g}s timeout"
         out = error.stdout.decode("utf-8", "replace") if isinstance(error.stdout, bytes) else error.stdout
@@ -1013,6 +1148,11 @@ def run_assist(
             "measured_audio", *( ["lyrics", "lyric_review"] if lyrics else [] ),
             *( [semantic.get("lane")] if semantic else [] ), "scene_plan",
         ],
+        "result_counts": {
+            "lyrics": len(lyrics.get("lines", [])) if lyrics else 0,
+            "sections": len(plan.get("sections", [])),
+            "semantics": len(semantic.get("segments", [])) if semantic else 0,
+        },
     }
     atomic_write_json(paths["manifest"], manifest)
     return manifest
@@ -1097,6 +1237,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 if args.request_dump: atomic_write_json(args.request_dump, result)
                 else: print(json.dumps(result, indent=2))
+            else:
+                counts = result["result_counts"]
+                print(
+                    "External analysis completed: "
+                    f"{counts['lyrics']} lyric cues, "
+                    f"{counts['sections']} scene sections, and "
+                    f"{counts['semantics']} semantic cues. "
+                    "The manifest, bridge, and evidence remain in the job folder.",
+                    file=sys.stderr,
+                )
         else:
             plan = build_scene_plan(
                 args.measured, lyrics_path=args.lyrics, semantic_path=args.semantic,

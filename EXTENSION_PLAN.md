@@ -7,12 +7,15 @@
 
 ## Current status
 
-- **Last updated:** 2026-07-14, Europe/Berlin.
-- **Active milestone:** M3 render-product hardening and reusable visual layers.
-- **Next vertical slice:** a layered render graph with reusable post-processing,
-  followed by bounded asynchronous readback/encoding and a semantic-lane
-  inspector. The `.musi` v1 workspace, lyric editor, assistance staging, and
-  configurable transactional MP4 export are implemented.
+- **Last updated:** 2026-07-17, Europe/Berlin.
+- **Active milestone:** M3 render-product hardening, reusable visual layers,
+  and decomposition of the application composition root.
+- **Next vertical slice:** finish the dependency-ordered `plug.c` split around
+  project workflow, render control, and Assist, then proceed to a layered render
+  graph with reusable post-processing and bounded asynchronous
+  readback/encoding. The `.musi` v1 workspace, extracted lyric editor,
+  assistance staging, full-track UI export, and deterministic windowed CLI
+  export are implemented.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
 - **Remotes:** `origin` is the private Forgejo repository,
@@ -21,7 +24,10 @@
   Forgejo; do not push feature work to `upstream` unintentionally.
 - **Build status:** Linux release, debug, sanitizer, hot-reload, distribution,
   launcher, doctor, and real FFmpeg render checks pass on this machine.
-  Generated artifacts remain ignored under `build/`.
+  The 2026-07-17 correctness pass reran 176/176 C tests across debug, release,
+  and ASan/UBSan; 82/82 Python adapter/product tests; and a real fractional
+  full-versus-windowed FFmpeg render. Generated artifacts remain ignored under
+  `build/`.
 - **Tracked planning/security changes:** `.gitignore`, `.env.example`, and this
   document. The real `.env` is intentionally untracked.
 
@@ -500,7 +506,9 @@ M2 acceptance gate:
   shared 3D viewport/camera path; reusable resource and fixed-step layers remain.
 - [ ] Add layered render targets and OpenGL 3.3-compatible post/feedback passes.
 - [x] Make export resolution, FPS, and quality durable project/render settings.
-- [ ] Add an explicit bounded render range to the project and export UI.
+- [ ] Add an explicit bounded render range to the project and export UI. The
+  deterministic `--render-window START DURATION` CLI surface is implemented;
+  persistence and interactive range authoring remain.
 - [ ] Add bounded asynchronous GPU readback/FFmpeg writing. Complete-write,
   cancellation, child cleanup, and error propagation are hardened; readback and
   encoding are still synchronous.
@@ -953,6 +961,26 @@ failure-path test.
   Loom exports had matching decoded-frame hashes, and representative frames
   from all nine scenes were visually inspected together.
 
+### 2026-07-16 - Visual corrections and composition-root decomposition
+
+- Corrected three review-driven scene problems without weakening deterministic
+  playback/export parity: Spectrum's sliced additive glow, Orbital Lattice's
+  over-damped motion, and Song Atlas's ineffective camera-speed control. The
+  latter two now expose bounded renderer-backed motion and camera controls.
+- Began the dependency-ordered `plug.c` split. Shared theme/widget primitives,
+  notice and text helpers, internal `Track`/`Tracks` state, and the complete
+  lyrics editor moved into explicit modules whose mutable state remains embedded
+  in `Plug` for hot-reload handoff. `scene_stable_name` moved to the scene
+  registry instead of remaining UI-owned. `plug.c` is now 6,479 lines, down
+  from the 7,148-line baseline; project workflow, render control, Assist,
+  transport, and scene-settings extraction remain.
+- Pinned the supported Codex structured-output schema subset and bounded child
+  diagnostics so lyric-review failures remain inspectable without allowing
+  unbounded or misplaced subprocess output.
+- Reorientation validation on 2026-07-17 passed 175/175 debug C tests and the
+  complete 79/79 Python adapter/product suite, including the real FFmpeg
+  full-versus-windowed render smoke.
+
 ### 2026-07-16 - Pentagram Orbits: the Lyness map as scene ten
 
 - Added Pentagram Orbits, a phase-portrait scene built on the Lyness
@@ -993,12 +1021,13 @@ failure-path test.
   frame before the window (240 frames per UI tick, no drawing or encoding),
   then draws and encodes only the window. Windowed frames are therefore the
   same deterministic frames a full export produces for that span; FFmpeg
-  receives exactly the window's decoded-audio slice, and the `-t` cap uses
-  the window frame count.
+  receives exactly the frame-enclosing decoded-audio slice, and the `-t` cap
+  uses the window frame count.
 - The frame mapping lives in `render_export_window_frames`: the start floors
-  to the containing frame, the span rounds up so sub-frame durations render
-  one frame, the end clamps to the timeline, and non-finite or out-of-range
-  windows fail with a dedicated error before any staging file is created.
+  to its containing frame and the absolute requested end rounds up to its
+  containing boundary, so fractional starts cannot omit the requested tail.
+  The end clamps to the timeline, and non-finite or out-of-range windows fail
+  with a dedicated error before any staging file is created.
   Unit tests pin the boundary cases; a product smoke test renders a full and
   a windowed export of the same synthesized audio and requires matching
   frame counts, an exact audio duration, and a minimum PSNR of 35 dB against
@@ -1009,6 +1038,30 @@ failure-path test.
   the full export with no drift across the window, confirming fast-forward
   state parity. UI-side export remains full-track; the window is a CLI
   surface for section previews and automation.
+
+### 2026-07-17 - Review-driven correctness and diagnostics hardening
+
+- Made a validated Assist run with zero authorized lanes a first-class empty
+  outcome. It is no longer staged or applyable, preserves all editor content,
+  explains the selected workflow's result, and keeps Copy result, Copy log, and
+  Copy folder actions visible across terminal job states. Successful job logs
+  now contain privacy-safe lane counts, with matching counts in the manifest.
+- Replaced production `capture_output` child execution with continuously
+  drained 16 KiB stdout/stderr tails and process-group cleanup after timeout or
+  direct-child exit, bounding diagnostic memory, preventing leaked descendants,
+  and preserving private failure detail only in the per-job artifact directory.
+- Removed full-song hashing from metadata autosave by referencing only bundle
+  objects already verified and published by the current process. Explicit Save
+  and Save As retain full hash verification and collision checks.
+- Reset the callback-fed sample ring while the preview stream is stopped during
+  seeks, restoring the SPSC reset invariant before playback resumes.
+- Changed fractional render windows to enclose both requested boundaries; the
+  end is now `ceil((start + duration) * fps)` rather than a duration added to a
+  floored start, preventing the requested tail frame from being omitted.
+- Validation passed 176/176 C tests in debug, release, and ASan/UBSan; 82/82
+  Python adapter/product tests; debug, release, sanitizer, and hot-reload
+  application builds; and a real 24 fps fractional-window render whose 13
+  frames matched frames 26-38 of the full stateful-scene export.
 
 ## Milestones
 

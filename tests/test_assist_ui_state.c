@@ -40,6 +40,12 @@ TEST(assist_panel_content_precedence_matches_the_job_lifecycle)
                 ASSIST_PANEL_CANCELLING);
     EXPECT_TRUE(assist_panel_content(ASSIST_JOB_RUNNING, true, true) ==
                 ASSIST_PANEL_CANDIDATE);
+    EXPECT_TRUE(assist_panel_content(ASSIST_JOB_SUCCEEDED, false, false) ==
+                ASSIST_PANEL_EMPTY);
+    EXPECT_TRUE(assist_panel_content(ASSIST_JOB_FAILED, false, false) ==
+                ASSIST_PANEL_EMPTY);
+    EXPECT_TRUE(assist_panel_content(ASSIST_JOB_TIMED_OUT, false, false) ==
+                ASSIST_PANEL_EMPTY);
 }
 
 TEST(assist_deadline_is_job_wide_monotonic_and_exact)
@@ -76,6 +82,10 @@ TEST(assist_modes_expose_real_workflow_and_data_boundary_copy)
                        "OpenRouter") != NULL);
     EXPECT_TRUE(strstr(assist_mode_data_boundary(ASSIST_MODE_LYRICS),
                        "Codex") != NULL);
+    EXPECT_TRUE(strstr(assist_mode_empty_result(ASSIST_MODE_LYRICS),
+                       "no validated lyric cues") != NULL);
+    EXPECT_TRUE(strstr(assist_mode_empty_result(ASSIST_MODE_ALL),
+                       "no validated editor changes") != NULL);
 }
 
 TEST(assist_layout_fits_supported_small_and_large_windows)
@@ -113,4 +123,12 @@ TEST(assist_never_replaces_an_active_authored_lyric_draft)
     EXPECT_FALSE(assist_candidate_conflicts_with_lyric_draft(false, true, true));
     EXPECT_FALSE(assist_candidate_conflicts_with_lyric_draft(true, false, true));
     EXPECT_FALSE(assist_candidate_conflicts_with_lyric_draft(true, true, false));
+}
+
+TEST(assist_empty_results_are_not_applyable_candidates)
+{
+    EXPECT_FALSE(assist_result_has_changes(1u, 0u));
+    EXPECT_FALSE(assist_result_has_changes(1u, 2u));
+    EXPECT_TRUE(assist_result_has_changes(1u, 1u));
+    EXPECT_TRUE(assist_result_has_changes(7u, 4u));
 }

@@ -130,5 +130,16 @@ Musi_Project_Bundle_Result musi_project_bundle_asset(
     const char *source_path, const char *expected_sha256,
     char *stored_path, size_t stored_capacity,
     char *runtime_path, size_t runtime_capacity);
+
+// Reconstructs the content-addressed paths and accepts them only when
+// source_path identifies that already-published object. This deliberately does
+// no content read: callers may use it only for metadata autosaves after this
+// process has successfully hash-verified and published the same asset. Explicit
+// saves and first publication must use musi_project_bundle_asset().
+Musi_Project_Bundle_Result musi_project_reference_published_asset(
+    const char *project_path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *expected_sha256,
+    char *stored_path, size_t stored_capacity,
+    char *runtime_path, size_t runtime_capacity);
 const char *musi_project_bundle_result_string(Musi_Project_Bundle_Result result);
 #endif

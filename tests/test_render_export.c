@@ -146,11 +146,19 @@ TEST(render_export_window_maps_to_exact_frames_and_clamps)
     EXPECT_EQ_U64(start, 840);
     EXPECT_EQ_U64(end, 1320);
 
-    // A start inside a frame floors to the frame containing it.
+    // A start inside a frame floors to the containing frame, and the end
+    // encloses the complete requested interval instead of dropping its tail.
     REQUIRE_TRUE(render_export_window_frames(240, 24, 0.1, 1.0, &start, &end) ==
                  RENDER_EXPORT_OK);
     EXPECT_EQ_U64(start, 2);
-    EXPECT_EQ_U64(end, 26);
+    EXPECT_EQ_U64(end, 27);
+
+    // Crossing both frame boundaries by a fraction includes both frames.
+    REQUIRE_TRUE(render_export_window_frames(
+                     240, 24, 1.0/24.0 + 1.0e-9, 1.0/24.0,
+                     &start, &end) == RENDER_EXPORT_OK);
+    EXPECT_EQ_U64(start, 1);
+    EXPECT_EQ_U64(end, 3);
 
     // A sub-frame duration still renders one whole frame.
     REQUIRE_TRUE(render_export_window_frames(240, 24, 1.0, 0.001, &start, &end) ==

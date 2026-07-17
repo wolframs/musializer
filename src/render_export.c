@@ -166,12 +166,17 @@ Render_Export_Result render_export_window_frames(uint64_t total_frames,
     double start_position = start_seconds*(double)fps;
     if (!(start_position < (double)total_frames)) return RENDER_EXPORT_ERROR_WINDOW;
     uint64_t start = (uint64_t)start_position;
-    uint64_t remaining = total_frames - start;
-    double span = ceil(duration_seconds*(double)fps);
-    uint64_t frames = span >= (double)remaining ? remaining : (uint64_t)span;
-    if (frames == 0) frames = 1;
+    double requested_end_seconds = start_seconds + duration_seconds;
+    double requested_end_position = requested_end_seconds*(double)fps;
+    uint64_t end = total_frames;
+    if (isfinite(requested_end_seconds) &&
+        isfinite(requested_end_position) &&
+        requested_end_position < (double)total_frames) {
+        end = (uint64_t)ceil(requested_end_position);
+    }
+    if (end <= start) end = start + 1;
     *start_frame = start;
-    *end_frame = start + frames;
+    *end_frame = end;
     return RENDER_EXPORT_OK;
 }
 

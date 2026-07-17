@@ -146,7 +146,7 @@ class RenderProductSmokeTests(unittest.TestCase):
                 msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
             )
             completed = subprocess.run(
-                base + ["--render-window", "1.0", "0.5", "--render", str(windowed)],
+                base + ["--render-window", "1.1", "0.5", "--render", str(windowed)],
                 cwd=ROOT, capture_output=True, text=True, timeout=120,
             )
             self.assertEqual(
@@ -163,11 +163,14 @@ class RenderProductSmokeTests(unittest.TestCase):
             )
             streams = {stream["codec_type"]: stream
                        for stream in json.loads(probe.stdout)["streams"]}
-            self.assertEqual(int(streams["video"]["nb_frames"]), 12)
+            # 1.1-1.6 s crosses fractional 24 fps boundaries. The enclosing
+            # full-render span is [floor(26.4), ceil(38.4)) = [26, 39).
+            enclosing_duration = 13/24
+            self.assertEqual(int(streams["video"]["nb_frames"]), 13)
             self.assertAlmostEqual(float(streams["video"]["duration"]),
-                                   0.5, places=6)
+                                   enclosing_duration, places=6)
             self.assertAlmostEqual(float(streams["audio"]["duration"]),
-                                   0.5, delta=0.0015)
+                                   enclosing_duration, delta=0.0015)
 
             # The windowed frames must be the same source frames the full
             # export produced for that span. Two separate H.264 encodes can
@@ -179,7 +182,7 @@ class RenderProductSmokeTests(unittest.TestCase):
                 [
                     "ffmpeg", "-hide_banner", "-i", str(windowed),
                     "-i", str(full), "-filter_complex",
-                    "[1:v]trim=start_frame=24:end_frame=36,"
+                    "[1:v]trim=start_frame=26:end_frame=39,"
                     "setpts=PTS-STARTPTS[ref];[0:v][ref]psnr",
                     "-f", "null", "-",
                 ],

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import inspect
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -148,6 +151,59 @@ class ExternalAnalysisTests(unittest.TestCase):
             external._run(["codex"], timeout=5, runner=runner, diagnostic_sink=sink)
         self.assertLess(sink.stat().st_size,
                         external.DIAGNOSTIC_TAIL_LIMIT + 512)
+
+    def test_real_child_output_is_drained_into_bounded_memory_tails(self):
+        sink = self.root / "real-child.diagnostic.log"
+        script = (
+            "import sys; "
+            f"sys.stdout.write('o'*{external.DIAGNOSTIC_TAIL_LIMIT*4}); "
+            f"sys.stderr.write('e'*{external.DIAGNOSTIC_TAIL_LIMIT*4}); "
+            "raise SystemExit(7)"
+        )
+        with self.assertRaisesRegex(RuntimeError, "exited with code 7"):
+            external._run([sys.executable, "-c", script], timeout=5,
+                          diagnostic_sink=sink)
+        diagnostic = sink.read_text(encoding="utf-8")
+        self.assertIn("exited with code 7", diagnostic)
+        self.assertLess(len(diagnostic), external.DIAGNOSTIC_TAIL_LIMIT*2 + 512)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group behavior")
+    def test_successful_child_cannot_leave_a_grandchild_running(self):
+        script = (
+            "import subprocess,sys; "
+            "child=subprocess.Popen([sys.executable,'-c',"
+            "'import time; time.sleep(30)']); "
+            "print(child.pid, flush=True)"
+        )
+        result = external._run([sys.executable, "-c", script], timeout=5)
+        grandchild = int(result.stdout.strip())
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("successful child left its grandchild running")
+
+    def test_successful_assist_writes_privacy_safe_counts_to_job_log(self):
+        audio = self.root / "track.wav"
+        audio.write_bytes(b"fixture")
+        output = self.root / "analysis"
+        result = {"result_counts": {
+            "lyrics": 0, "sections": 21, "semantics": 0,
+        }}
+        stderr = io.StringIO()
+        with mock.patch.object(external, "run_assist", return_value=result):
+            with contextlib.redirect_stderr(stderr):
+                status = external.main([
+                    "assist", str(audio), str(output), "--duration", "12",
+                    "--mode", "lyrics",
+                ])
+        self.assertEqual(status, 0)
+        self.assertIn("0 lyric cues, 21 scene sections", stderr.getvalue())
+        self.assertNotIn(str(audio), stderr.getvalue())
 
     def test_codex_output_schema_stays_structured_output_compatible(self):
         # codex exec forwards the schema to a structured-output endpoint that
@@ -350,6 +406,9 @@ class ExternalAnalysisTests(unittest.TestCase):
             runner=forbidden_runner,
         )
         self.assertEqual(result["cache_status"]["measured"], "reused")
+        self.assertEqual(result["result_counts"]["lyrics"], 0)
+        self.assertGreater(result["result_counts"]["sections"], 0)
+        self.assertEqual(result["result_counts"]["semantics"], 0)
         self.assertTrue((output_dir / "analysis.bridge.tsv").is_file())
         self.assertTrue((output_dir / "scene-plan.json").is_file())
         self.assertTrue((output_dir / "assist-manifest.json").is_file())

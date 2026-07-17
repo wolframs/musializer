@@ -60,8 +60,9 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
   and asynchronous finalization are required before claiming long-export UI
   responsiveness.
 - The Assist panel discovers its packaged helper, reports specific launch/runtime
-  failures, and exposes retry-review plus copy-path actions when an immutable
-  job log exists, but it does not duplicate the product
+  failures, distinguishes valid empty results from applyable candidates, and
+  exposes persistent copy-result, copy-log, and copy-folder actions for the
+  immutable job artifacts, but it does not duplicate the product
   doctor's full Python/model/credential preflight in-process. The helper also
   exposes elapsed time and a hard timeout, not structured per-stage progress or
   a trustworthy percentage. Run `tools/musializer_doctor.py` before production
@@ -86,10 +87,13 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
   first beats after an arbitrary seek can differ from uninterrupted playback.
   Offline export from frame zero remains deterministic.
 - The current editor intentionally rejects schema-valid project features it
-  cannot preserve: imported audio, partial ranges, fractional FPS/non-MP4
-  output, scene stacks/noncanonical layout, parameter cues, and arbitrary
-  analysis-driven mappings. Canonical constant mappings used for the built-in
-  scene-control inspector are validated and preserved.
+  cannot preserve: imported audio, persisted partial ranges, fractional
+  FPS/non-MP4 output, scene stacks/noncanonical layout, parameter cues, and
+  arbitrary analysis-driven mappings. Canonical constant mappings used for the
+  built-in scene-control inspector are validated and preserved. The CLI does
+  support transient deterministic segment renders through
+  `--render-window START DURATION`; that range is not yet stored in `.musi` or
+  authored in the Export panel.
 - There is no native system/package installer, auto-updater, code signing, or
   release upload workflow on any platform. Linux does provide a tested per-user
   XDG launcher installer for source and unpacked portable builds.

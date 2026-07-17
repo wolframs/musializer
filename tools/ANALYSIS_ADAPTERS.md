@@ -110,7 +110,9 @@ structured output, and the repository-owned
 `prompts/lyrics_cleanup_system.md`. Every reviewed line must cite Whisper line
 indices and stay within their timing envelope. The review is a separate
 `lyric_review` lane; it never overwrites Whisper evidence and is rejected if it
-adds uncited lines.
+adds uncited lines. An evidence-preserving review may legitimately retain zero
+lines; the desktop reports that as a completed result with no editor changes
+and does not offer Apply.
 
 The output schema forwarded to `codex exec --output-schema` must stay inside
 the structured-output keyword subset; `uniqueItems` in particular is rejected
@@ -121,7 +123,13 @@ abnormally, a bounded tail of its output is preserved as
 `lyrics.review.diagnostic.log` beside the other per-job artifacts (the same
 directory that already holds the private Whisper evidence); the summary job
 log stays free of child output. The diagnostic is removed again by the next
-successful review.
+successful review. Real child stdout and stderr are continuously drained into
+bounded in-memory tails while the process runs, so the bound applies before
+the diagnostic is written rather than only afterward. POSIX child commands run
+in private process groups that are cleaned after timeout or direct-child exit;
+the Windows desktop worker retains its Job Object containment. Every successful Assist
+job writes privacy-safe lyric/section/semantic counts to its UI-accessible job
+log, and `assist-manifest.json` records the same `result_counts`.
 
 The deterministic section planner combines measured section boundaries,
 measured feature changes, lyric gaps, and (when explicitly supplied) subjective
