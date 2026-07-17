@@ -1,6 +1,8 @@
 #include "scene_routes.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "audio_analyzer.h"
@@ -85,6 +87,100 @@ bool scene_route_table_remove(Scene_Route_Table *table, size_t scene_index,
     routes->count -= 1;
     memset(&routes->items[routes->count], 0, sizeof(routes->items[0]));
     return true;
+}
+
+enum { SCENE_ROUTE_SPEC_CAPACITY = 256, SCENE_ROUTE_SPEC_MAX_FIELDS = 9 };
+
+static bool scene_route_parse_double(const char *text, double *value)
+{
+    if (text == NULL || text[0] == '\0' || value == NULL) return false;
+    char *end = NULL;
+    double parsed = strtod(text, &end);
+    if (end == text || *end != '\0' || !isfinite(parsed)) return false;
+    *value = parsed;
+    return true;
+}
+
+bool scene_route_parse_spec(const char *spec, size_t *scene_index,
+                            Musi_Parameter_Mapping *route)
+{
+    if (spec == NULL || scene_index == NULL || route == NULL ||
+        strlen(spec) >= SCENE_ROUTE_SPEC_CAPACITY) return false;
+    char buffer[SCENE_ROUTE_SPEC_CAPACITY];
+    memcpy(buffer, spec, strlen(spec) + 1U);
+
+    char *fields[SCENE_ROUTE_SPEC_MAX_FIELDS] = {0};
+    size_t field_count = 0;
+    char *cursor = buffer;
+    while (field_count < SCENE_ROUTE_SPEC_MAX_FIELDS) {
+        fields[field_count++] = cursor;
+        char *separator = strchr(cursor, ':');
+        if (separator == NULL) break;
+        *separator = '\0';
+        cursor = separator + 1;
+    }
+    if (field_count < 7 || strchr(cursor, ':') != NULL) return false;
+
+    memset(route, 0, sizeof(*route));
+    // The persisted keys all carry the "settings." prefix; accept the short
+    // form people actually type.
+    const char *key = fields[0];
+    int written = strncmp(key, "settings.", 9) == 0 ?
+        snprintf(route->parameter, sizeof(route->parameter), "%s", key) :
+        snprintf(route->parameter, sizeof(route->parameter), "settings.%s", key);
+    if (written < 0 || (size_t)written >= sizeof(route->parameter)) {
+        return false;
+    }
+
+    bool source_found = false;
+    for (int value = 0; value < MUSI_ANALYSIS_SOURCE_COUNT; ++value) {
+        if (strcmp(fields[1], musi_analysis_source_name(
+                       (Musi_Analysis_Source)value)) == 0) {
+            route->source = (Musi_Analysis_Source)value;
+            source_found = true;
+            break;
+        }
+    }
+    if (!source_found) return false;
+
+    char *end = NULL;
+    unsigned long band = strtoul(fields[2], &end, 10);
+    if (end == fields[2] || *end != '\0' || band > 0xFFFFu) return false;
+    route->band_index = (uint16_t)band;
+
+    if (!scene_route_parse_double(fields[3], &route->input_min) ||
+        !scene_route_parse_double(fields[4], &route->input_max) ||
+        !scene_route_parse_double(fields[5], &route->output_min) ||
+        !scene_route_parse_double(fields[6], &route->output_max)) return false;
+
+    route->interpolation = MUSI_INTERPOLATION_LINEAR;
+    route->clamp = true;
+    for (size_t extra = 7; extra < field_count; ++extra) {
+        if (strcmp(fields[extra], "clamp") == 0) {
+            route->clamp = true;
+            continue;
+        }
+        if (strcmp(fields[extra], "noclamp") == 0) {
+            route->clamp = false;
+            continue;
+        }
+        bool curve_found = false;
+        for (int value = 0; value < MUSI_INTERPOLATION_COUNT; ++value) {
+            if (strcmp(fields[extra], musi_interpolation_name(
+                           (Musi_Interpolation)value)) == 0) {
+                route->interpolation = (Musi_Interpolation)value;
+                curve_found = true;
+                break;
+            }
+        }
+        if (!curve_found) return false;
+    }
+
+    size_t owner_scene = 0;
+    if (scene_settings_descriptor_by_key(route->parameter, &owner_scene,
+                                         NULL) == NULL) return false;
+    *scene_index = owner_scene;
+    return scene_route_valid(owner_scene, route);
 }
 
 bool scene_routes_source_value(const Scene_Route_Sources *sources,

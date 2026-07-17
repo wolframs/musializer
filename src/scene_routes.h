@@ -59,6 +59,16 @@ bool scene_routes_source_value(const Scene_Route_Sources *sources,
                                Musi_Analysis_Source source,
                                uint16_t band_index, double *value);
 
+// Parses a route spec of the shape
+//   parameter:source:band:in_min:in_max:out_min:out_max[:curve][:clamp|noclamp]
+// e.g. "loom.weight:band:2:0:1:0.4:2.2:smoothstep". The "settings." key
+// prefix may be omitted; source and curve names are the .musi codec's
+// canonical names; curve defaults to linear and clamping is on unless
+// "noclamp" is given. The parsed route is validated against the scene the
+// parameter belongs to, returned via scene_index.
+bool scene_route_parse_spec(const char *spec, size_t *scene_index,
+                            Musi_Parameter_Mapping *route);
+
 // Copies base into effective, then applies this scene's routes on top.
 // A route whose source or evaluation fails this frame leaves the base value
 // untouched; successful routes are clamped to the descriptor range. The

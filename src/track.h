@@ -21,6 +21,7 @@
 #include "project.h"
 #include "render_export.h"
 #include "scene.h"
+#include "scene_routes.h"
 #include "scene_settings.h"
 #include "scene_switch.h"
 #include "sha256.h"
@@ -48,6 +49,7 @@ typedef struct {
     bool song_atlas_map_attempted;
     Scene_Settings scene_settings;
     Scene_Settings playback_scene_settings;
+    Scene_Route_Table scene_routes;
     bool cue_settings_active;
     Scene_Settings_Preset_Library scene_presets;
     size_t selected_scene_preset[SCENE_SETTINGS_SCENE_COUNT];

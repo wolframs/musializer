@@ -99,7 +99,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 25
+#define PLUG_STATE_VERSION 26
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -186,6 +186,9 @@ typedef struct {
     // Scene engine
     Scene_Instance scene;
     Scene_Settings scene_settings;
+    // Per-frame settings snapshot after audio-to-parameter routes; rebuilt
+    // by make_scene_frame, never edited directly.
+    Scene_Settings routed_scene_settings;
     bool scene_settings_open;
     bool scene_settings_window_expanded;
     int scene_settings_restore_width;
@@ -211,6 +214,8 @@ typedef struct {
     char ascii_image_sha256[SHA256_HEX_SIZE];
     Event_Timeline event_timeline;
     Event_Timeline event_undo;
+    // CLI routes given before any track exists; adopted by the first track.
+    Scene_Route_Table pending_scene_routes;
     bool event_undo_available;
     bool clear_events_confirmation;
     uint64_t clear_events_notice_id;
@@ -633,6 +638,8 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
             event_timeline_clear(&p->event_timeline);
             p->next_event_id = 1;
         }
+        p->tracks.items[new_index].scene_routes = p->pending_scene_routes;
+        scene_route_table_init(&p->pending_scene_routes);
         p->current_track = (int)new_index;
         start_preview_track(&p->tracks.items[new_index]);
     }
@@ -846,6 +853,19 @@ MUSIALIZER_PLUG bool plug_record_event(Event_Record event)
     return true;
 }
 
+MUSIALIZER_PLUG bool plug_add_scene_route(const char *spec)
+{
+    size_t scene_index = 0;
+    Musi_Parameter_Mapping route;
+    if (!scene_route_parse_spec(spec, &scene_index, &route)) return false;
+    Track *track = current_track();
+    Scene_Route_Table *table = track != NULL ? &track->scene_routes :
+                                               &p->pending_scene_routes;
+    if (!scene_route_table_add(table, scene_index, &route)) return false;
+    if (track != NULL) mark_project_dirty(track);
+    return true;
+}
+
 static Event_Timeline_View combined_scene_events(void)
 {
     Track *track = current_track();
@@ -907,12 +927,32 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
         beat_tracker_reset(&p->beat_tracker);
     }
 
+    // Audio-to-parameter routes overlay the editable settings with a per-frame
+    // routed snapshot; the preview loop and the export loop both come through
+    // here, so routed parameters stay preview/export identical by construction.
+    const Scene_Settings *effective = track_effective_scene_settings(track);
+    if (track != NULL) {
+        Scene_Route_Sources route_sources = {
+            .bands = spectrum.smooth,
+            .bands_count = spectrum.band_count,
+            .rms = rms,
+            .peak = peak,
+            .spectral_flux = flux,
+            .beat_phase = beat_phase,
+        };
+        if (scene_routes_apply(&track->scene_routes, p->scene.id,
+                               &route_sources, effective,
+                               &p->routed_scene_settings)) {
+            effective = &p->routed_scene_settings;
+        }
+    }
+
     return (Scene_Frame) {
         .time_seconds = time_seconds,
         .duration_seconds = track != NULL ? track->duration_seconds : 0.0,
         .delta_seconds = delta_seconds,
         .frame_index = p->scene_frame_index++,
-        .settings = track_effective_scene_settings(track),
+        .settings = effective,
         .semantic = semantic,
         .lyric = lyric,
         .events = combined_scene_events(),
@@ -1010,7 +1050,7 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
         .ascii_columns = ascii_columns,
         .ascii_rows = ascii_rows,
         .song_atlas_map = track != NULL ? &track->song_atlas_map : NULL,
-        .settings = track_effective_scene_settings(track),
+        .settings = frame.settings,
         .pixel_scale = pixel_scale,
     };
     scene_instance_update(&p->scene, &frame);

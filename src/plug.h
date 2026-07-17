@@ -71,6 +71,7 @@ typedef struct {
     PLUG(plug_load_ascii_image, bool, const char*) \
     PLUG(plug_select_scene, bool, const char*) \
     PLUG(plug_record_event, bool, Event_Record) \
+    PLUG(plug_add_scene_route, bool, const char*) \
     PLUG(plug_load_analysis_bridge, bool, const char*) \
     PLUG(plug_set_auto_scenes, bool, bool) \
     PLUG(plug_configure_render, bool, uint32_t, uint32_t, uint32_t, const char*) \

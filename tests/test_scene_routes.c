@@ -206,6 +206,53 @@ TEST(scene_routes_apply_matches_constant_slider_semantics)
                                    LOOM_SETTING_DENSITY), 1.25f, 0.0001f);
 }
 
+TEST(scene_route_spec_parsing_is_strict_and_convenient)
+{
+    size_t scene_index = 0;
+    Musi_Parameter_Mapping route;
+
+    REQUIRE_TRUE(scene_route_parse_spec(
+        "loom.weight:band:2:0:1:0.4:2.2:smoothstep", &scene_index, &route));
+    EXPECT_EQ_SIZE(scene_index, SCENE_LOOM);
+    EXPECT_TRUE(strcmp(route.parameter, "settings.loom.weight") == 0);
+    EXPECT_TRUE(route.source == MUSI_ANALYSIS_BAND);
+    EXPECT_EQ_SIZE(route.band_index, 2);
+    EXPECT_NEAR(route.output_max, 2.2, 0.0001);
+    EXPECT_TRUE(route.interpolation == MUSI_INTERPOLATION_SMOOTHSTEP);
+    EXPECT_TRUE(route.clamp);
+
+    // Full key, default curve, explicit noclamp.
+    REQUIRE_TRUE(scene_route_parse_spec(
+        "settings.loom.motion:beat_phase:0:0:1:0:2:noclamp", &scene_index,
+        &route));
+    EXPECT_TRUE(route.interpolation == MUSI_INTERPOLATION_LINEAR);
+    EXPECT_FALSE(route.clamp);
+
+    // Both optional fields together, in either order.
+    REQUIRE_TRUE(scene_route_parse_spec(
+        "loom.glints:spectral_flux:0:0:0.2:0:2:ease_out:noclamp",
+        &scene_index, &route));
+    EXPECT_TRUE(route.interpolation == MUSI_INTERPOLATION_EASE_OUT);
+    EXPECT_FALSE(route.clamp);
+
+    EXPECT_FALSE(scene_route_parse_spec(NULL, &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec("", &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec("loom.weight:band:2:0:1:0.4",
+                                        &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.imaginary:rms:0:0:1:0:1", &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:sparkles:0:0:1:0:1", &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:rms:0:0:1:0:1:zigzag", &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:rms:0:1:1:0:1", &scene_index, &route));  // empty input range
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:rms:0:0:1:0:nan", &scene_index, &route));
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:rms:3:0:1:0:1", &scene_index, &route));  // band on rms
+}
+
 TEST(scene_routes_apply_is_deterministic)
 {
     Scene_Settings base;

@@ -347,6 +347,9 @@ $ ./build/musializer path/to/song.mp3 --scene atlas \
 $ ./build/musializer --project path/to/show.musi --render output.mp4
 $ ./build/musializer path/to/song.mp3 --scene pentagram \
     --render-window 35 20 --render preview-section.mp4
+$ ./build/musializer path/to/song.mp3 --scene loom \
+    --route loom.weight:band:2:0:0.8:0.4:2.5:smoothstep \
+    --route loom.glints:spectral_flux:0:0:0.15:0:2 --render routed.mp4
 ```
 
 Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
@@ -355,6 +358,17 @@ Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg
 finishes, making them suitable for scripts and smoke tests.
+
+Repeatable `--route` arguments connect live audio measurements to any scene
+setting for this session, identically in preview and export:
+`parameter:source:band:in_min:in_max:out_min:out_max[:curve][:noclamp]`. The
+parameter is a scene-settings key (the `settings.` prefix is optional, e.g.
+`loom.weight`); sources are `rms`, `peak`, `spectral_flux`, `beat_phase`, and
+`band` with a spectrum band index; curves are `step`, `linear`, `smoothstep`,
+`ease_in`, and `ease_out`. The mapped value replaces the slider value each
+frame, clamped to the setting's range. Routed settings are not yet saved into
+`.musi` projects or editable in the Tune inspector; both are planned, and the
+`.musi` v1 format already reserves the representation.
 
 `--render-window START DURATION` (seconds) exports only that span of the
 track. The engine first fast-forwards analysis, beat tracking, and scene

@@ -113,6 +113,13 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          or pentagram\n"
         "  --ascii-image FILE      Import an image and select ASCII Field\n"
         "  --event SPEC            Add type:seconds:id:value to the manual lane\n"
+        "  --route SPEC            Drive a scene setting from live audio:\n"
+        "                          parameter:source:band:in_min:in_max:\n"
+        "                          out_min:out_max[:curve][:noclamp], e.g.\n"
+        "                          loom.weight:band:2:0:1:0.4:2.2:smoothstep\n"
+        "                          Sources: rms, peak, spectral_flux,\n"
+        "                          beat_phase, band. Curves: step, linear,\n"
+        "                          smoothstep, ease_in, ease_out\n"
         "  --analysis-bridge FILE  Import a verified analysis bridge\n"
         "  --auto-scenes           Enable imported scene suggestions\n"
         "\n"
@@ -234,6 +241,16 @@ int main(int argc, char **argv)
                 !parse_command_line_event(argv[++i], &event) ||
                 !plug_record_event(event)) {
                 TraceLog(LOG_WARNING, "Invalid command-line event; expected type:seconds:id:value");
+                command_line_error = true;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--route") == 0) {
+            if (i + 1 >= argc || !plug_add_scene_route(argv[++i])) {
+                TraceLog(LOG_WARNING,
+                         "Invalid command-line route; expected "
+                         "parameter:source:band:in_min:in_max:out_min:out_max"
+                         "[:curve][:noclamp]");
                 command_line_error = true;
             }
             continue;
