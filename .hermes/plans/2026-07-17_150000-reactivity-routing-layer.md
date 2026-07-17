@@ -142,6 +142,22 @@ preview-path and export-path snapshot construction and require identical
 effective settings. Manual: temporary hardcoded route (e.g. band 2 →
 `loom.weight`), run app, confirm; remove before commit.
 
+### Task 1.3: `--route` CLI injection (the iteration lever)
+
+**Modify:** `src/musializer.c` (repeatable `--route SPEC` argument, precedent:
+`--event type:seconds:id:value`), a `plug_add_route(...)` entry point, help
+text, README CLI section.
+
+Colon-separated spec mirroring the mapping fields, e.g.
+`--route loom.weight:band:2:0:1:0.4:2.2:smoothstep:clamp` (curve and clamp
+segments optional with defaults). Parsed strictly through
+`scene_routes_validate`; invalid specs fail startup with a clear message
+rather than being skipped. Routes injected this way land in the track route
+table and mark the project dirty, so *saving persists them* — this makes the
+CLI a full authoring path while the inspector UI does not exist yet, and the
+parser is headless-testable. This task is the agile pivot of the plan: after
+it lands, real experimentation drives what Phase 3's UI needs to be.
+
 ---
 
 ## Phase 2 — Persistence and editor support
