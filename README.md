@@ -225,7 +225,11 @@ Atlas** analyzes the complete decoded track into a slope-lit time-by-frequency
 terrain. **Cadence** estimates word windows inside accepted line-level lyric
 cues and assembles each word from beat-responsive character swarms. **Loom**
 samples accepted semantic events across the full track and weaves energy,
-tension, and valence into thread density, interlace, and color temperature.
+tension, and valence into thread density, interlace, and color temperature;
+without a semantic lane it freezes the measured spectrum into each column as
+the working edge passes, so the finished cloth is a spectrogram-as-textile
+record of the song, with live band vibration, onset ripples, and
+centroid-driven color temperature at the fell.
 Without lyrics or semantic analysis, Cadence and Loom retain deterministic
 audio-reactive ambient/fallback behavior rather than requiring a model service.
 **Pentagram Orbits** draws the phase portrait of the Lyness recurrence
