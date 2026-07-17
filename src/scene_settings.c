@@ -398,6 +398,12 @@ static const Scene_Setting_Descriptor *descriptor_for_key(
     return NULL;
 }
 
+const Scene_Setting_Descriptor *scene_settings_descriptor_by_key(
+    const char *key, size_t *scene_index, size_t *setting_index)
+{
+    return descriptor_for_key(key, scene_index, setting_index);
+}
+
 bool scene_settings_mapping_supported(const Musi_Parameter_Mapping *mapping)
 {
     if (mapping == NULL || descriptor_for_key(mapping->parameter, NULL, NULL) == NULL) {

@@ -90,6 +90,9 @@ bool scene_settings_valid(const Scene_Settings *settings);
 size_t scene_settings_count(size_t scene_index);
 const Scene_Setting_Descriptor *scene_settings_descriptor(
     size_t scene_index, size_t setting_index);
+/* Resolves a persisted parameter key like "settings.loom.weight". */
+const Scene_Setting_Descriptor *scene_settings_descriptor_by_key(
+    const char *key, size_t *scene_index, size_t *setting_index);
 float scene_settings_get(const Scene_Settings *settings,
                          size_t scene_index, size_t setting_index);
 bool scene_settings_set(Scene_Settings *settings, size_t scene_index,
