@@ -69,6 +69,31 @@ bool scene_routes_source_value(const Scene_Route_Sources *sources,
 bool scene_route_parse_spec(const char *spec, size_t *scene_index,
                             Musi_Parameter_Mapping *route);
 
+// True when every mapping is either a canonical constant slider mapping or
+// a valid dynamic route for its parameter's scene, with parameter names
+// unique across the list. This is the widened .musi editor-support rule: a
+// parameter is persisted as exactly one of the two.
+bool scene_routes_mappings_supported(const Musi_Parameter_Mapping *mappings,
+                                     size_t count);
+
+// Serializes editor state as a project scene's mappings: every setting as
+// its canonical constant, except settings driven by a route, which persist
+// the route in that position instead. Deterministic order for byte-stable
+// saves.
+bool scene_routes_export_mappings(const Scene_Settings *settings,
+                                  const Scene_Route_Table *table,
+                                  Musi_Parameter_Mapping *mappings,
+                                  size_t capacity, size_t *count);
+
+// Partitions project mappings into slider constants and dynamic routes.
+// All-or-nothing: a mapping that is neither a supported constant nor a
+// valid route fails the import; nothing is silently dropped. Settings for
+// routed parameters keep their scene defaults.
+bool scene_routes_import_mappings(Scene_Settings *settings,
+                                  Scene_Route_Table *table,
+                                  const Musi_Parameter_Mapping *mappings,
+                                  size_t count);
+
 // Copies base into effective, then applies this scene's routes on top.
 // A route whose source or evaluation fails this frame leaves the base value
 // untouched; successful routes are clamped to the descriptor range. The

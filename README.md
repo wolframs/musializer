@@ -366,9 +366,13 @@ parameter is a scene-settings key (the `settings.` prefix is optional, e.g.
 `loom.weight`); sources are `rms`, `peak`, `spectral_flux`, `beat_phase`, and
 `band` with a spectrum band index; curves are `step`, `linear`, `smoothstep`,
 `ease_in`, and `ease_out`. The mapped value replaces the slider value each
-frame, clamped to the setting's range. Routed settings are not yet saved into
-`.musi` projects or editable in the Tune inspector; both are planned, and the
-`.musi` v1 format already reserves the representation.
+frame, clamped to the setting's range. Routes are saved into `.musi` projects
+using the format's parameter-mapping representation — a setting persists as
+either its slider constant or its route — and reopened projects render
+byte-identically to the session that authored them. Editing routes in the
+Tune inspector is the next planned step; until then the CLI is the authoring
+surface. Projects containing routes are rejected by older builds' editors by
+design rather than being silently stripped.
 
 `--render-window START DURATION` (seconds) exports only that span of the
 track. The engine first fast-forwards analysis, beat tracking, and scene

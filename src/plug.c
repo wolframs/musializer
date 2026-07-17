@@ -3098,8 +3098,9 @@ static bool build_project(Track *track, const char *project_path,
     snprintf(project->scenes[0].scene_type,
              sizeof(project->scenes[0].scene_type), "%s",
              scene_stable_name(track->base_scene));
-    if (!scene_settings_export_mappings(
-            &track->scene_settings, project->scenes[0].mappings,
+    if (!scene_routes_export_mappings(
+            &track->scene_settings, &track->scene_routes,
+            project->scenes[0].mappings,
             MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
             &project->scenes[0].mapping_count)) return false;
 
@@ -3382,11 +3383,13 @@ static bool open_project_path(const char *path)
         return false;
     }
     Scene_Settings hydrated_settings;
-    if (!scene_settings_import_mappings(
-            &hydrated_settings, project->scenes[0].mappings,
+    Scene_Route_Table hydrated_routes;
+    if (!scene_routes_import_mappings(
+            &hydrated_settings, &hydrated_routes,
+            project->scenes[0].mappings,
             project->scenes[0].mapping_count)) {
         notice_push(UI_NOTICE_ERROR, "Project scene settings were rejected",
-                    "A stored control is unknown or outside its supported range.",
+                    "A stored control or route is unknown or outside its supported range.",
                     path, true);
         free(project);
         return false;
@@ -3612,6 +3615,7 @@ static bool open_project_path(const char *path)
     track->scene_instance_id = project->scenes[0].instance_id;
     track->scene_settings = hydrated_settings;
     track->playback_scene_settings = hydrated_settings;
+    track->scene_routes = hydrated_routes;
     track->scene_presets = preset_library;
     if (hydrated_ascii != NULL) {
         memcpy(track->ascii_cells, hydrated_ascii,

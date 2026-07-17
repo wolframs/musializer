@@ -7,7 +7,7 @@
 
 ## Current status
 
-- **Last updated:** 2026-07-17, Europe/Berlin.
+- **Last updated:** 2026-07-18, Europe/Berlin.
 - **Active milestone:** M3 render-product hardening, reusable visual layers,
   and decomposition of the application composition root.
 - **Next vertical slice:** finish the dependency-ordered `plug.c` split around
@@ -16,6 +16,12 @@
   readback/encoding. The `.musi` v1 workspace, extracted lyric editor,
   assistance staging, full-track UI export, and deterministic windowed CLI
   export are implemented.
+- **Reactivity routing:** audio-to-parameter routes (the format's dynamic
+  `Musi_Parameter_Mapping` capability) are implemented at runtime for all ten
+  scenes, authorable via repeatable `--route` CLI arguments, and persisted in
+  `.musi` beside slider constants with byte-identical reopened renders. The
+  Tune-inspector route editor is the remaining phase; see
+  `.hermes/plans/2026-07-17_150000-reactivity-routing-layer.md`.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
 - **Remotes:** `origin` is the private Forgejo repository,

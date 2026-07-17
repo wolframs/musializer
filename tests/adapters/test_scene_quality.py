@@ -84,9 +84,12 @@ class SceneQualityRegressionTests(unittest.TestCase):
     def test_scene_settings_are_saved_and_restored_with_the_track(self):
         source = (ROOT / "src/plug.c").read_text(encoding="utf-8")
 
-        self.assertIn("scene_settings_export_mappings(", source)
-        self.assertIn("scene_settings_import_mappings(", source)
+        # Settings persist through the routes-aware serializer, which stores
+        # each parameter as its slider constant or its audio route.
+        self.assertIn("scene_routes_export_mappings(", source)
+        self.assertIn("scene_routes_import_mappings(", source)
         self.assertIn("track->scene_settings = hydrated_settings", source)
+        self.assertIn("track->scene_routes = hydrated_routes", source)
         self.assertIn("mark_project_dirty(track);", source)
 
     def test_scene_presets_and_cues_capture_durable_tuning_snapshots(self):

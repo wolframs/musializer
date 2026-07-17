@@ -42,6 +42,27 @@ work this plan generalizes).
 
 ---
 
+## Progress log (updated as tasks land)
+
+- **Phase 1 done (2 commits, 2026-07-17, now on master).** `scene_routes`
+  module (validate, source binding, replace-semantics apply, spec parser),
+  frame-loop wiring through `make_scene_frame`, and the repeatable `--route`
+  CLI with first-track adoption. Routed segment exports are
+  framemd5-deterministic.
+- **Phase 2 done (2026-07-18).** `scene_routes_export/import_mappings`
+  persist routes beside constants in `scenes[0].mappings` (a parameter is
+  exactly one of the two; all-or-nothing import), editor gate widened via
+  `scene_routes_mappings_supported`, save/open call sites wired in plug.c.
+  Verified end to end: the route survives save as schema-correct JSON, a
+  reopened project renders byte-identically to the authoring session,
+  no-route mp3-vs-project renders are identical, CLI argument order is
+  irrelevant, and a sanitize-build routed render is clean. 191/191 C tests
+  in debug/release/sanitize.
+- **Next:** Phase 3 Tune-inspector route editor (3.1 headless state machine
+  first).
+
+---
+
 ## Critical constraints (read before any task)
 
 1. **No schema change.** Everything in phases 1–3 must round-trip through the

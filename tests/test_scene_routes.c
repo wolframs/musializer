@@ -253,6 +253,96 @@ TEST(scene_route_spec_parsing_is_strict_and_convenient)
         "loom.weight:rms:3:0:1:0:1", &scene_index, &route));  // band on rms
 }
 
+TEST(scene_routes_persistence_round_trips_constants_and_routes)
+{
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    REQUIRE_TRUE(scene_settings_set(&settings, SCENE_LOOM,
+                                    LOOM_SETTING_DENSITY, 1.5f));
+    Scene_Route_Table table;
+    scene_route_table_init(&table);
+    Musi_Parameter_Mapping weight = route_band("settings.loom.weight", 2,
+                                               0.4, 2.2);
+    weight.interpolation = MUSI_INTERPOLATION_SMOOTHSTEP;
+    REQUIRE_TRUE(scene_route_table_add(&table, SCENE_LOOM, &weight));
+    Musi_Parameter_Mapping glow = route_source("settings.pulse.glow",
+                                               MUSI_ANALYSIS_SPECTRAL_FLUX);
+    glow.input_max = 0.2;
+    glow.output_max = 2.0;
+    REQUIRE_TRUE(scene_route_table_add(&table, 1 /* pulse */, &glow));
+
+    Musi_Parameter_Mapping mappings[MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE];
+    size_t count = 0;
+    REQUIRE_TRUE(scene_routes_export_mappings(&settings, &table, mappings,
+                                              MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+                                              &count));
+    // One entry per setting: routed parameters replace their constant slot,
+    // so the count matches the constant-only export exactly.
+    Musi_Parameter_Mapping constants_only[MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE];
+    size_t constants_count = 0;
+    REQUIRE_TRUE(scene_settings_export_mappings(&settings, constants_only,
+                                                MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+                                                &constants_count));
+    EXPECT_EQ_SIZE(count, constants_count);
+    EXPECT_TRUE(scene_routes_mappings_supported(mappings, count));
+
+    size_t route_entries = 0;
+    for (size_t at = 0; at < count; ++at) {
+        if (!scene_settings_mapping_supported(&mappings[at])) route_entries += 1;
+    }
+    EXPECT_EQ_SIZE(route_entries, 2);
+
+    // Byte-stable saves: exporting twice is identical.
+    Musi_Parameter_Mapping again[MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE];
+    size_t again_count = 0;
+    REQUIRE_TRUE(scene_routes_export_mappings(&settings, &table, again,
+                                              MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+                                              &again_count));
+    EXPECT_EQ_SIZE(again_count, count);
+    EXPECT_TRUE(memcmp(mappings, again, count*sizeof(mappings[0])) == 0);
+
+    Scene_Settings imported_settings;
+    Scene_Route_Table imported_table;
+    REQUIRE_TRUE(scene_routes_import_mappings(&imported_settings,
+                                              &imported_table, mappings,
+                                              count));
+    // Constants round-trip; routed parameters come back as routes with the
+    // slider at its scene default.
+    EXPECT_NEAR(scene_settings_get(&imported_settings, SCENE_LOOM,
+                                   LOOM_SETTING_DENSITY), 1.5f, 0.0001f);
+    EXPECT_EQ_SIZE(imported_table.scenes[SCENE_LOOM].count, 1);
+    EXPECT_TRUE(memcmp(&imported_table.scenes[SCENE_LOOM].items[0], &weight,
+                       sizeof(weight)) == 0);
+    EXPECT_EQ_SIZE(imported_table.scenes[1].count, 1);
+    Scene_Settings defaults;
+    scene_settings_init(&defaults);
+    EXPECT_NEAR(scene_settings_get(&imported_settings, SCENE_LOOM,
+                                   LOOM_SETTING_WEIGHT),
+                scene_settings_get(&defaults, SCENE_LOOM,
+                                   LOOM_SETTING_WEIGHT), 0.0f);
+}
+
+TEST(scene_routes_import_is_all_or_nothing)
+{
+    Scene_Settings settings;
+    Scene_Route_Table table;
+    Musi_Parameter_Mapping mappings[2];
+    mappings[0] = route_band("settings.loom.weight", 2, 0.4, 2.2);
+    mappings[1] = route_band("settings.loom.weight", 3, 0.0, 1.0);
+    // Duplicate parameter: a key may be a constant or a route, never both.
+    EXPECT_FALSE(scene_routes_import_mappings(&settings, &table, mappings, 2));
+    EXPECT_FALSE(scene_routes_mappings_supported(mappings, 2));
+
+    mappings[1] = route_band("settings.loom.glints", 0xFFFF, 0.0, 1.0);
+    EXPECT_FALSE(scene_routes_import_mappings(&settings, &table, mappings, 2));
+
+    Musi_Parameter_Mapping zeroed = {0};
+    EXPECT_FALSE(scene_routes_mappings_supported(&zeroed, 1));
+    EXPECT_TRUE(scene_routes_mappings_supported(NULL, 0));
+    EXPECT_TRUE(scene_routes_import_mappings(&settings, &table, NULL, 0));
+    EXPECT_TRUE(scene_settings_valid(&settings));
+}
+
 TEST(scene_routes_apply_is_deterministic)
 {
     Scene_Settings base;

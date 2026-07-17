@@ -206,6 +206,95 @@ bool scene_routes_source_value(const Scene_Route_Sources *sources,
     return true;
 }
 
+static bool scene_route_mapping_supported_any(
+    const Musi_Parameter_Mapping *mapping)
+{
+    if (scene_settings_mapping_supported(mapping)) return true;
+    size_t scene_index = 0;
+    if (scene_settings_descriptor_by_key(mapping->parameter, &scene_index,
+                                         NULL) == NULL) return false;
+    return scene_route_valid(scene_index, mapping);
+}
+
+bool scene_routes_mappings_supported(const Musi_Parameter_Mapping *mappings,
+                                     size_t count)
+{
+    if (count > MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE ||
+        (count > 0 && mappings == NULL)) return false;
+    for (size_t index = 0; index < count; ++index) {
+        if (!scene_route_mapping_supported_any(&mappings[index])) return false;
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (strcmp(mappings[previous].parameter,
+                       mappings[index].parameter) == 0) return false;
+        }
+    }
+    return true;
+}
+
+bool scene_routes_export_mappings(const Scene_Settings *settings,
+                                  const Scene_Route_Table *table,
+                                  Musi_Parameter_Mapping *mappings,
+                                  size_t capacity, size_t *count)
+{
+    if (!scene_settings_export_mappings(settings, mappings, capacity, count)) {
+        return false;
+    }
+    if (table == NULL) return true;
+    if (!scene_route_table_valid(table)) return false;
+    for (size_t scene = 0; scene < SCENE_SETTINGS_SCENE_COUNT; ++scene) {
+        const Scene_Routes *routes = &table->scenes[scene];
+        for (size_t index = 0; index < routes->count; ++index) {
+            const Musi_Parameter_Mapping *route = &routes->items[index];
+            bool replaced = false;
+            for (size_t at = 0; at < *count; ++at) {
+                if (strcmp(mappings[at].parameter, route->parameter) != 0) {
+                    continue;
+                }
+                mappings[at] = *route;
+                replaced = true;
+                break;
+            }
+            // Every valid route targets a real descriptor, and the constant
+            // export lists every descriptor, so a missing slot means the
+            // table and settings tables disagree - refuse to save that.
+            if (!replaced) return false;
+        }
+    }
+    return true;
+}
+
+bool scene_routes_import_mappings(Scene_Settings *settings,
+                                  Scene_Route_Table *table,
+                                  const Musi_Parameter_Mapping *mappings,
+                                  size_t count)
+{
+    if (settings == NULL || table == NULL ||
+        !scene_routes_mappings_supported(mappings, count)) return false;
+    Scene_Settings staged;
+    scene_settings_init(&staged);
+    Scene_Route_Table staged_routes;
+    scene_route_table_init(&staged_routes);
+    for (size_t index = 0; index < count; ++index) {
+        const Musi_Parameter_Mapping *mapping = &mappings[index];
+        size_t scene_index = 0;
+        size_t setting_index = 0;
+        if (scene_settings_descriptor_by_key(mapping->parameter, &scene_index,
+                                             &setting_index) == NULL) {
+            return false;
+        }
+        if (scene_settings_mapping_supported(mapping)) {
+            if (!scene_settings_set(&staged, scene_index, setting_index,
+                                    (float)mapping->output_min)) return false;
+        } else if (!scene_route_table_add(&staged_routes, scene_index,
+                                          mapping)) {
+            return false;
+        }
+    }
+    *settings = staged;
+    *table = staged_routes;
+    return true;
+}
+
 bool scene_routes_apply(const Scene_Route_Table *table, size_t scene_index,
                         const Scene_Route_Sources *sources,
                         const Scene_Settings *base, Scene_Settings *effective)

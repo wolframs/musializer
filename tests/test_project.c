@@ -1,4 +1,5 @@
 #include "project.h"
+#include "scene_routes.h"
 #include "scene_settings.h"
 #include "test_support.h"
 
@@ -163,6 +164,43 @@ TEST(project_editor_subset_accepts_canonical_scene_setting_presets)
     EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
     EXPECT_TRUE(musi_project_editor_support(&project) ==
                 MUSI_PROJECT_EDITOR_SUPPORTED);
+}
+
+TEST(project_editor_subset_accepts_audio_routes_beside_constants)
+{
+    Musi_Project project = valid_project();
+    Scene_Settings settings;
+    scene_settings_init(&settings);
+    Scene_Route_Table routes;
+    scene_route_table_init(&routes);
+    Musi_Parameter_Mapping route = {
+        .source = MUSI_ANALYSIS_BAND,
+        .band_index = 2,
+        .input_min = 0.0,
+        .input_max = 1.0,
+        .output_min = 0.4,
+        .output_max = 2.2,
+        .interpolation = MUSI_INTERPOLATION_SMOOTHSTEP,
+        .clamp = true,
+    };
+    strcpy(route.parameter, "settings.loom.weight");
+    REQUIRE_TRUE(scene_route_table_add(&routes, 8 /* loom */, &route));
+    project.audio.mode = MUSI_ASSET_REFERENCED;
+    project.cue_count = 0;
+    REQUIRE_TRUE(scene_routes_export_mappings(
+        &settings, &routes, project.scenes[0].mappings,
+        MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
+        &project.scenes[0].mapping_count));
+    EXPECT_TRUE(musi_project_validate(&project).error == MUSI_PROJECT_VALID);
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_SUPPORTED);
+
+    // A mapping that is neither a canonical constant nor a valid route is
+    // still rejected, exactly as before the routes capability widened this.
+    project.scenes[0].mappings[0].input_max =
+        project.scenes[0].mappings[0].input_min;
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_ERROR_SCENE_MAPPINGS);
 }
 
 TEST(project_validates_scene_presets_and_cue_setting_snapshots)
