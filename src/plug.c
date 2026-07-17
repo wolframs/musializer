@@ -14,6 +14,7 @@
 #include "analysis_bridge.h"
 #include "analysis_candidate.h"
 #include "assist_ui_state.h"
+#include "route_editor_state.h"
 #include "caption_layout.h"
 #include "audio_analyzer.h"
 #include "beat_tracker.h"
@@ -99,7 +100,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 26
+#define PLUG_STATE_VERSION 27
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -189,6 +190,11 @@ typedef struct {
     // Per-frame settings snapshot after audio-to-parameter routes; rebuilt
     // by make_scene_frame, never edited directly.
     Scene_Settings routed_scene_settings;
+    // Tune-inspector route editor draft; a dirty draft joins the close guard.
+    Route_Editor_State route_editor;
+    // Last frame's route source values, kept for the inspector's live meters.
+    // The bands pointer targets analyzer arrays inside this Plug allocation.
+    Scene_Route_Sources ui_route_sources;
     bool scene_settings_open;
     bool scene_settings_window_expanded;
     int scene_settings_restore_width;
@@ -945,6 +951,9 @@ static Scene_Frame make_scene_frame(AudioSpectrumView spectrum, double time_seco
                                &p->routed_scene_settings)) {
             effective = &p->routed_scene_settings;
         }
+        p->ui_route_sources = route_sources;
+    } else {
+        memset(&p->ui_route_sources, 0, sizeof(p->ui_route_sources));
     }
 
     return (Scene_Frame) {
@@ -4091,6 +4100,275 @@ static bool scene_setting_toggle(Rectangle boundary, Scene_Id scene_id,
     return false;
 }
 
+// Height of the inline route editor drawn in place of a routed setting's
+// slider zone; the band stepper row only exists for the band source.
+static float scene_route_editor_area_height(const Route_Editor_State *editor)
+{
+    float height = 24.0f + 26.0f + 40.0f + 40.0f + 26.0f + 32.0f + 4.0f;
+    if (editor->draft.source == MUSI_ANALYSIS_BAND) height += 24.0f;
+    return height;
+}
+
+// How much taller the editor row is than a plain 76 px setting row (the
+// editor area replaces the 30 px slider zone and part of the row padding).
+static float scene_route_editor_row_extra(const Route_Editor_State *editor)
+{
+    return scene_route_editor_area_height(editor) - 35.0f;
+}
+
+static bool route_mini_slider(uint64_t id, Rectangle boundary, float *normalized)
+{
+    if (normalized == NULL || boundary.width <= 1.0f) return false;
+    Vector2 mouse = GetMousePosition();
+    bool hover = CheckCollisionPointRec(mouse, boundary);
+    if (p->active_button_id == 0 && hover &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        p->active_button_id = id;
+    }
+    bool changed = false;
+    if (p->active_button_id == id) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            float next = slider_get_value(mouse.x, boundary.x,
+                                          boundary.x + boundary.width);
+            if (next != *normalized) {
+                *normalized = next;
+                changed = true;
+            }
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) p->active_button_id = 0;
+    }
+    float clamped = *normalized;
+    if (clamped < 0.0f) clamped = 0.0f;
+    if (clamped > 1.0f) clamped = 1.0f;
+    float center_y = boundary.y + boundary.height*0.5f;
+    DrawRectangle((int)boundary.x, (int)(center_y - 1.0f),
+                  (int)boundary.width, 2, COLOR_UI_RULE);
+    DrawRectangle((int)boundary.x, (int)(center_y - 2.0f),
+                  (int)(boundary.width*clamped), 4, COLOR_ACCENT);
+    float handle_x = boundary.x + boundary.width*clamped;
+    DrawRectangleRec((Rectangle){handle_x - 4.0f, center_y - 6.0f, 8.0f, 12.0f},
+                     COLOR_ACCENT);
+    if (p->active_button_id == id) {
+        DrawRectangleLinesEx(boundary, 2.0f, ColorAlpha(COLOR_ACCENT, 0.72f));
+    } else if (hover) {
+        DrawRectangleLinesEx(boundary, 1.0f, ColorAlpha(COLOR_ACCENT, 0.28f));
+    }
+    return changed;
+}
+
+// The live-source meter: where this frame's source value sits inside the
+// route's input window. This is the "see the waveform reach the parameter"
+// strip; it draws empty when no signal is available.
+static void scene_route_meter(Rectangle bar, const Musi_Parameter_Mapping *route)
+{
+    double live = 0.0;
+    float fill = 0.0f;
+    if (scene_routes_source_value(&p->ui_route_sources, route->source,
+                                  route->band_index, &live)) {
+        fill = route_editor_meter_position(route, live);
+    }
+    DrawRectangleRec(bar, COLOR_UI_RULE);
+    DrawRectangleRec((Rectangle){bar.x, bar.y, bar.width*fill, bar.height},
+                     COLOR_ACCENT);
+}
+
+static void scene_route_editor_panel(Rectangle area, Track *track,
+                                     const Scene_Setting_Descriptor *descriptor)
+{
+    Route_Editor_State *editor = &p->route_editor;
+    Musi_Parameter_Mapping *draft = &editor->draft;
+    const float gap = 5.0f;
+    float cursor = area.y;
+
+    char caption[96];
+    double live = 0.0;
+    bool have_live = scene_routes_source_value(&p->ui_route_sources,
+                                               draft->source,
+                                               draft->band_index, &live);
+    if (have_live) {
+        snprintf(caption, sizeof(caption), "LIVE %s  %.3f",
+                 route_editor_source_label(draft->source), live);
+    } else {
+        snprintf(caption, sizeof(caption), "LIVE %s  no signal",
+                 route_editor_source_label(draft->source));
+    }
+    DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
+               COLOR_UI_MUTED);
+    Rectangle meter = {area.x, cursor + 14.0f, area.width, 7.0f};
+    scene_route_meter(meter, draft);
+    tooltip(meter, "Where the live source sits inside the input window",
+            SIDE_TOP, false);
+    cursor += 24.0f;
+
+    float source_width = (area.width - gap*4.0f)/5.0f;
+    for (int source = 0; source < MUSI_ANALYSIS_SOURCE_COUNT; ++source) {
+        Rectangle button = {area.x + (float)source*(source_width + gap), cursor,
+                            source_width, 22.0f};
+        if (text_button(UINT64_C(0x524F555453524300) + (uint64_t)source, button,
+                        route_editor_source_label((Musi_Analysis_Source)source),
+                        draft->source == (Musi_Analysis_Source)source) &
+            BS_CLICKED) {
+            (void)route_editor_set_source(editor,
+                                          (Musi_Analysis_Source)source);
+        }
+    }
+    cursor += 26.0f;
+
+    if (draft->source == MUSI_ANALYSIS_BAND) {
+        size_t band_limit = p->ui_route_sources.bands_count > 0 ?
+            p->ui_route_sources.bands_count : AUDIO_ANALYZER_MAX_BANDS;
+        Rectangle band_previous = {area.x, cursor, 34.0f, 20.0f};
+        Rectangle band_next = {area.x + area.width - 34.0f, cursor, 34.0f, 20.0f};
+        if (text_button(UINT64_C(0x524F555442443030), band_previous, "<",
+                        false) & BS_CLICKED) {
+            (void)route_editor_step_band(editor, -1, band_limit);
+        }
+        if (text_button(UINT64_C(0x524F555442443031), band_next, ">",
+                        false) & BS_CLICKED) {
+            (void)route_editor_step_band(editor, 1, band_limit);
+        }
+        snprintf(caption, sizeof(caption), "Band %u of %zu (low to high)",
+                 (unsigned)draft->band_index, band_limit);
+        Vector2 size = MeasureTextEx(ui_font(), caption, 13.0f, 0.0f);
+        DrawTextEx(ui_font(), caption,
+                   (Vector2){area.x + (area.width - size.x)*0.5f,
+                             cursor + (20.0f - size.y)*0.5f},
+                   13.0f, 0.0f, COLOR_UI_INK);
+        cursor += 24.0f;
+    }
+
+    snprintf(caption, sizeof(caption), "INPUT WINDOW  %.2f to %.2f",
+             draft->input_min, draft->input_max);
+    DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
+               COLOR_UI_MUTED);
+    float pair_width = (area.width - gap)*0.5f;
+    Rectangle input_low = {area.x, cursor + 15.0f, pair_width, 20.0f};
+    Rectangle input_high = {area.x + pair_width + gap, cursor + 15.0f,
+                            pair_width, 20.0f};
+    float normalized = (float)draft->input_min;
+    if (route_mini_slider(UINT64_C(0x524F5554494E4C4F), input_low,
+                          &normalized)) {
+        (void)route_editor_set_input_min(editor, (double)normalized);
+    }
+    normalized = (float)draft->input_max;
+    if (route_mini_slider(UINT64_C(0x524F5554494E4849), input_high,
+                          &normalized)) {
+        (void)route_editor_set_input_max(editor, (double)normalized);
+    }
+    tooltip(input_low, "Source level mapped to the left output value",
+            SIDE_TOP, false);
+    tooltip(input_high, "Source level mapped to the right output value",
+            SIDE_TOP, false);
+    cursor += 40.0f;
+
+    snprintf(caption, sizeof(caption), "OUTPUT  %.*f to %.*f",
+             (int)descriptor->precision, draft->output_min,
+             (int)descriptor->precision, draft->output_max);
+    DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
+               COLOR_UI_MUTED);
+    float span = descriptor->maximum - descriptor->minimum;
+    if (span <= 0.0f) span = 1.0f;
+    Rectangle output_low = {area.x, cursor + 15.0f, pair_width, 20.0f};
+    Rectangle output_high = {area.x + pair_width + gap, cursor + 15.0f,
+                             pair_width, 20.0f};
+    normalized = ((float)draft->output_min - descriptor->minimum)/span;
+    if (route_mini_slider(UINT64_C(0x524F55544F55544C), output_low,
+                          &normalized)) {
+        (void)route_editor_set_output_low(
+            editor, (double)(descriptor->minimum + normalized*span));
+    }
+    normalized = ((float)draft->output_max - descriptor->minimum)/span;
+    if (route_mini_slider(UINT64_C(0x524F55544F555448), output_high,
+                          &normalized)) {
+        (void)route_editor_set_output_high(
+            editor, (double)(descriptor->minimum + normalized*span));
+    }
+    tooltip(output_low, "Setting value at the bottom of the input window",
+            SIDE_TOP, false);
+    tooltip(output_high, "Setting value at the top of the input window",
+            SIDE_TOP, false);
+    cursor += 40.0f;
+
+    Rectangle curve_previous = {area.x, cursor, 34.0f, 22.0f};
+    Rectangle curve_next = {area.x + area.width - 34.0f, cursor, 34.0f, 22.0f};
+    if (text_button(UINT64_C(0x524F555443563030), curve_previous, "<",
+                    false) & BS_CLICKED) {
+        (void)route_editor_set_curve(
+            editor, (Musi_Interpolation)(((int)draft->interpolation +
+                                          MUSI_INTERPOLATION_COUNT - 1)%
+                                         MUSI_INTERPOLATION_COUNT));
+    }
+    if (text_button(UINT64_C(0x524F555443563031), curve_next, ">",
+                    false) & BS_CLICKED) {
+        (void)route_editor_set_curve(
+            editor, (Musi_Interpolation)(((int)draft->interpolation + 1)%
+                                         MUSI_INTERPOLATION_COUNT));
+    }
+    snprintf(caption, sizeof(caption), "Curve: %s",
+             route_editor_curve_label(draft->interpolation));
+    Vector2 curve_size = MeasureTextEx(ui_font(), caption, 13.0f, 0.0f);
+    DrawTextEx(ui_font(), caption,
+               (Vector2){area.x + (area.width - curve_size.x)*0.5f,
+                         cursor + (22.0f - curve_size.y)*0.5f},
+               13.0f, 0.0f, COLOR_UI_INK);
+    cursor += 26.0f;
+
+    float action_width = (area.width - gap*4.0f)/5.0f;
+    Rectangle clamp_button = {area.x, cursor, action_width, 28.0f};
+    Rectangle invert_button = {area.x + (action_width + gap), cursor,
+                               action_width, 28.0f};
+    Rectangle apply_button = {area.x + (action_width + gap)*2.0f, cursor,
+                              action_width, 28.0f};
+    Rectangle remove_button = {area.x + (action_width + gap)*3.0f, cursor,
+                               action_width, 28.0f};
+    Rectangle close_button = {area.x + (action_width + gap)*4.0f, cursor,
+                              action_width, 28.0f};
+    if (text_button(UINT64_C(0x524F5554434C4D50), clamp_button, "Clamp",
+                    draft->clamp) & BS_CLICKED) {
+        (void)route_editor_set_clamp(editor, !draft->clamp);
+    }
+    tooltip(clamp_button, "Hold the output inside its range instead of "
+            "extrapolating past it", SIDE_TOP, false);
+    if (text_button(UINT64_C(0x524F5554494E5656), invert_button, "Invert",
+                    false) & BS_CLICKED) {
+        (void)route_editor_swap_output(editor);
+    }
+    tooltip(invert_button, "Swap the output endpoints so louder means lower",
+            SIDE_TOP, false);
+
+    bool dirty = route_editor_dirty(editor);
+    if (route_editor_can_apply(editor) && (dirty || !editor->has_committed)) {
+        if (text_button(UINT64_C(0x524F555441504C59), apply_button, "Apply",
+                        true) & BS_CLICKED &&
+            route_editor_apply(editor, &track->scene_routes)) {
+            mark_project_dirty(track);
+        }
+    } else {
+        disabled_text_button(apply_button,
+                             editor->has_committed ? "Applied" : "Apply",
+                             false);
+    }
+    if (editor->has_committed) {
+        if (danger_text_button(UINT64_C(0x524F555452454D56), remove_button,
+                               "Remove", false) & BS_CLICKED &&
+            route_editor_remove(editor, &track->scene_routes)) {
+            mark_project_dirty(track);
+            return;
+        }
+    } else {
+        disabled_text_button(remove_button, "Remove", false);
+    }
+    int close_state = dirty ?
+        danger_text_button(UINT64_C(0x524F5554434C5345), close_button,
+                           "Discard", false) :
+        text_button(UINT64_C(0x524F5554434C5345), close_button, "Close",
+                    false);
+    tooltip(close_button, dirty ?
+            "Throw away the unapplied route changes" :
+            "Close the route editor", SIDE_TOP, false);
+    if (close_state & BS_CLICKED) route_editor_close(editor);
+}
+
 static void scene_settings_panel(Rectangle boundary, Track *track)
 {
     if (track == NULL || boundary.width < 1.0f || boundary.height < 1.0f) return;
@@ -4309,7 +4587,13 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     const float footer_height = 44.0f;
     const float row_height = 76.0f;
     size_t setting_count = scene_settings_count(p->scene.id);
-    float total_height = (float)setting_count*row_height;
+    size_t track_slot = (size_t)p->current_track;
+    bool editor_here = route_editor_matches_context(&p->route_editor,
+                                                    track_slot, scene_index);
+    float editor_extra = editor_here ?
+        scene_route_editor_row_extra(&p->route_editor) : 0.0f;
+    size_t editor_setting = p->route_editor.setting_index;
+    float total_height = (float)setting_count*row_height + editor_extra;
     float available_content_height = fmaxf(0.0f, boundary.height -
                                            (content_top - boundary.y) - footer_height);
     const float content_height = fminf(available_content_height, total_height);
@@ -4328,13 +4612,22 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         const Scene_Setting_Descriptor *descriptor = scene_settings_descriptor(
             p->scene.id, index);
         float y = content.y + (float)index*row_height - p->scene_settings_scroll;
-        if (descriptor == NULL || y + row_height < content.y ||
+        if (editor_here && index > editor_setting) y += editor_extra;
+        bool editing = editor_here && index == editor_setting;
+        float visible_height = row_height + (editing ? editor_extra : 0.0f);
+        if (descriptor == NULL || y + visible_height < content.y ||
             y > content.y + content.height) continue;
+        const Musi_Parameter_Mapping *routed = route_editor_find_route(
+            &track->scene_routes, scene_index, index);
         DrawTextEx(ui_font(), descriptor->label,
                    (Vector2){boundary.x + padding, y + 5.0f},
                    UI_FONT_LABEL, 0.0f, COLOR_UI_INK);
         char value_text[32];
-        float value = scene_settings_get(editable_settings, p->scene.id, index);
+        // Routed settings display the frame's effective (audio-driven) value;
+        // the base slider value stays untouched underneath the route.
+        float value = routed != NULL ?
+            scene_settings_get(&p->routed_scene_settings, p->scene.id, index) :
+            scene_settings_get(editable_settings, p->scene.id, index);
         if (descriptor->kind == SCENE_SETTING_TOGGLE) {
             bool hue_motion = p->scene.id == SCENE_SONG_ATLAS &&
                               index == ATLAS_SETTING_HUE_MOTION;
@@ -4348,33 +4641,84 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             snprintf(value_text, sizeof(value_text), "%.*f",
                      (int)descriptor->precision, value);
         }
+        Rectangle route_button = {
+            boundary.x + boundary.width - padding - 26.0f, y + 3.0f,
+            26.0f, 20.0f};
+        uint64_t route_button_id = UINT64_C(0x524F555441460000) +
+                                   (uint64_t)p->scene.id*
+                                   SCENE_SETTINGS_MAX_CONTROLS + index;
+        if (text_button(route_button_id, route_button, "~",
+                        routed != NULL || editing) & BS_CLICKED) {
+            if (route_editor_dirty(&p->route_editor)) {
+                notice_push(UI_NOTICE_WARNING, "Route edit in progress",
+                            "Apply or discard the open route draft first.",
+                            NULL, false);
+            } else if (editing) {
+                route_editor_close(&p->route_editor);
+            } else {
+                (void)route_editor_open(&p->route_editor, track_slot,
+                                        scene_index, index, routed);
+            }
+        }
+        tooltip(route_button, routed != NULL ?
+                "Edit the audio route driving this setting" :
+                "Drive this setting from the live audio analysis",
+                SIDE_LEFT, false);
         Vector2 value_size = MeasureTextEx(ui_font(), value_text, UI_FONT_VALUE, 0.0f);
         DrawTextEx(ui_font(), value_text,
-                   (Vector2){boundary.x + boundary.width - padding - value_size.x,
-                             y + 6.0f},
+                   (Vector2){route_button.x - 8.0f - value_size.x, y + 6.0f},
                    UI_FONT_VALUE, 0.0f, COLOR_ACCENT);
-        Rectangle slider = {boundary.x + padding, y + 31.0f,
-                            boundary.width - padding*2.0f, 30.0f};
-        bool changed;
-        if (descriptor->kind == SCENE_SETTING_TOGGLE) {
-            bool hue_motion = p->scene.id == SCENE_SONG_ATLAS &&
-                              index == ATLAS_SETTING_HUE_MOTION;
-            changed = scene_setting_toggle(
-                slider, p->scene.id, index, &value,
-                hue_motion ? "Manual" : "Filled",
-                hue_motion ? "Music" : "Wireframe");
+        if (editing) {
+            Rectangle editor_area = {boundary.x + padding, y + 29.0f,
+                                     boundary.width - padding*2.0f,
+                                     scene_route_editor_area_height(
+                                         &p->route_editor)};
+            scene_route_editor_panel(editor_area, track, descriptor);
+        } else if (routed != NULL) {
+            char summary[96];
+            route_editor_summary(routed, descriptor->precision, summary,
+                                 sizeof(summary));
+            DrawTextEx(ui_font(), summary,
+                       (Vector2){boundary.x + padding, y + 33.0f},
+                       13.0f, 0.0f, COLOR_UI_INK);
+            Rectangle meter = {boundary.x + padding, y + 52.0f,
+                               boundary.width - padding*2.0f, 7.0f};
+            scene_route_meter(meter, routed);
+            Rectangle hit = {boundary.x + padding, y + 29.0f,
+                             boundary.width - padding*2.0f, 32.0f};
+            tooltip(hit, "Open the route editor for this setting",
+                    SIDE_BOTTOM, false);
+            if (p->active_button_id == 0 &&
+                CheckCollisionPointRec(mouse, hit) &&
+                IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+                !route_editor_dirty(&p->route_editor)) {
+                (void)route_editor_open(&p->route_editor, track_slot,
+                                        scene_index, index, routed);
+            }
         } else {
-            changed = scene_setting_slider(
-                slider, p->scene.id, index, &value);
+            Rectangle slider = {boundary.x + padding, y + 31.0f,
+                                boundary.width - padding*2.0f, 30.0f};
+            bool changed;
+            if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+                bool hue_motion = p->scene.id == SCENE_SONG_ATLAS &&
+                                  index == ATLAS_SETTING_HUE_MOTION;
+                changed = scene_setting_toggle(
+                    slider, p->scene.id, index, &value,
+                    hue_motion ? "Manual" : "Filled",
+                    hue_motion ? "Music" : "Wireframe");
+            } else {
+                changed = scene_setting_slider(
+                    slider, p->scene.id, index, &value);
+            }
+            if (changed &&
+                scene_settings_set(editable_settings, p->scene.id, index, value)) {
+                commit_active_cue_settings(track, p->scene.id);
+                mark_project_dirty(track);
+            }
         }
-        if (changed &&
-            scene_settings_set(editable_settings, p->scene.id, index, value)) {
-            commit_active_cue_settings(track, p->scene.id);
-            mark_project_dirty(track);
-        }
-        DrawLine((int)(boundary.x + padding), (int)(y + row_height - 1.0f),
+        DrawLine((int)(boundary.x + padding), (int)(y + visible_height - 1.0f),
                  (int)(boundary.x + boundary.width - padding),
-                 (int)(y + row_height - 1.0f), COLOR_UI_RULE);
+                 (int)(y + visible_height - 1.0f), COLOR_UI_RULE);
     }
     EndScissorMode();
 
@@ -5312,11 +5656,12 @@ MUSIALIZER_PLUG bool plug_confirm_close(void)
         if (p->tracks.items[i].project_dirty) ++dirty_projects;
     }
     bool dirty_draft = lyric_editor_has_unsaved_draft(active);
+    bool dirty_route = route_editor_dirty(&p->route_editor);
     bool staged_suggestions = p->assist_candidate != NULL;
     bool analysis_running = assist_job_is_active(p->assist_job_state);
     bool export_running = p->rendering;
-    if (dirty_projects == 0 && !dirty_draft && !staged_suggestions &&
-        !analysis_running && !export_running) return true;
+    if (dirty_projects == 0 && !dirty_draft && !dirty_route &&
+        !staged_suggestions && !analysis_running && !export_running) return true;
 
     char message[768];
     size_t used = 0;
@@ -5325,6 +5670,9 @@ MUSIALIZER_PLUG bool plug_confirm_close(void)
     if (dirty_draft && used < sizeof(message)) used += (size_t)snprintf(
         message + used, sizeof(message) - used,
         "\n- Apply or discard the active lyric draft.");
+    if (dirty_route && used < sizeof(message)) used += (size_t)snprintf(
+        message + used, sizeof(message) - used,
+        "\n- Apply or discard the open audio-route edit.");
     if (staged_suggestions && used < sizeof(message)) used += (size_t)snprintf(
         message + used, sizeof(message) - used,
         "\n- Apply or discard the validated Assist result.");
@@ -6346,12 +6694,19 @@ static void restore_reloaded_tracks(float current_position, bool current_was_pla
         if (!IsMusicValid(music)) {
             TraceLog(LOG_WARNING, "HOTRELOAD: could not restore track %s", source->file_path);
             free(source->file_path);
+            // The route editor draft belongs to a track that no longer exists.
+            if (p->route_editor.open && p->route_editor.track_slot == read_index) {
+                route_editor_close(&p->route_editor);
+            }
             continue;
         }
         AttachAudioStreamProcessor(music.stream, callback);
         Track *destination = &p->tracks.items[write_index];
         if (destination != source) memmove(destination, source, sizeof(*destination));
         destination->music = music;
+        if (p->route_editor.open && p->route_editor.track_slot == read_index) {
+            p->route_editor.track_slot = write_index;
+        }
         if ((int)read_index == p->current_track) restored_current = (int)write_index;
         write_index += 1;
     }

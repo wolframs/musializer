@@ -18,9 +18,12 @@
   export are implemented.
 - **Reactivity routing:** audio-to-parameter routes (the format's dynamic
   `Musi_Parameter_Mapping` capability) are implemented at runtime for all ten
-  scenes, authorable via repeatable `--route` CLI arguments, and persisted in
-  `.musi` beside slider constants with byte-identical reopened renders. The
-  Tune-inspector route editor is the remaining phase; see
+  scenes, authorable via repeatable `--route` CLI arguments and visually in
+  the Tune inspector (per-row `~` affordance, inline draft editor with live
+  source meter, Apply/Discard with close-guard participation), and persisted
+  in `.musi` beside slider constants with byte-identical reopened renders.
+  Linux-only runtime validation so far. Deferred follow-ons (temporal
+  shaping, smoothed sources, cues UI, expression routes) are listed in
   `.hermes/plans/2026-07-17_150000-reactivity-routing-layer.md`.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.

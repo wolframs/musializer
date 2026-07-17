@@ -58,8 +58,26 @@ work this plan generalizes).
   no-route mp3-vs-project renders are identical, CLI argument order is
   irrelevant, and a sanitize-build routed render is clean. 191/191 C tests
   in debug/release/sanitize.
-- **Next:** Phase 3 Tune-inspector route editor (3.1 headless state machine
-  first).
+- **Phase 3 done (2026-07-18).** 3.1: `route_editor_state` headless draft
+  state machine (open/edit/apply/remove lifecycle, clamped mutations, dirty
+  predicate, summary/meter display policy; nine tests, precedent
+  `assist_ui_state`). 3.2: Tune-inspector integration in `plug.c` — per-row
+  `~` route affordance, routed rows show the live driven value plus a
+  `source · curve · range` summary and live-source meter in place of the
+  slider, inline editor row (source buttons, band stepper, input/output
+  mini-sliders, curve cycler, clamp/invert, Apply/Remove/Discard), dirty
+  draft joins `plug_confirm_close`, editor slot follows hot-reload track
+  compaction, `PLUG_STATE_VERSION` 27. 3.3: 200/200 C tests in
+  debug/release/sanitize, 82/82 Python, hotreload build clean, routed
+  project self-determinism re-verified (framemd5), routed-vs-plain differ,
+  `beat_phase` route exercised on a second scene (pulse) via CLI. The
+  sanitize app binary fails the two render smoke tests only because
+  LeakSanitizer flags one-time GL/driver init leaks — same reason the C
+  runner disables LSan; run those against a debug/release binary.
+  Interactive mouse-driven behavior was NOT synthetically injected; the
+  desktop interaction needs a human pass.
+- **Next:** user feedback on the editor UX; Phase 4 items remain gated on
+  explicit decisions.
 
 ---
 

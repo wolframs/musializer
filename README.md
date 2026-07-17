@@ -369,10 +369,20 @@ parameter is a scene-settings key (the `settings.` prefix is optional, e.g.
 frame, clamped to the setting's range. Routes are saved into `.musi` projects
 using the format's parameter-mapping representation — a setting persists as
 either its slider constant or its route — and reopened projects render
-byte-identically to the session that authored them. Editing routes in the
-Tune inspector is the next planned step; until then the CLI is the authoring
-surface. Projects containing routes are rejected by older builds' editors by
-design rather than being silently stripped.
+byte-identically to the session that authored them. Projects containing
+routes are rejected by older builds' editors by design rather than being
+silently stripped.
+
+Routes can also be authored visually: every row in the Tune inspector has a
+`~` button that opens an inline route editor with source buttons, a spectrum
+band stepper, input-window and output-range sliders, a response curve, and a
+clamp toggle. A live meter shows where the current audio sits inside the
+input window while you edit. A routed setting's row shows the live driven
+value plus a compact `source · curve · range` summary in place of its slider
+(the underlying slider value is kept but inactive until the route is
+removed). Route edits are drafts: they take effect on Apply, Discard throws
+them away, and an unapplied draft blocks quitting the same way an unapplied
+lyric draft does.
 
 `--render-window START DURATION` (seconds) exports only that span of the
 track. The engine first fast-forwards analysis, beat tracking, and scene
