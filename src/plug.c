@@ -6004,6 +6004,39 @@ static void draw_fullscreen_assist_status(Rectangle preview_boundary)
     EndScissorMode();
 }
 
+// Cadence renders timed lyrics as kinetic type; without any cues it falls
+// back to a deliberately faint ambient swarm that reads as a broken scene.
+// The hint is host chrome over the preview only, never drawn by the scene
+// itself, so exports stay clean and preview/export scene parity holds.
+static void draw_scene_empty_state_hint(const Track *track,
+                                        Rectangle preview_boundary)
+{
+    if (track == NULL || p->scene.id != SCENE_CADENCE ||
+        track->lyrics.count > 0) return;
+    if (preview_boundary.width < 320.0f ||
+        preview_boundary.height < 180.0f) return;
+
+    const char *title = "Cadence turns timed lyrics into kinetic type.";
+    const char *detail =
+        "This track has none yet. Add lines in Lyrics, or run Assist.";
+    float width = fminf(470.0f, preview_boundary.width - 24.0f);
+    Rectangle badge = {
+        preview_boundary.x + 12.0f,
+        preview_boundary.y + preview_boundary.height - 62.0f - 12.0f,
+        width, 62.0f,
+    };
+    DrawRectangleRec(badge, ColorAlpha(COLOR_UI_RAISED, 0.93f));
+    DrawRectangleLinesEx(badge, 1.0f, COLOR_UI_RULE);
+    DrawRectangleRec((Rectangle){badge.x, badge.y, 4.0f, badge.height}, COLOR_ACCENT);
+    BeginScissorMode((int)badge.x + 5, (int)badge.y,
+                     (int)fmaxf(0.0f, badge.width - 6.0f), (int)badge.height);
+    DrawTextEx(ui_font(), title, (Vector2){badge.x + 14.0f, badge.y + 12.0f},
+               14.0f, 1.0f, COLOR_UI_INK);
+    DrawTextEx(ui_font(), detail, (Vector2){badge.x + 14.0f, badge.y + 34.0f},
+               13.0f, 1.0f, COLOR_UI_MUTED);
+    EndScissorMode();
+}
+
 static void preview_screen(void)
 {
     int w = GetScreenWidth();
@@ -6135,6 +6168,7 @@ static void preview_screen(void)
             if (moved) hud_timer = HUD_TIMER_SECS;
 
             scene_render(preview_boundary, spectrum, scene_time, scene_dt);
+            draw_scene_empty_state_hint(track, preview_boundary);
             draw_fullscreen_assist_status(preview_boundary);
 
 #if 0
@@ -6183,6 +6217,7 @@ static void preview_screen(void)
 
             BeginScissorMode(preview_boundary.x, preview_boundary.y, preview_boundary.width, preview_boundary.height);
             scene_render(preview_boundary, spectrum, scene_time, scene_dt);
+            draw_scene_empty_state_hint(track, preview_boundary);
             notice_tray(preview_boundary);
             EndScissorMode();
 
