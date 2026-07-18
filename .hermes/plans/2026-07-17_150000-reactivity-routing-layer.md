@@ -88,8 +88,17 @@ work this plan generalizes).
   and quit; automatic scene switching pauses while the active route editor is
   open. 200/200 C tests pass in debug/release/sanitize, 83/83 Python tests
   pass, and all four application build profiles are clean.
-- **Next:** user feedback on the editor UX; Phase 4 items remain gated on
-  explicit decisions.
+- **Hands-on approval (2026-07-19).** Wolfram took the editor for a live
+  spin (Pulse Field, hue shift routed to beat phase, among others) and
+  accepted the feature as shipped. Verbatim verdict: "exactly as technically
+  horrible in terms of complicating everything as Winamp was :P Sold!"
+  First-contact friction noted for future polish: the per-row `~` affordance
+  is easy to overlook ("OH WAIT IT'S TIIIIIIINY"), and the open editor has no
+  onboarding hint ("I have no fucking idea what to do") — discoverability and
+  a first-run cue are candidate polish items, not blockers.
+- **Next:** Phase 4 items remain gated on explicit decisions; optional UX
+  polish (editor discoverability / first-run hint) may be picked up on
+  request.
 
 ---
 
