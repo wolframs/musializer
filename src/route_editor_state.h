@@ -100,6 +100,10 @@ const Musi_Parameter_Mapping *route_editor_find_route(
 // Display policy shared by the inspector and headless tests.
 const char *route_editor_source_label(Musi_Analysis_Source source);
 const char *route_editor_curve_label(Musi_Interpolation curve);
+// A route is authored as two (source -> output) anchors. Anchor names follow
+// the source so editor rows read as sentences; a generic "low/high" would be
+// wrong for beat phase, whose axis is time inside the beat, not loudness.
+const char *route_editor_anchor_label(Musi_Analysis_Source source, bool high);
 // Compact row summary, e.g. "Band 2 · Smooth · 0.40 → 2.20" with an
 // " · unclamped" suffix when clamping is off; precision comes from the
 // setting descriptor so values read like the slider they replace.

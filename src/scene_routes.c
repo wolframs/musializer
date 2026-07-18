@@ -300,6 +300,32 @@ bool scene_routes_import_mappings(Scene_Settings *settings,
     return true;
 }
 
+bool scene_route_output_value(const Musi_Parameter_Mapping *route,
+                              const Scene_Setting_Descriptor *descriptor,
+                              double source_value, double *mapped)
+{
+    if (route == NULL || descriptor == NULL || mapped == NULL) return false;
+    double value = 0.0;
+    if (!musi_mapping_evaluate(route, source_value, &value)) return false;
+    if (value < (double)descriptor->minimum) {
+        value = (double)descriptor->minimum;
+    }
+    if (value > (double)descriptor->maximum) {
+        value = (double)descriptor->maximum;
+    }
+    // Toggle descriptors accept only their two canonical values. Routes
+    // are continuous, so cross the binary boundary at the descriptor's
+    // midpoint instead of silently rejecting almost every mapped frame.
+    if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+        double midpoint = ((double)descriptor->minimum +
+                           (double)descriptor->maximum)*0.5;
+        value = value >= midpoint ? (double)descriptor->maximum :
+                                    (double)descriptor->minimum;
+    }
+    *mapped = value;
+    return true;
+}
+
 bool scene_routes_apply(const Scene_Route_Table *table, size_t scene_index,
                         const Scene_Route_Sources *sources,
                         const Scene_Settings *base, Scene_Settings *effective)
@@ -323,22 +349,8 @@ bool scene_routes_apply(const Scene_Route_Table *table, size_t scene_index,
         double mapped = 0.0;
         if (!scene_routes_source_value(sources, route->source,
                                        route->band_index, &source_value) ||
-            !musi_mapping_evaluate(route, source_value, &mapped)) continue;
-        if (mapped < (double)descriptor->minimum) {
-            mapped = (double)descriptor->minimum;
-        }
-        if (mapped > (double)descriptor->maximum) {
-            mapped = (double)descriptor->maximum;
-        }
-        // Toggle descriptors accept only their two canonical values. Routes
-        // are continuous, so cross the binary boundary at the descriptor's
-        // midpoint instead of silently rejecting almost every mapped frame.
-        if (descriptor->kind == SCENE_SETTING_TOGGLE) {
-            double midpoint = ((double)descriptor->minimum +
-                               (double)descriptor->maximum)*0.5;
-            mapped = mapped >= midpoint ? (double)descriptor->maximum :
-                                          (double)descriptor->minimum;
-        }
+            !scene_route_output_value(route, descriptor, source_value,
+                                      &mapped)) continue;
         if (!scene_settings_set(&staged, scene_index, setting_index,
                                 (float)mapped)) return false;
     }

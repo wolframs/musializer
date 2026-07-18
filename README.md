@@ -379,13 +379,18 @@ silently stripped.
 
 Routes can also be authored visually: every row in the Tune inspector has a
 `~` button that opens an inline route editor with source buttons, a spectrum
-band stepper, input-window and output-range sliders, a response curve, and a
-clamp toggle. A live meter shows where the current audio sits inside the
-input window while you edit. A routed setting's row shows the live driven
-value plus a compact `source · curve · range` summary in place of its slider
-(the underlying slider value is kept but inactive until the route is
-removed). Equal output endpoints disable Apply because `.musi` v1 represents
-that value as a slider. Route edits are drafts: they take effect on Apply,
+band stepper, a response curve, and a clamp toggle. The mapping itself is
+edited as two anchors, each pairing one source level with one output value —
+`Quiet 0.03 → 0.00` and `Loud 0.78 → 1.40` for loudness sources, `Calm/Busy`
+for spectral flux, `Beat start/Beat end` for beat phase. A transfer graph
+plots the full response (source level across, setting value up, the span
+between the anchors shaded) with a dot riding the curve at the live audio
+value, and a live readout shows the exact value the route is producing right
+now — computed by the same function the frame loop uses. A routed setting's
+row shows the live driven value plus a compact `source · curve · range`
+summary in place of its slider (the underlying slider value is kept but
+inactive until the route is removed). Equal output endpoints disable Apply
+because `.musi` v1 represents that value as a slider. Route edits are drafts: they take effect on Apply,
 Discard throws them away, and unapplied route changes block saving,
 project/track/scene changes, rendering, and quitting the same way an unapplied
 lyric draft does. Autosave also leaves the draft's track untouched. Automatic

@@ -252,6 +252,29 @@ TEST(route_editor_remove_deletes_route_and_closes)
     EXPECT_TRUE(route_editor_find_route(&table, SCENE_LOOM, weight) == NULL);
 }
 
+TEST(route_editor_anchor_labels_follow_the_source)
+{
+    // Loudness sources use loudness words; flux and beat phase measure
+    // different axes and must not claim "quiet" or "loud".
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(MUSI_ANALYSIS_RMS, false),
+                       "Quiet") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(MUSI_ANALYSIS_RMS, true),
+                       "Loud") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(MUSI_ANALYSIS_PEAK, false),
+                       "Quiet") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(MUSI_ANALYSIS_BAND, true),
+                       "Loud") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(
+                           MUSI_ANALYSIS_SPECTRAL_FLUX, false), "Calm") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(
+                           MUSI_ANALYSIS_SPECTRAL_FLUX, true), "Busy") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(
+                           MUSI_ANALYSIS_BEAT_PHASE, false),
+                       "Beat start") == 0);
+    EXPECT_TRUE(strcmp(route_editor_anchor_label(
+                           MUSI_ANALYSIS_BEAT_PHASE, true), "Beat end") == 0);
+}
+
 TEST(route_editor_summary_and_meter_read_back)
 {
     Musi_Parameter_Mapping route = committed_band_route();

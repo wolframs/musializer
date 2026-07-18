@@ -320,6 +320,18 @@ const char *route_editor_source_label(Musi_Analysis_Source source)
     }
 }
 
+const char *route_editor_anchor_label(Musi_Analysis_Source source, bool high)
+{
+    switch (source) {
+    case MUSI_ANALYSIS_RMS:
+    case MUSI_ANALYSIS_PEAK:
+    case MUSI_ANALYSIS_BAND: return high ? "Loud" : "Quiet";
+    case MUSI_ANALYSIS_SPECTRAL_FLUX: return high ? "Busy" : "Calm";
+    case MUSI_ANALYSIS_BEAT_PHASE: return high ? "Beat end" : "Beat start";
+    default: return high ? "High" : "Low";
+    }
+}
+
 const char *route_editor_curve_label(Musi_Interpolation curve)
 {
     switch (curve) {

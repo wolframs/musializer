@@ -248,6 +248,78 @@ TEST(scene_routes_apply_covers_every_setting_kind)
                 1.0, 0.0);
 }
 
+TEST(scene_route_output_value_matches_the_frame_loop_exactly)
+{
+    size_t scene_index = 0;
+    size_t setting_index = 0;
+    const Scene_Setting_Descriptor *descriptor =
+        scene_settings_descriptor_by_key("settings.loom.weight", &scene_index,
+                                         &setting_index);
+    REQUIRE_TRUE(descriptor != NULL);
+    double minimum = (double)descriptor->minimum;
+    double maximum = (double)descriptor->maximum;
+
+    Musi_Parameter_Mapping route = route_source("settings.loom.weight",
+                                                MUSI_ANALYSIS_RMS);
+    route.input_min = 0.2;
+    route.input_max = 0.8;
+    route.output_min = minimum;
+    route.output_max = maximum;
+
+    double mapped = 0.0;
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor, 0.5, &mapped));
+    EXPECT_NEAR(mapped, (minimum + maximum)*0.5, 0.0001);
+    // Clamp on: values outside the anchors hold the edge outputs.
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor, 0.0, &mapped));
+    EXPECT_NEAR(mapped, minimum, 0.0);
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor, 1.0, &mapped));
+    EXPECT_NEAR(mapped, maximum, 0.0);
+    // Clamp off extrapolates, but the descriptor range still bounds it.
+    route.clamp = false;
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor, 2.0, &mapped));
+    EXPECT_NEAR(mapped, maximum, 0.0);
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor, -1.0, &mapped));
+    EXPECT_NEAR(mapped, minimum, 0.0);
+    EXPECT_FALSE(scene_route_output_value(&route, descriptor, NAN, &mapped));
+    EXPECT_FALSE(scene_route_output_value(NULL, descriptor, 0.5, &mapped));
+    EXPECT_FALSE(scene_route_output_value(&route, NULL, 0.5, &mapped));
+
+    // Toggle quantization crosses at the descriptor midpoint.
+    const Scene_Setting_Descriptor *toggle =
+        scene_settings_descriptor(SCENE_ATLAS, ATLAS_SETTING_WIREFRAME);
+    REQUIRE_TRUE(toggle != NULL && toggle->kind == SCENE_SETTING_TOGGLE);
+    Musi_Parameter_Mapping toggle_route = route_source(
+        toggle->key, MUSI_ANALYSIS_RMS);
+    toggle_route.output_min = toggle->minimum;
+    toggle_route.output_max = toggle->maximum;
+    REQUIRE_TRUE(scene_route_output_value(&toggle_route, toggle, 0.49,
+                                          &mapped));
+    EXPECT_NEAR(mapped, (double)toggle->minimum, 0.0);
+    REQUIRE_TRUE(scene_route_output_value(&toggle_route, toggle, 0.51,
+                                          &mapped));
+    EXPECT_NEAR(mapped, (double)toggle->maximum, 0.0);
+
+    // The UI readout and the frame loop must agree bit-for-bit: applying the
+    // route through the table produces exactly this function's value.
+    route.clamp = true;
+    Scene_Route_Table table;
+    scene_route_table_init(&table);
+    REQUIRE_TRUE(scene_route_table_add(&table, scene_index, &route));
+    Scene_Route_Sources sources = {
+        .bands = NULL, .bands_count = 0,
+        .rms = 0.37f, .peak = 0.0f, .spectral_flux = 0.0f, .beat_phase = 0.0f,
+    };
+    Scene_Settings base;
+    scene_settings_init(&base);
+    Scene_Settings effective;
+    REQUIRE_TRUE(scene_routes_apply(&table, scene_index, &sources, &base,
+                                    &effective));
+    REQUIRE_TRUE(scene_route_output_value(&route, descriptor,
+                                          (double)sources.rms, &mapped));
+    EXPECT_NEAR(scene_settings_get(&effective, scene_index, setting_index),
+                (float)mapped, 0.0);
+}
+
 TEST(scene_route_spec_parsing_is_strict_and_convenient)
 {
     size_t scene_index = 0;

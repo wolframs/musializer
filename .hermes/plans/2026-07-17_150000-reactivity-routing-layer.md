@@ -96,6 +96,24 @@ work this plan generalizes).
   is easy to overlook ("OH WAIT IT'S TIIIIIIINY"), and the open editor has no
   onboarding hint ("I have no fucking idea what to do") — discoverability and
   a first-run cue are candidate polish items, not blockers.
+- **Anchor redesign done (2026-07-19).** Wolfram (via a GPT design review)
+  confirmed the four axis-grouped mini sliders hid the diagonal
+  input->output pairing, and the old tooltips defined each slider pair in
+  terms of the other. The editor now edits two anchors — each row pairs one
+  source level with one output value ("Quiet 0.03 -> 0.00" / "Loud 0.78 ->
+  1.40"; "Calm/Busy" for flux, "Beat start/Beat end" for beat phase, via
+  headless route_editor_anchor_label) — above a transfer graph (source
+  across, setting value up, anchor span shaded, live dot) and a live
+  in->out readout. Both sample scene_route_output_value, extracted from
+  scene_routes_apply (descriptor clamp + toggle midpoint), so the UI can
+  never disagree with the frame loop; a test asserts bit-for-bit agreement.
+  "Invert" is now "Swap" (beat phase has no "louder"). The UI font atlas
+  gained the 0x2190-0x2199 arrow range, fixing the routed-row summary's
+  "?" arrows. Export byte-identity re-proven against a HEAD-baseline
+  worktree binary (framemd5). 202/202 C tests, full profile builds, and
+  the Python suite validated; UI verified by injected-click screenshots
+  under Xvfb. `--mute` added for silent scripted launches; smoke and E2E
+  tests now pass it.
 - **Next:** Phase 4 items remain gated on explicit decisions; optional UX
   polish (editor discoverability / first-run hint) may be picked up on
   request.

@@ -290,7 +290,8 @@ static bool ui_font_codepoint(int codepoint)
     return (codepoint >= 0x20 && codepoint <= 0x024F) ||
            (codepoint >= 0x2000 && codepoint <= 0x206F) ||
            (codepoint >= 0x20A0 && codepoint <= 0x20CF) ||
-           (codepoint >= 0x2100 && codepoint <= 0x214F);
+           (codepoint >= 0x2100 && codepoint <= 0x214F) ||
+           (codepoint >= 0x2190 && codepoint <= 0x2199);
 }
 
 static void analyzer_configure(uint32_t sample_rate, uint32_t channels)
@@ -4166,7 +4167,7 @@ static bool scene_setting_toggle(Rectangle boundary, Scene_Id scene_id,
 // slider zone; the band stepper row only exists for the band source.
 static float scene_route_editor_area_height(const Route_Editor_State *editor)
 {
-    float height = 24.0f + 26.0f + 40.0f + 40.0f + 26.0f + 32.0f + 4.0f;
+    float height = 24.0f + 26.0f + 40.0f + 40.0f + 70.0f + 26.0f + 32.0f + 4.0f;
     if (editor->draft.source == MUSI_ANALYSIS_BAND) height += 24.0f;
     return height;
 }
@@ -4234,6 +4235,62 @@ static void scene_route_meter(Rectangle bar, const Musi_Parameter_Mapping *route
                      COLOR_ACCENT);
 }
 
+// The transfer curve: source level across, setting value up. Every sample
+// goes through scene_route_output_value - the same function the frame loop
+// uses - so curve shape, swapped outputs, clamping, and toggle quantization
+// are drawn exactly as they will sound. The shaded band is the span between
+// the two anchors; the dot rides the curve at the live source value.
+static void scene_route_transfer_graph(Rectangle plot,
+                                       const Musi_Parameter_Mapping *route,
+                                       const Scene_Setting_Descriptor *descriptor,
+                                       bool have_live, double live)
+{
+    DrawRectangleRec(plot, COLOR_UI_RAISED);
+    float window_left = (float)fmin(fmax(route->input_min, 0.0), 1.0);
+    float window_right = (float)fmin(fmax(route->input_max, 0.0), 1.0);
+    if (window_right > window_left) {
+        DrawRectangleRec((Rectangle){plot.x + plot.width*window_left, plot.y,
+                                     plot.width*(window_right - window_left),
+                                     plot.height},
+                         ColorAlpha(COLOR_ACCENT, 0.12f));
+    }
+    DrawRectangleLinesEx(plot, 1.0f, COLOR_UI_RULE);
+
+    double span = (double)descriptor->maximum - (double)descriptor->minimum;
+    if (span <= 0.0) span = 1.0;
+    const int samples = 64;
+    Vector2 previous = {0};
+    bool have_previous = false;
+    for (int i = 0; i <= samples; ++i) {
+        double source = (double)i/(double)samples;
+        double value = 0.0;
+        if (!scene_route_output_value(route, descriptor, source, &value)) {
+            have_previous = false;
+            continue;
+        }
+        Vector2 point = {
+            plot.x + plot.width*(float)source,
+            plot.y + plot.height*
+                (1.0f - (float)((value - (double)descriptor->minimum)/span)),
+        };
+        if (have_previous) DrawLineEx(previous, point, 2.0f, COLOR_ACCENT);
+        previous = point;
+        have_previous = true;
+    }
+
+    double mapped = 0.0;
+    if (have_live &&
+        scene_route_output_value(route, descriptor, live, &mapped)) {
+        Vector2 dot = {
+            plot.x + plot.width*(float)fmin(fmax(live, 0.0), 1.0),
+            plot.y + plot.height*
+                (1.0f - (float)((mapped - (double)descriptor->minimum)/span)),
+        };
+        DrawCircleV(dot, 4.0f, COLOR_UI_INK);
+        DrawCircleV(dot, 2.5f, COLOR_ACCENT);
+    }
+}
+
 static void scene_route_editor_panel(Rectangle area, Track *track,
                                      const Scene_Setting_Descriptor *descriptor)
 {
@@ -4244,10 +4301,23 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
 
     char caption[96];
     double live = 0.0;
+    double live_output = 0.0;
     bool have_live = scene_routes_source_value(&p->ui_route_sources,
                                                draft->source,
                                                draft->band_index, &live);
-    if (have_live) {
+    bool have_output = have_live &&
+        scene_route_output_value(draft, descriptor, live, &live_output);
+    if (have_output && descriptor->kind == SCENE_SETTING_TOGGLE) {
+        snprintf(caption, sizeof(caption), "LIVE %s %.3f \xE2\x86\x92 %s",
+                 route_editor_source_label(draft->source), live,
+                 live_output >= ((double)descriptor->minimum +
+                                 (double)descriptor->maximum)*0.5 ?
+                     "On" : "Off");
+    } else if (have_output) {
+        snprintf(caption, sizeof(caption), "LIVE %s %.3f \xE2\x86\x92 %.*f",
+                 route_editor_source_label(draft->source), live,
+                 (int)descriptor->precision, live_output);
+    } else if (have_live) {
         snprintf(caption, sizeof(caption), "LIVE %s  %.3f",
                  route_editor_source_label(draft->source), live);
     } else {
@@ -4299,57 +4369,65 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
         cursor += 24.0f;
     }
 
-    snprintf(caption, sizeof(caption), "INPUT WINDOW  %.2f to %.2f",
-             draft->input_min, draft->input_max);
-    DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
-               COLOR_UI_MUTED);
-    float pair_width = (area.width - gap)*0.5f;
-    Rectangle input_low = {area.x, cursor + 15.0f, pair_width, 20.0f};
-    Rectangle input_high = {area.x + pair_width + gap, cursor + 15.0f,
-                            pair_width, 20.0f};
-    float normalized = (float)draft->input_min;
-    if (route_mini_slider(UINT64_C(0x524F5554494E4C4F), input_low,
-                          &normalized)) {
-        (void)route_editor_set_input_min(editor, (double)normalized);
-    }
-    normalized = (float)draft->input_max;
-    if (route_mini_slider(UINT64_C(0x524F5554494E4849), input_high,
-                          &normalized)) {
-        (void)route_editor_set_input_max(editor, (double)normalized);
-    }
-    tooltip(input_low, "Source level mapped to the left output value",
-            SIDE_TOP, false);
-    tooltip(input_high, "Source level mapped to the right output value",
-            SIDE_TOP, false);
-    cursor += 40.0f;
-
-    snprintf(caption, sizeof(caption), "OUTPUT  %.*f to %.*f",
-             (int)descriptor->precision, draft->output_min,
-             (int)descriptor->precision, draft->output_max);
-    DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
-               COLOR_UI_MUTED);
+    // Each anchor pairs one source level with one output value; the physical
+    // grouping mirrors that pairing (the old layout grouped the four sliders
+    // by axis, hiding the diagonal input->output relationship).
     float span = descriptor->maximum - descriptor->minimum;
     if (span <= 0.0f) span = 1.0f;
-    Rectangle output_low = {area.x, cursor + 15.0f, pair_width, 20.0f};
-    Rectangle output_high = {area.x + pair_width + gap, cursor + 15.0f,
-                             pair_width, 20.0f};
-    normalized = ((float)draft->output_min - descriptor->minimum)/span;
-    if (route_mini_slider(UINT64_C(0x524F55544F55544C), output_low,
-                          &normalized)) {
-        (void)route_editor_set_output_low(
-            editor, (double)(descriptor->minimum + normalized*span));
+    const float arrow_width = 18.0f;
+    float pair_width = (area.width - arrow_width - gap*2.0f)*0.5f;
+    for (int anchor = 0; anchor < 2; ++anchor) {
+        bool high = anchor == 1;
+        const char *name = route_editor_anchor_label(draft->source, high);
+        double anchor_input = high ? draft->input_max : draft->input_min;
+        double anchor_output = high ? draft->output_max : draft->output_min;
+        snprintf(caption, sizeof(caption),
+                 "%s  %.2f \xE2\x86\x92 %.*f", name, anchor_input,
+                 (int)descriptor->precision, anchor_output);
+        DrawTextEx(ui_font(), caption, (Vector2){area.x, cursor}, 12.0f, 1.0f,
+                   COLOR_UI_MUTED);
+        Rectangle input_slider = {area.x, cursor + 15.0f, pair_width, 20.0f};
+        Rectangle output_slider = {area.x + pair_width + arrow_width +
+                                       gap*2.0f,
+                                   cursor + 15.0f, pair_width, 20.0f};
+        Vector2 arrow_size = MeasureTextEx(ui_font(), "\xE2\x86\x92", 14.0f,
+                                           0.0f);
+        DrawTextEx(ui_font(), "\xE2\x86\x92",
+                   (Vector2){area.x + pair_width + gap +
+                                 (arrow_width - arrow_size.x)*0.5f,
+                             cursor + 15.0f + (20.0f - arrow_size.y)*0.5f},
+                   14.0f, 0.0f, COLOR_UI_MUTED);
+        float normalized = (float)anchor_input;
+        if (route_mini_slider(high ? UINT64_C(0x524F5554494E4849) :
+                                     UINT64_C(0x524F5554494E4C4F),
+                              input_slider, &normalized)) {
+            if (high) (void)route_editor_set_input_max(editor,
+                                                       (double)normalized);
+            else (void)route_editor_set_input_min(editor, (double)normalized);
+        }
+        normalized = ((float)anchor_output - descriptor->minimum)/span;
+        if (route_mini_slider(high ? UINT64_C(0x524F55544F555448) :
+                                     UINT64_C(0x524F55544F55544C),
+                              output_slider, &normalized)) {
+            double value = (double)(descriptor->minimum + normalized*span);
+            if (high) (void)route_editor_set_output_high(editor, value);
+            else (void)route_editor_set_output_low(editor, value);
+        }
+        snprintf(caption, sizeof(caption),
+                 "%s level of the %s anchor",
+                 route_editor_source_label(draft->source), name);
+        tooltip(input_slider, caption, SIDE_TOP, false);
+        snprintf(caption, sizeof(caption),
+                 "Value this setting takes at the %s anchor", name);
+        tooltip(output_slider, caption, SIDE_TOP, false);
+        cursor += 40.0f;
     }
-    normalized = ((float)draft->output_max - descriptor->minimum)/span;
-    if (route_mini_slider(UINT64_C(0x524F55544F555448), output_high,
-                          &normalized)) {
-        (void)route_editor_set_output_high(
-            editor, (double)(descriptor->minimum + normalized*span));
-    }
-    tooltip(output_low, "Setting value at the bottom of the input window",
-            SIDE_TOP, false);
-    tooltip(output_high, "Setting value at the top of the input window",
-            SIDE_TOP, false);
-    cursor += 40.0f;
+
+    Rectangle plot = {area.x, cursor, area.width, 64.0f};
+    scene_route_transfer_graph(plot, draft, descriptor, have_live, live);
+    tooltip(plot, "The full response: source level across, setting value up. "
+            "The shaded band spans the two anchors.", SIDE_TOP, false);
+    cursor += 70.0f;
 
     Rectangle curve_previous = {area.x, cursor, 34.0f, 22.0f};
     Rectangle curve_next = {area.x + area.width - 34.0f, cursor, 34.0f, 22.0f};
@@ -4389,14 +4467,14 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
                     draft->clamp) & BS_CLICKED) {
         (void)route_editor_set_clamp(editor, !draft->clamp);
     }
-    tooltip(clamp_button, "Hold the output inside its range instead of "
-            "extrapolating past it", SIDE_TOP, false);
-    if (text_button(UINT64_C(0x524F5554494E5656), invert_button, "Invert",
+    tooltip(clamp_button, "Outside the anchors, hold the edge value instead "
+            "of extrapolating past it", SIDE_TOP, false);
+    if (text_button(UINT64_C(0x524F5554494E5656), invert_button, "Swap",
                     false) & BS_CLICKED) {
         (void)route_editor_swap_output(editor);
     }
-    tooltip(invert_button, "Swap the output endpoints so louder means lower",
-            SIDE_TOP, false);
+    tooltip(invert_button, "Swap the two output values so the response runs "
+            "the other way", SIDE_TOP, false);
 
     bool dirty = route_editor_dirty(editor);
     if (route_editor_can_apply(editor) && (dirty || !editor->has_committed)) {

@@ -96,6 +96,15 @@ bool scene_routes_import_mappings(Scene_Settings *settings,
                                   const Musi_Parameter_Mapping *mappings,
                                   size_t count);
 
+// The exact value one route produces for one source sample: mapping
+// evaluation, then the descriptor-range clamp, then toggle midpoint
+// quantization. scene_routes_apply consumes this per frame, and the Tune
+// editor's live readout and transfer graph call the same function, so what
+// the UI displays can never drift from what the frame loop does.
+bool scene_route_output_value(const Musi_Parameter_Mapping *route,
+                              const Scene_Setting_Descriptor *descriptor,
+                              double source_value, double *mapped);
+
 // Copies base into effective, then applies this scene's routes on top.
 // A route whose source or evaluation fails this frame leaves the base value
 // untouched; successful routes are clamped to the descriptor range. The
