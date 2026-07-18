@@ -230,6 +230,12 @@ bool route_editor_dirty(const Route_Editor_State *state)
     return state->touched;
 }
 
+bool route_editor_dirty_for_track(const Route_Editor_State *state,
+                                  size_t track_slot)
+{
+    return route_editor_dirty(state) && state->track_slot == track_slot;
+}
+
 bool route_editor_can_apply(const Route_Editor_State *state)
 {
     return state != NULL && state->open &&

@@ -54,6 +54,11 @@ bool scene_route_valid(size_t scene_index, const Musi_Parameter_Mapping *route)
     if (!isfinite(route->output_min) || !isfinite(route->output_max)) {
         return false;
     }
+    // A flat full-range RMS mapping is byte-for-byte indistinguishable from
+    // the v1 slider representation. More generally, equal endpoints are not
+    // audio-reactive at all. Keep those values in Scene_Settings so a route
+    // can never silently reopen as a slider and lose its authoring identity.
+    if (route->output_min == route->output_max) return false;
     return true;
 }
 
@@ -302,7 +307,7 @@ bool scene_routes_apply(const Scene_Route_Table *table, size_t scene_index,
     if (table == NULL || sources == NULL || effective == NULL ||
         scene_index >= SCENE_SETTINGS_SCENE_COUNT ||
         !scene_settings_valid(base)) return false;
-    if (effective != base) *effective = *base;
+    Scene_Settings staged = *base;
 
     const Scene_Routes *routes = &table->scenes[scene_index];
     if (routes->count > SCENE_ROUTES_PER_SCENE) return false;
@@ -325,8 +330,18 @@ bool scene_routes_apply(const Scene_Route_Table *table, size_t scene_index,
         if (mapped > (double)descriptor->maximum) {
             mapped = (double)descriptor->maximum;
         }
-        (void)scene_settings_set(effective, scene_index, setting_index,
-                                 (float)mapped);
+        // Toggle descriptors accept only their two canonical values. Routes
+        // are continuous, so cross the binary boundary at the descriptor's
+        // midpoint instead of silently rejecting almost every mapped frame.
+        if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+            double midpoint = ((double)descriptor->minimum +
+                               (double)descriptor->maximum)*0.5;
+            mapped = mapped >= midpoint ? (double)descriptor->maximum :
+                                          (double)descriptor->minimum;
+        }
+        if (!scene_settings_set(&staged, scene_index, setting_index,
+                                (float)mapped)) return false;
     }
+    *effective = staged;
     return true;
 }

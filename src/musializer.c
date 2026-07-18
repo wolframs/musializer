@@ -8,6 +8,7 @@
 #include <raylib.h>
 
 #define PREVIEW_AUDIO_BUFFER_FRAMES 8192
+enum { COMMAND_LINE_ROUTE_CAPACITY = 256 };
 
 #ifndef _WIN32
 #include <signal.h> // needed for sigaction()
@@ -217,6 +218,8 @@ int main(int argc, char **argv)
     bool render_window_set = false;
     double render_window_start = 0.0;
     double render_window_duration = 0.0;
+    const char *route_specs[COMMAND_LINE_ROUTE_CAPACITY] = {0};
+    size_t route_spec_count = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
@@ -246,12 +249,22 @@ int main(int argc, char **argv)
             continue;
         }
         if (strcmp(argv[i], "--route") == 0) {
-            if (i + 1 >= argc || !plug_add_scene_route(argv[++i])) {
+            if (i + 1 >= argc) {
                 TraceLog(LOG_WARNING,
-                         "Invalid command-line route; expected "
+                         "Missing command-line route; expected "
                          "parameter:source:band:in_min:in_max:out_min:out_max"
                          "[:curve][:noclamp]");
                 command_line_error = true;
+            } else if (route_spec_count >= COMMAND_LINE_ROUTE_CAPACITY) {
+                TraceLog(LOG_WARNING, "Too many command-line routes (maximum %u)",
+                         (unsigned)COMMAND_LINE_ROUTE_CAPACITY);
+                command_line_error = true;
+                i += 1;
+            } else {
+                // Defer routes until every positional/--project input has been
+                // loaded. Otherwise a project hydration can overwrite a route
+                // that happened to appear earlier in argv.
+                route_specs[route_spec_count++] = argv[++i];
             }
             continue;
         }
@@ -338,6 +351,16 @@ int main(int argc, char **argv)
         if (IsFileExtension(argv[i], ".musi") ?
             !plug_load_project(argv[i]) : !plug_load_track(argv[i])) {
             TraceLog(LOG_WARNING, "Could not load command-line track: %s", argv[i]);
+            command_line_error = true;
+        }
+    }
+
+    for (size_t i = 0; i < route_spec_count; ++i) {
+        if (!plug_add_scene_route(route_specs[i])) {
+            TraceLog(LOG_WARNING,
+                     "Invalid or duplicate command-line route; expected "
+                     "parameter:source:band:in_min:in_max:out_min:out_max"
+                     "[:curve][:noclamp]");
             command_line_error = true;
         }
     }

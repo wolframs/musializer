@@ -6,7 +6,12 @@
 
 // Headless tests cannot include scene.h (raylib); these mirror the Scene_Id
 // ordering that scene_settings.c's descriptor tables are built around.
-enum { SCENE_LOOM = 8, SCENE_SPECTRUM = 0, COUNT_SCENES = 10 };
+enum {
+    SCENE_SPECTRUM = 0,
+    SCENE_ATLAS = 4,
+    SCENE_LOOM = 8,
+    COUNT_SCENES = 10,
+};
 
 static Musi_Parameter_Mapping route_band(const char *parameter,
                                          uint16_t band_index,
@@ -67,6 +72,10 @@ TEST(scene_routes_validate_rejects_malformed_routes)
                                                  0.0, 1.0);
     poisoned.output_max = NAN;
     EXPECT_FALSE(scene_route_valid(SCENE_LOOM, &poisoned));
+
+    Musi_Parameter_Mapping flat = route_band("settings.loom.weight", 0,
+                                             1.25, 1.25);
+    EXPECT_FALSE(scene_route_valid(SCENE_LOOM, &flat));
 }
 
 TEST(scene_routes_table_rejects_duplicates_and_overflow)
@@ -181,29 +190,62 @@ TEST(scene_routes_apply_replaces_clamps_and_preserves_base)
     EXPECT_TRUE(scene_settings_valid(&effective));
 }
 
-TEST(scene_routes_apply_matches_constant_slider_semantics)
+TEST(scene_routes_apply_covers_every_setting_kind)
 {
-    // A constant-shaped mapping (output_min == output_max) must behave
-    // exactly like today's persisted sliders: the value lands verbatim.
     Scene_Settings base;
     scene_settings_init(&base);
     Scene_Route_Table table;
     scene_route_table_init(&table);
-    Musi_Parameter_Mapping constant = route_source("settings.loom.density",
-                                                   MUSI_ANALYSIS_RMS);
-    constant.output_min = 1.25;
-    constant.output_max = 1.25;
-    EXPECT_TRUE(scene_route_table_add(&table, SCENE_LOOM, &constant));
+
+    // Route every descriptor through the shared boundary. This catches new
+    // setting kinds or descriptors that cannot accept their mapped values,
+    // rather than testing only a hand-picked slider.
+    for (size_t scene = 0; scene < COUNT_SCENES; ++scene) {
+        for (size_t setting = 0; setting < scene_settings_count(scene); ++setting) {
+            const Scene_Setting_Descriptor *descriptor =
+                scene_settings_descriptor(scene, setting);
+            REQUIRE_TRUE(descriptor != NULL);
+            Musi_Parameter_Mapping route = route_source(
+                descriptor->key, MUSI_ANALYSIS_RMS);
+            route.output_min = descriptor->minimum;
+            route.output_max = descriptor->maximum;
+            REQUIRE_TRUE(scene_route_table_add(&table, scene, &route));
+        }
+    }
 
     Scene_Route_Sources sources = {
         .bands = NULL, .bands_count = 0,
-        .rms = 0.7f, .peak = 0.9f, .spectral_flux = 0.2f, .beat_phase = 0.1f,
+        .rms = 0.25f, .peak = 0.9f, .spectral_flux = 0.2f, .beat_phase = 0.1f,
     };
-    Scene_Settings effective;
-    REQUIRE_TRUE(scene_routes_apply(&table, SCENE_LOOM, &sources, &base,
-                                    &effective));
-    EXPECT_NEAR(scene_settings_get(&effective, SCENE_LOOM,
-                                   LOOM_SETTING_DENSITY), 1.25f, 0.0001f);
+    for (size_t scene = 0; scene < COUNT_SCENES; ++scene) {
+        Scene_Settings effective;
+        REQUIRE_TRUE(scene_routes_apply(&table, scene, &sources, &base,
+                                        &effective));
+        EXPECT_TRUE(scene_settings_valid(&effective));
+        for (size_t setting = 0; setting < scene_settings_count(scene); ++setting) {
+            const Scene_Setting_Descriptor *descriptor =
+                scene_settings_descriptor(scene, setting);
+            double expected = descriptor->minimum +
+                ((double)descriptor->maximum - descriptor->minimum)*sources.rms;
+            if (descriptor->kind == SCENE_SETTING_TOGGLE) {
+                double midpoint = ((double)descriptor->minimum +
+                                   descriptor->maximum)*0.5;
+                expected = expected >= midpoint ? descriptor->maximum :
+                                                  descriptor->minimum;
+            }
+            EXPECT_NEAR(scene_settings_get(&effective, scene, setting),
+                        expected, 0.0001);
+        }
+    }
+
+    // Exercise the other side of the binary threshold too.
+    sources.rms = 0.75f;
+    Scene_Settings atlas;
+    REQUIRE_TRUE(scene_routes_apply(&table, SCENE_ATLAS, &sources, &base,
+                                    &atlas));
+    EXPECT_NEAR(scene_settings_get(&atlas, SCENE_ATLAS,
+                                   ATLAS_SETTING_WIREFRAME),
+                1.0, 0.0);
 }
 
 TEST(scene_route_spec_parsing_is_strict_and_convenient)
@@ -251,6 +293,8 @@ TEST(scene_route_spec_parsing_is_strict_and_convenient)
         "loom.weight:rms:0:0:1:0:nan", &scene_index, &route));
     EXPECT_FALSE(scene_route_parse_spec(
         "loom.weight:rms:3:0:1:0:1", &scene_index, &route));  // band on rms
+    EXPECT_FALSE(scene_route_parse_spec(
+        "loom.weight:rms:0:0:1:1.25:1.25", &scene_index, &route));
 }
 
 TEST(scene_routes_persistence_round_trips_constants_and_routes)

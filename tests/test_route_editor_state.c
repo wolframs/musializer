@@ -136,6 +136,13 @@ TEST(route_editor_setters_keep_draft_valid)
     EXPECT_NEAR(state.draft.output_min, 0.40, 1e-6);
     EXPECT_NEAR(state.draft.output_max, 2.50, 1e-6);
 
+    // Equal endpoints are a slider constant in .musi v1, not a route. Keep
+    // Apply disabled instead of letting authoring identity disappear on open.
+    EXPECT_TRUE(route_editor_set_output_high(&state, state.draft.output_min));
+    EXPECT_FALSE(route_editor_can_apply(&state));
+    EXPECT_TRUE(route_editor_set_output_high(&state, 2.50));
+    EXPECT_TRUE(route_editor_can_apply(&state));
+
     EXPECT_FALSE(route_editor_set_curve(&state,
                                         (Musi_Interpolation)MUSI_INTERPOLATION_COUNT));
     EXPECT_FALSE(route_editor_set_source(&state,
@@ -196,12 +203,15 @@ TEST(route_editor_apply_commits_and_replaces_in_table)
     EXPECT_TRUE(route_editor_set_source(&state, MUSI_ANALYSIS_BAND));
     EXPECT_TRUE(route_editor_step_band(&state, 2, 24));
     EXPECT_TRUE(route_editor_dirty(&state));
+    EXPECT_TRUE(route_editor_dirty_for_track(&state, TRACK_A));
+    EXPECT_FALSE(route_editor_dirty_for_track(&state, TRACK_B));
 
     EXPECT_TRUE(route_editor_apply(&state, &table));
     EXPECT_EQ_SIZE(table.scenes[SCENE_LOOM].count, 1);
     EXPECT_TRUE(route_editor_is_open(&state));
     EXPECT_TRUE(state.has_committed);
     EXPECT_FALSE(route_editor_dirty(&state));
+    EXPECT_FALSE(route_editor_dirty_for_track(&state, TRACK_A));
     const Musi_Parameter_Mapping *routed =
         route_editor_find_route(&table, SCENE_LOOM, weight);
     EXPECT_TRUE(routed != NULL);

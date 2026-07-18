@@ -110,6 +110,65 @@ class RenderProductSmokeTests(unittest.TestCase):
                          if path.name.startswith(".musializer-")]
             self.assertEqual(leftovers, [])
 
+    def test_route_arguments_apply_after_project_loading_in_either_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            audio = directory / "route order.mp3"
+            base_project = directory / "base.musi"
+            before_project = directory / "route-before-project.musi"
+            after_project = directory / "route-after-project.musi"
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i",
+                    "sine=frequency=440:sample_rate=48000:duration=0.137",
+                    "-ac", "2", "-codec:a", "libmp3lame", "-q:a", "4",
+                    str(audio),
+                ],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+
+            def run_app(arguments):
+                completed = subprocess.run(
+                    ["xvfb-run", "-a", str(APP), *arguments],
+                    cwd=ROOT, capture_output=True, text=True, timeout=60,
+                )
+                if completed.returncode != 0 and (
+                    "Could not initialize audio device" in completed.stderr
+                    or "Could not initialize the rendering window" in completed.stderr
+                ):
+                    self.skipTest("host has no usable graphical/audio runtime")
+                self.assertEqual(
+                    completed.returncode, 0,
+                    msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+                )
+
+            run_app([str(audio), "--save-project", str(base_project)])
+            route = "pulse.weight:peak:0:0:1:1:8:smoothstep"
+            run_app([
+                "--route", route, "--project", str(base_project),
+                "--save-project", str(before_project),
+            ])
+            run_app([
+                "--project", str(base_project), "--route", route,
+                "--save-project", str(after_project),
+            ])
+
+            def persisted_route(path):
+                document = json.loads(path.read_text(encoding="utf-8"))
+                return next(
+                    mapping for mapping in document["scenes"][0]["mappings"]
+                    if mapping["parameter"] == "settings.pulse.weight"
+                )
+
+            before = persisted_route(before_project)
+            after = persisted_route(after_project)
+            self.assertEqual(before, after)
+            self.assertEqual(before["source"], "peak")
+            self.assertEqual(before["output_min"], 1)
+            self.assertEqual(before["output_max"], 8)
+            self.assertEqual(before["interpolation"], "smoothstep")
+
     def test_render_window_matches_the_same_span_of_a_full_export(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

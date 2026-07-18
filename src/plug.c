@@ -275,6 +275,10 @@ typedef struct {
 
 static Plug *p = NULL;
 
+static uint64_t notice_push(Ui_Notice_Severity severity, const char *title,
+                            const char *detail, const char *path,
+                            bool persistent);
+
 static Font ui_font(void)
 {
     if (p != NULL && IsFontValid(p->ui_font)) return p->ui_font;
@@ -405,6 +409,50 @@ static Track *current_track(void)
         return &p->tracks.items[p->current_track];
     }
     return NULL;
+}
+
+static bool route_editor_dirty_for_active_track(void)
+{
+    return p->current_track >= 0 &&
+        route_editor_dirty_for_track(&p->route_editor,
+                                     (size_t)p->current_track);
+}
+
+static bool route_editor_open_for_active_track(void)
+{
+    return p->current_track >= 0 && p->route_editor.open &&
+        p->route_editor.track_slot == (size_t)p->current_track;
+}
+
+static bool route_editor_dirty_for_track_pointer(const Track *track)
+{
+    if (track == NULL || !route_editor_dirty(&p->route_editor) ||
+        p->route_editor.track_slot >= p->tracks.count) return false;
+    return track == &p->tracks.items[p->route_editor.track_slot];
+}
+
+static bool route_editor_allow_active_context_change(void)
+{
+    if (!route_editor_dirty_for_active_track()) {
+        // A clean inline editor has nothing to preserve out of sight.
+        if (route_editor_open_for_active_track()) {
+            route_editor_close(&p->route_editor);
+        }
+        return true;
+    }
+    notice_push(UI_NOTICE_WARNING, "Route edit in progress",
+                "Apply or discard the open audio-route edit before changing tracks or scenes.",
+                NULL, false);
+    return false;
+}
+
+static bool route_editor_allow_active_save(void)
+{
+    if (!route_editor_dirty_for_active_track()) return true;
+    notice_push(UI_NOTICE_WARNING, "Route draft is not saved yet",
+                "Apply or discard the audio-route edit before saving the project.",
+                NULL, false);
+    return false;
 }
 
 static uint64_t scene_seed_for_track(const Track *track)
@@ -777,6 +825,8 @@ MUSIALIZER_PLUG bool plug_select_scene(const char *name)
     if (!scene_id_from_name(name, &id)) return false;
 
     Track *track = current_track();
+    if (track != NULL && p->scene.id != id &&
+        !route_editor_allow_active_context_change()) return false;
     bool selected = scene_instance_select(&p->scene, id, scene_seed_for_track(track));
     if (selected) {
         if (track != NULL) {
@@ -790,6 +840,9 @@ MUSIALIZER_PLUG bool plug_select_scene(const char *name)
 static void apply_auto_scene_switch(Track *track, double time_seconds)
 {
     if (track == NULL) return;
+    // Keep the scene hosting the inline editor visible during preview. Export
+    // has no interactive draft and must still replay every automatic cue.
+    if (!p->rendering && route_editor_open_for_active_track()) return;
     uint32_t scene_index = 0;
     Scene_Switch_Result result = scene_switch_update(
         &track->scene_switches, time_seconds, &scene_index);
@@ -1070,13 +1123,11 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
     }
 }
 
-static uint64_t notice_push(Ui_Notice_Severity severity, const char *title,
-                            const char *detail, const char *path, bool persistent);
-
 static bool select_base_scene(Scene_Id selected)
 {
     Track *track = current_track();
     if (selected < 0 || selected >= COUNT_SCENES || p->scene.id == selected) return false;
+    if (track != NULL && !route_editor_allow_active_context_change()) return false;
     if (!scene_instance_select(&p->scene, selected, scene_seed_for_track(track))) return false;
     if (track != NULL) track_select_base_scene(track, selected);
     mark_project_dirty(track);
@@ -3338,11 +3389,19 @@ static bool save_project(Track *track, bool show_success)
 
 static bool project_open_allowed(void)
 {
-    if (!lyric_editor_has_unsaved_draft(current_track())) return true;
-    notice_push(UI_NOTICE_WARNING, "Project was not opened",
-                "Apply or discard the current lyric draft before replacing the workspace.",
-                NULL, false);
-    return false;
+    if (lyric_editor_has_unsaved_draft(current_track())) {
+        notice_push(UI_NOTICE_WARNING, "Project was not opened",
+                    "Apply or discard the current lyric draft before replacing the workspace.",
+                    NULL, false);
+        return false;
+    }
+    if (route_editor_dirty(&p->route_editor)) {
+        notice_push(UI_NOTICE_WARNING, "Project was not opened",
+                    "Apply or discard the open audio-route edit before replacing the workspace.",
+                    NULL, false);
+        return false;
+    }
+    return true;
 }
 
 static bool open_project_path(const char *path)
@@ -3690,6 +3749,7 @@ static void poll_project_autosave(Track *track)
     if (track == NULL || track->project_path[0] == '\0' ||
         !track->project_dirty || track->project_autosave_failed ||
         (track == current_track() && lyric_editor_has_unsaved_draft(track)) ||
+        route_editor_dirty_for_track_pointer(track) ||
         GetTime() - track->project_dirty_since < 1.5) return;
     if (!save_project_to_path(track, track->project_path, false, true)) {
         track->project_autosave_failed = true;
@@ -3726,7 +3786,8 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
     Track *active_track = current_track();
     bool workspace_dirty = active_track != NULL &&
                            (active_track->project_dirty ||
-                            lyric_editor_has_unsaved_draft(active_track));
+                            lyric_editor_has_unsaved_draft(active_track) ||
+                            route_editor_dirty_for_active_track());
     const char *save_status = active_track != NULL && active_track->project_path[0] != '\0' ?
                               active_track->project_autosave_failed ? "Save failed" :
                               workspace_dirty ? "Unsaved" : "Saved" :
@@ -3766,7 +3827,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             notice_push(UI_NOTICE_WARNING, "Lyric draft is not saved yet",
                         "Apply or discard the lyric edit before saving the project.",
                         NULL, false);
-        } else {
+        } else if (route_editor_allow_active_save()) {
             (void)save_project(track, true);
         }
     }
@@ -3777,7 +3838,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             notice_push(UI_NOTICE_WARNING, "Lyric draft is not saved yet",
                         "Apply or discard the lyric edit before saving the project.",
                         NULL, false);
-        } else {
+        } else if (route_editor_allow_active_save()) {
             (void)save_project_as(track);
         }
     }
@@ -3850,6 +3911,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             if (state & BS_CLICKED) {
                 Track *track = current_track();
                 if (!lyric_editor_allow_context_change(track)) continue;
+                if (!route_editor_allow_active_context_change()) continue;
                 Track *next_track = &p->tracks.items[i];
                 if (!scene_instance_select(&p->scene, next_track->base_scene,
                                            next_track->scene_seed)) {
@@ -4348,6 +4410,11 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
                              editor->has_committed ? "Applied" : "Apply",
                              false);
     }
+    tooltip(apply_button,
+            draft->output_min == draft->output_max ?
+                "Choose two different output values; a flat value belongs on the slider" :
+                "Commit this audio route to the project",
+            SIDE_TOP, false);
     if (editor->has_committed) {
         if (danger_text_button(UINT64_C(0x524F555452454D56), remove_button,
                                "Remove", false) & BS_CLICKED &&
@@ -5314,6 +5381,12 @@ static void warn_render_staging_file_retained(const char *path)
 static bool start_rendering_track_to(Track *track, const char *output_path)
 {
     if (track == NULL || output_path == NULL || output_path[0] == '\0') return false;
+    if (route_editor_dirty_for_track_pointer(track)) {
+        notice_push(UI_NOTICE_WARNING, "Export was not started",
+                    "Apply or discard the open audio-route edit before rendering.",
+                    NULL, false);
+        return false;
+    }
     if (assist_job_is_active(p->assist_job_state)) {
         notice_push(UI_NOTICE_WARNING, "Export was not started",
                     "Wait for Assist to finish, or cancel its job, before starting a render.",
@@ -5646,7 +5719,8 @@ MUSIALIZER_PLUG bool plug_confirm_close(void)
     for (size_t i = 0; i < p->tracks.count; ++i) {
         Track *track = &p->tracks.items[i];
         if (track->project_dirty && track->project_path[0] != '\0' &&
-            !(track == active && lyric_editor_has_unsaved_draft(track))) {
+            !(track == active && lyric_editor_has_unsaved_draft(track)) &&
+            !route_editor_dirty_for_track_pointer(track)) {
             (void)save_project(track, false);
         }
     }
@@ -5998,7 +6072,7 @@ static void preview_screen(void)
                 notice_push(UI_NOTICE_WARNING, "Lyric draft is not saved yet",
                             "Apply or discard the lyric edit before saving the project.",
                             NULL, false);
-            } else {
+            } else if (route_editor_allow_active_save()) {
                 bool shift_down = IsKeyDown(KEY_LEFT_SHIFT) ||
                                   IsKeyDown(KEY_RIGHT_SHIFT);
                 if (shift_down) (void)save_project_as(track);

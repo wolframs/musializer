@@ -42,7 +42,9 @@ bool scene_route_table_valid(const Scene_Route_Table *table);
 // resolves to one of the scene's settings, the source and interpolation
 // enums are in range, band_index obeys the schema rule (zero unless the
 // source is band, bounded by the analyzer band capacity), and every range
-// is finite with input_max > input_min.
+// is finite with input_max > input_min and distinct output endpoints. Flat
+// values belong to the slider representation because v1 cannot distinguish a
+// full-range flat RMS route from a persisted slider constant.
 bool scene_route_valid(size_t scene_index, const Musi_Parameter_Mapping *route);
 
 // Adds a valid route, rejecting duplicates of the same parameter within the

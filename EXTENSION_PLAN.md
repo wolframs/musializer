@@ -20,10 +20,13 @@
   `Musi_Parameter_Mapping` capability) are implemented at runtime for all ten
   scenes, authorable via repeatable `--route` CLI arguments and visually in
   the Tune inspector (per-row `~` affordance, inline draft editor with live
-  source meter, Apply/Discard with close-guard participation), and persisted
-  in `.musi` beside slider constants with byte-identical reopened renders.
-  Linux-only runtime validation so far. Deferred follow-ons (temporal
-  shaping, smoothed sources, cues UI, expression routes) are listed in
+  source meter, Apply/Discard with save/context/render/close guards), and
+  persisted in `.musi` beside slider constants with byte-identical reopened
+  renders. Toggle routes resolve canonically at their midpoint, flat output
+  ranges remain ordinary slider constants, and CLI routes are applied after
+  project loading regardless of argument order. Linux-only runtime validation
+  so far. Deferred follow-ons (temporal shaping, smoothed sources, cues UI,
+  expression routes) are listed in
   `.hermes/plans/2026-07-17_150000-reactivity-routing-layer.md`.
 - **Baseline source:** upstream commit
   `4d7d2fa849ef66e94ce03a53a2e7aa3e36aa2392` on `master`.
@@ -33,10 +36,9 @@
   Forgejo; do not push feature work to `upstream` unintentionally.
 - **Build status:** Linux release, debug, sanitizer, hot-reload, distribution,
   launcher, doctor, and real FFmpeg render checks pass on this machine.
-  The 2026-07-17 correctness pass reran 176/176 C tests across debug, release,
-  and ASan/UBSan; 82/82 Python adapter/product tests; and a real fractional
-  full-versus-windowed FFmpeg render. Generated artifacts remain ignored under
-  `build/`.
+  The 2026-07-18 routing-hardening pass reran 200/200 C tests across debug,
+  release, and ASan/UBSan plus 83/83 Python adapter/product tests. Generated
+  artifacts remain ignored under `build/`.
 - **Tracked planning/security changes:** `.gitignore`, `.env.example`, and this
   document. The real `.env` is intentionally untracked.
 
@@ -1071,6 +1073,30 @@ failure-path test.
   Python adapter/product tests; debug, release, sanitizer, and hot-reload
   application builds; and a real 24 fps fractional-window render whose 13
   frames matched frames 26-38 of the full stateful-scene export.
+
+### 2026-07-18 - Reactivity-routing review hardening
+
+- Replaced representative-only route tests with a descriptor-driven regression
+  that applies a live audio route to every setting of every scene. This pins
+  continuous and toggle behavior at the common scene-settings boundary, so a
+  newly added setting automatically joins the same coverage.
+- Quantized routed toggles at their descriptor midpoint before calling the
+  strict settings setter, and made route application transactional: an invalid
+  write cannot leak a partially modified effective-settings snapshot.
+- Rejected equal route output endpoints in both the engine and editor. The
+  canonical full-range RMS case is already the editor's slider-constant
+  representation, and every flat mapping is non-reactive; the UI now explains
+  why Apply is disabled.
+- Deferred repeatable CLI routes until all project/audio arguments have been
+  loaded, making `--route` placement relative to `--project` deterministic. A
+  real save/reopen product test compares both argument orders and their exact
+  persisted mappings.
+- Made dirty route drafts participate in Saved status, explicit Save/Save As,
+  project/track/scene changes, autosave, rendering, and quit guards. Automatic
+  scene switching pauses while the active track's route editor is open.
+- Validation passed 200/200 C tests in debug, release, and ASan/UBSan and 83/83
+  Python adapter/product tests. Debug, release, sanitizer, and hot-reload
+  application builds pass.
 
 ## Milestones
 

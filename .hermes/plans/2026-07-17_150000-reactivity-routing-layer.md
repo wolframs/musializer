@@ -31,9 +31,10 @@ fast-forward loop both build frames the same way). A new headless
 the current `Scene_Audio_Frame` and produces an *effective*
 `Scene_Settings` snapshot each frame; scenes stay untouched and
 preview/export parity is inherited, not re-proven. Routes use **replace
-semantics** (the mapping output *is* the parameter value — constants are the
-degenerate case, so this is the format's own semantics), clamped to the
-setting descriptor's min/max.
+semantics** (the mapping output *is* the parameter value), clamped to the
+setting descriptor's min/max. Persisted slider constants remain degenerate
+mappings, but the runtime route table requires distinct output endpoints so a
+route cannot silently round-trip as a slider in the v1 format.
 
 **Tech stack:** C11, raylib, `nob`. No new dependencies in phases 1–3.
 
@@ -76,6 +77,17 @@ work this plan generalizes).
   runner disables LSan; run those against a debug/release binary.
   Interactive mouse-driven behavior was NOT synthetically injected; the
   desktop interaction needs a human pass.
+- **Review hardening done (2026-07-18).** Route application now has
+  descriptor-driven coverage across every setting of every scene, including
+  canonical midpoint quantization for toggles and transactional failure.
+  Equal output endpoints are rejected as non-reactive; the canonical
+  full-range RMS case is also the editor's slider-constant representation.
+  CLI routes are deferred until project/audio loading completes, with an
+  end-to-end order-independence test. Dirty route drafts now guard
+  Saved status, Save/Save As, project/track/scene changes, autosave, rendering,
+  and quit; automatic scene switching pauses while the active route editor is
+  open. 200/200 C tests pass in debug/release/sanitize, 83/83 Python tests
+  pass, and all four application build profiles are clean.
 - **Next:** user feedback on the editor UX; Phase 4 items remain gated on
   explicit decisions.
 
@@ -161,9 +173,10 @@ API sketch:
   half-applied table).
 
 **Tests:** replace semantics; descriptor-bound clamping; band routing incl.
-`band_index >= bands_count`; constant mappings behave exactly like today's
-sliders; hostile input (NaN ranges, unknown keys, duplicate parameters);
-byte-determinism of `effective` for identical inputs.
+`band_index >= bands_count`; every registered descriptor and setting kind;
+flat output routes rejected as slider constants; hostile input (NaN ranges,
+unknown keys, duplicate parameters); byte-determinism of `effective` for
+identical inputs.
 
 ### Task 1.2: wire the effective snapshot into the frame loop
 

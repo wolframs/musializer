@@ -291,9 +291,9 @@ runtime dependency after a successful save.
 The v1 schema deliberately describes future composition features that this
 editor cannot yet preserve. This build opens only its lossless editor subset:
 full-track referenced or imported audio, integer-frame-rate H.264 MP4 output,
-one enabled opaque full-track Normal scene, and only Musializer's canonical
-constant mappings and scene-cue snapshots. Arbitrary analysis-driven mappings
-and other schema-valid composition features are rejected with an explicit
+one enabled opaque full-track Normal scene, and Musializer's canonical slider
+constants, built-in audio-driven routes, and scene-cue snapshots. Other
+schema-valid composition features are rejected with an explicit
 unsupported-feature error instead of being silently rewritten.
 
 An imported ASCII image is stored as a verified image asset with its derived
@@ -366,7 +366,11 @@ parameter is a scene-settings key (the `settings.` prefix is optional, e.g.
 `loom.weight`); sources are `rms`, `peak`, `spectral_flux`, `beat_phase`, and
 `band` with a spectrum band index; curves are `step`, `linear`, `smoothstep`,
 `ease_in`, and `ease_out`. The mapped value replaces the slider value each
-frame, clamped to the setting's range. Routes are saved into `.musi` projects
+frame, clamped to the setting's range; toggle settings switch at the midpoint
+of their mapped range. Output endpoints must differ—flat values are ordinary
+slider constants, not audio routes. Route arguments are applied after the
+input audio/project is loaded, so their placement relative to `--project` does
+not change the result. Routes are saved into `.musi` projects
 using the format's parameter-mapping representation — a setting persists as
 either its slider constant or its route — and reopened projects render
 byte-identically to the session that authored them. Projects containing
@@ -380,9 +384,13 @@ clamp toggle. A live meter shows where the current audio sits inside the
 input window while you edit. A routed setting's row shows the live driven
 value plus a compact `source · curve · range` summary in place of its slider
 (the underlying slider value is kept but inactive until the route is
-removed). Route edits are drafts: they take effect on Apply, Discard throws
-them away, and an unapplied draft blocks quitting the same way an unapplied
-lyric draft does.
+removed). Equal output endpoints disable Apply because `.musi` v1 represents
+that value as a slider. Route edits are drafts: they take effect on Apply,
+Discard throws them away, and unapplied route changes block saving,
+project/track/scene changes, rendering, and quitting the same way an unapplied
+lyric draft does. Autosave also leaves the draft's track untouched. Automatic
+scene switching pauses while the inline route editor is open so its host scene
+cannot disappear mid-edit.
 
 `--render-window START DURATION` (seconds) exports only that span of the
 track. The engine first fast-forwards analysis, beat tracking, and scene

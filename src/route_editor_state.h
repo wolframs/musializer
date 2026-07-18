@@ -75,6 +75,11 @@ bool route_editor_set_clamp(Route_Editor_State *state, bool clamp);
 // Dirty: an open draft that differs from its committed route, or a fresh
 // draft the user actually edited. This is the guard predicate.
 bool route_editor_dirty(const Route_Editor_State *state);
+// Track-scoped form used by save/autosave and context-change policy. A hidden
+// draft for another track must not make the active track claim its own file is
+// dirty, while the owning track must never be reported as fully saved.
+bool route_editor_dirty_for_track(const Route_Editor_State *state,
+                                  size_t track_slot);
 bool route_editor_can_apply(const Route_Editor_State *state);
 
 // Commits the draft into the table, replacing a committed route for the same
