@@ -133,6 +133,7 @@ static void print_command_line_help(FILE *stream, const char *program)
         "  --quality NAME          balanced, high, or master\n"
         "\n"
         "Diagnostics:\n"
+        "  --mute                  Start with the output volume at zero\n"
         "  --reload-once           Exercise one hot-reload handoff\n"
         "  -h, --help              Show this help without opening a window\n"
         "  --version               Show the version\n",
@@ -221,6 +222,13 @@ int main(int argc, char **argv)
     const char *route_specs[COMMAND_LINE_ROUTE_CAPACITY] = {0};
     size_t route_spec_count = 0;
     for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--mute") == 0) {
+            // Silent startup for scripted and test runs: kills the output
+            // device volume only, so playback, analysis, and export behave
+            // exactly as an audible session.
+            SetMasterVolume(0.0f);
+            continue;
+        }
         if (strcmp(argv[i], "--scene") == 0) {
             if (i + 1 >= argc || !plug_select_scene(argv[++i])) {
                 TraceLog(LOG_WARNING, "Unknown or missing command-line scene");

@@ -357,7 +357,10 @@ Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 `--event type:seconds:id:value`
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg
-finishes, making them suitable for scripts and smoke tests.
+finishes, making them suitable for scripts and smoke tests. `--mute` starts
+the session with the output volume at zero — playback, analysis, and export
+behave identically, the speakers just stay quiet — which keeps scripted and
+test launches from being audible.
 
 Repeatable `--route` arguments connect live audio measurements to any scene
 setting for this session, identically in preview and export:

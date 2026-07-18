@@ -184,7 +184,7 @@ class LyricsAssistEndToEndTests(unittest.TestCase):
 
     def _run_app(self, arguments, timeout):
         completed = subprocess.run(
-            ["xvfb-run", "-a", str(APP), *arguments],
+            ["xvfb-run", "-a", str(APP), "--mute", *arguments],
             cwd=ROOT, capture_output=True, text=True, timeout=timeout,
         )
         if completed.returncode != 0 and (

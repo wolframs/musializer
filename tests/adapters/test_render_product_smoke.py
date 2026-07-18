@@ -42,7 +42,7 @@ class RenderProductSmokeTests(unittest.TestCase):
             source_hash = hashlib.sha256(audio.read_bytes()).hexdigest()
             completed = subprocess.run(
                 [
-                    "xvfb-run", "-a", str(APP), str(audio),
+                    "xvfb-run", "-a", str(APP), "--mute", str(audio),
                     "--scene", "constellation",
                     "--resolution", "640x360", "--fps", "24",
                     "--quality", "balanced",
@@ -130,7 +130,7 @@ class RenderProductSmokeTests(unittest.TestCase):
 
             def run_app(arguments):
                 completed = subprocess.run(
-                    ["xvfb-run", "-a", str(APP), *arguments],
+                    ["xvfb-run", "-a", str(APP), "--mute", *arguments],
                     cwd=ROOT, capture_output=True, text=True, timeout=60,
                 )
                 if completed.returncode != 0 and (
@@ -186,7 +186,7 @@ class RenderProductSmokeTests(unittest.TestCase):
                 check=True, capture_output=True, text=True, timeout=30,
             )
             base = [
-                "xvfb-run", "-a", str(APP), str(audio),
+                "xvfb-run", "-a", str(APP), "--mute", str(audio),
                 "--scene", "constellation",
                 "--resolution", "640x360", "--fps", "24",
                 "--quality", "balanced",
