@@ -1119,6 +1119,37 @@ failure-path test.
   UI now binds to the shared library; `.musi` round-trip of legacy presets
   is unchanged.
 
+### 2026-07-19 - Lyrics production workflow: sync known lyrics, fix transcription
+
+- Diagnosed the trick-track failure end-to-end (job 8fbbd8ccda3bd2d1): the
+  MP3's own `lyrics-eng` tag was ignored, whisper `medium.en` looped on a
+  hallucination for the final 81 seconds, and the review contract could
+  merge but never split, so 131 evidence lines became 27 paragraph cues
+  ending 90 seconds early.
+- Assist lyrics mode now discovers authored lyrics (explicit `--lyrics-file`,
+  sibling `<stem>.lyrics.txt`, then embedded lyric tags via local ffprobe)
+  and, when found, replaces the Codex review with `tools/lyric_align.py`: a
+  dependency-free deterministic monotonic alignment of authored lines
+  against Whisper word timing (`lyric_sync` lane, `lyrics.sync.json`,
+  `schemas/lyric-sync-v1.schema.json`). Line classification separates
+  lyric/backing/section/event/delivery; repetition loops are excluded by a
+  repeats-plus-duration detector; unmatched lines interpolate only across
+  short trusted gaps (flagged) or are reported. On the fixture: 104 authored
+  cues timed from existing medium.en evidence, 19 reported unmatched, zero
+  model requests.
+- Transcription fallback contract v2: chronological citation reuse permits
+  splitting, display bounds (200 chars/15 s hard, far tighter targets in
+  prompt), mandatory whole-track coverage accounting persisted in the review
+  document, hallucination intervals annotated in the request, and a
+  deterministic post-splitter snapping to word gaps.
+- Adapter hygiene: valid whisper.cpp `--dtw` preset names (large models
+  previously failed outright), one thread per host CPU, and
+  best-available-model discovery (`large-v3` first, `medium.en` last;
+  `MUSIALIZER_WHISPER_MODEL` still wins).
+- Explicitly deferred: Demucs stems, external forced aligners, online lyric
+  lookup, word-level timing in the C model, CUDA whisper rebuild (the /tmp
+  whisper.cpp build is CPU-only; a toolkit install is the user's call).
+
 ## Milestones
 
 ### M0 - Preserve the baseline

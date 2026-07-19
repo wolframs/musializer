@@ -57,11 +57,23 @@ python3 tools/external_analysis.py assist track.mp3 analysis/ \
 
 Modes have deliberately narrow authority:
 
-- `lyrics` runs/reuses measured analysis, configured GPU whisper.cpp, and an
-  evidence-preserving Codex review.
+- `lyrics` runs/reuses measured analysis and configured whisper.cpp, then
+  chooses one of two lyric paths. If authored reference lyrics are found —
+  an explicit `--lyrics-file`, a sibling `<stem>.lyrics.txt`, or an
+  unsynchronized lyric tag embedded in the audio container (read locally via
+  ffprobe) — the deterministic `tools/lyric_align.py` stage synchronizes the
+  authored lines against Whisper word timing and writes the `lyric_sync` lane
+  to `lyrics.sync.json`; no model request is involved. Display text comes
+  verbatim from the reference; section headings, sound events, and delivery
+  instructions are classified out; repetition-loop hallucinations in the
+  evidence are excluded by a repeats-plus-duration detector; unmatched lines
+  are interpolated only across short trusted gaps (flagged `estimated` and
+  `uncertain`) and otherwise reported in `unmatched`. Without a reference,
+  the evidence-preserving Codex review runs as before. The manifest records
+  `lyric_source` and unmatched counts; the job log names the sync source.
 - `sections` is entirely local and uses measured audio analysis plus any
-  independently valid cached local lyric review. It never consumes a cached
-  MiMo semantic lane.
+  independently valid cached local lyric sync or lyric review. It never
+  consumes a cached MiMo semantic lane.
 - `mimo` runs/reuses measured analysis and the existing MiMo/OpenRouter helper.
   This explicit command is the authorization boundary for the remote request.
 - `all` performs both lyric and MiMo work, then plans sections.
@@ -69,19 +81,25 @@ Modes have deliberately narrow authority:
 All stages are hash-checked and cache-aware at their own provenance boundary.
 Measured caches include the analyzer version and analysis configuration;
 Whisper caches include the adapter version, model file hash, language, timing
-model, and measured duration; Codex reviews include the Whisper source hash,
-selected model, and repository prompt version/hash; MiMo caches include its
-model, prompt, output schema, audio metadata, routing, fallback, and ZDR request
-settings. A mismatch regenerates that stage and its downstream products while
-leaving still-valid upstream evidence reusable. Whisper is configured with
-`MUSIALIZER_WHISPER_BIN` and `MUSIALIZER_WHISPER_MODEL` or the corresponding
-flags. On this workstation the helper also detects the prior setup at
-`/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli` and
-`ggml-medium.en.bin`. Whisper receives a temporary FFmpeg-decoded 16 kHz mono
-WAV, requests full JSON plus model-aligned token timing, leaves GPU/flash
-attention enabled by the configured whisper.cpp build, and defaults to a
-one-hour timeout. The umbrella timeout is at least ten minutes and defaults to
-40 minutes so MiMo's bounded retries can finish.
+model, and measured duration; lyric sync caches include the Whisper evidence
+hash, the reference text hash, and the aligner version; Codex reviews include
+the Whisper source hash, selected model, and repository prompt version/hash;
+MiMo caches include its model, prompt, output schema, audio metadata, routing,
+fallback, and ZDR request settings. A mismatch regenerates that stage and its
+downstream products while leaving still-valid upstream evidence reusable.
+Whisper is configured with `MUSIALIZER_WHISPER_BIN` and
+`MUSIALIZER_WHISPER_MODEL` or the corresponding flags. On this workstation the
+helper also detects the prior setup at
+`/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli`; among models
+in that install root it prefers `ggml-large-v3.bin`, then
+`ggml-large-v3-q5_0.bin`, `ggml-large-v3-turbo.bin`, and `ggml-medium.en.bin`.
+Whisper receives a temporary FFmpeg-decoded 16 kHz mono WAV, requests full
+JSON plus model-aligned token timing using the exact whisper.cpp `--dtw`
+preset name (quantization suffixes are stripped; models without a known
+preset run without DTW rather than failing), runs with one worker thread per
+host CPU, leaves GPU/flash attention enabled by the configured whisper.cpp
+build, and defaults to a one-hour timeout. The umbrella timeout is at least
+ten minutes and defaults to 40 minutes so MiMo's bounded retries can finish.
 
 `--dry-run` performs no child process or network call and emits a credential-
 free action description. Child processes are argv arrays without a shell.
@@ -98,21 +116,32 @@ The lower-level commands remain available for diagnosis and custom workflows:
 ```console
 python3 tools/external_analysis.py whisper track.mp3 lyrics.json \
   --duration 213.7 --whisper-bin /path/to/whisper-cli \
-  --model /path/to/ggml-medium.en.bin
+  --model /path/to/ggml-large-v3.bin
+python3 tools/external_analysis.py sync-lyrics lyrics.json reference.txt \
+  lyrics.sync.json
 python3 tools/external_analysis.py clean-lyrics lyrics.json lyrics.review.json
 python3 tools/external_analysis.py plan measured.json scene-plan.json \
-  --lyrics lyrics.review.json --semantic semantic.cache.json \
+  --lyrics lyrics.sync.json --semantic semantic.cache.json \
   --bridge analysis.bridge.tsv
 ```
 
 Codex runs ephemerally in a read-only sandbox with a ten-minute default timeout,
 structured output, and the repository-owned
-`prompts/lyrics_cleanup_system.md`. Every reviewed line must cite Whisper line
-indices and stay within their timing envelope. The review is a separate
-`lyric_review` lane; it never overwrites Whisper evidence and is rejected if it
-adds uncited lines. An evidence-preserving review may legitimately retain zero
-lines; the desktop reports that as a completed result with no editor changes
-and does not offer Apply.
+`prompts/lyrics_cleanup_system.md` (contract v2). Every reviewed line must cite
+Whisper line indices chronologically and stay within their timing envelope; a
+long source segment may be split across several short display cues, each
+bounded at 200 characters and 15 seconds by the local validator with far
+tighter targets in the prompt. The request annotates detected repetition-loop
+hallucination intervals so the model omits them deliberately, the model must
+account for every source line to the end of the track, and the persisted
+review records a coverage block (cited/uncited-reliable counts and flagged
+intervals). After validation a deterministic splitter
+(`lyric_align.split_long_cues`) reduces any remaining oversized cue at
+sentence/clause boundaries, snapping piece timing to evidence word gaps. The
+review is a separate `lyric_review` lane; it never overwrites Whisper evidence
+and is rejected if it adds uncited lines. An evidence-preserving review may
+legitimately retain zero lines; the desktop reports that as a completed result
+with no editor changes and does not offer Apply.
 
 The output schema forwarded to `codex exec --output-schema` must stay inside
 the structured-output keyword subset; `uniqueItems` in particular is rejected

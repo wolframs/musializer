@@ -26,6 +26,13 @@ including SHA-256 identity and duration verification) → assertions on the
 persisted `.musi` lyric cues and `lyric_timing` provenance lane → a second
 open/save round-trip proving the result is editor-supported.
 
+The synthesized MP3 deliberately carries no embedded lyric tags and no
+sibling `.lyrics.txt`, so lyric discovery finds nothing and the run
+exercises the transcription-plus-Codex fallback specifically. The
+deterministic known-lyrics sync path is covered offline by
+`tests/adapters/test_lyric_align.py` and the assist tests in
+`tests/adapters/test_external_analysis.py`.
+
 Prerequisites — each missing one produces an explicit skip, so read the
 verbose output rather than assuming a green run verified anything:
 

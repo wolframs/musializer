@@ -44,9 +44,12 @@ The upstream demo below remains a lovely snapshot of where it began.
   timed lyrics in the application.
 - Navigate with a depth-shaded whole-track waveform, draggable capped hairline
   playhead, one-second buttons, and exact tenth/one/ten-second keyboard steps.
-- Generate local measured section suggestions, transcribe lyrics with Whisper,
-  review those timings with headless Codex, and optionally ask Xiaomi MiMo V2.5
-  through OpenRouter for a semantic description of how the music feels.
+- Generate local measured section suggestions and timed lyrics: lyrics already
+  present in the track's metadata or a sibling text file are synchronized
+  deterministically against Whisper word timing, and only tracks without
+  known lyrics fall back to transcription plus a headless Codex review.
+  Optionally ask Xiaomi MiMo V2.5 through OpenRouter for a semantic
+  description of how the music feels.
 - Stage every assisted result for review instead of silently changing a project.
 - Auto-switch scenes from reviewed section markers.
 - Render deterministic H.264/AAC MP4 video up to 7680x4320 with anti-aliased
@@ -211,13 +214,26 @@ implemented.
 Assistance is optional and capability-based:
 
 - **Measured section planning** is local and derives timing/structure from PCM.
-- **Timed lyrics** uses a configured local Whisper installation, then an
-  evidence-preserving headless Codex review.
+- **Timed lyrics** first looks for the lyrics you already have: an explicit
+  lyrics text file, a sibling `<track>.lyrics.txt`, or unsynchronized lyrics
+  embedded in the audio file's metadata (ID3 `USLT`-style tags). When one is
+  found, a fully local deterministic aligner synchronizes those authored lines
+  against Whisper's word timing — the authored text is displayed verbatim,
+  section headings and stage directions are filtered out, backing lines are
+  kept, hallucinated evidence stretches are ignored, and any line that found
+  no timing is reported instead of guessed. Only tracks without known lyrics
+  fall back to Whisper transcription plus an evidence-preserving headless
+  Codex wording review, which is now bounded to short readable cues, must
+  account for the whole track, and is followed by a deterministic splitter.
+  Whisper discovery prefers the most accurate installed model
+  (`large-v3` > `large-v3-q5_0` > `large-v3-turbo` > `medium.en`;
+  `MUSIALIZER_WHISPER_MODEL` overrides).
 - **MiMo feelings** uses the local measured analysis plus MiMo V2.5 through
   OpenRouter to produce semantic energy/tension/valence cues.
 - **Full assist** combines those stages while retaining separate provenance.
 
-Whisper evidence, Codex review, measured audio features, MiMo interpretation,
+Whisper evidence, deterministic lyric sync, Codex review, measured audio
+features, MiMo interpretation,
 and user-authored events remain distinct data lanes. MiMo/OpenRouter modes are
 the explicit authorization boundary for sending track audio to a remote
 service; every workflow asks before launch and names what leaves the
