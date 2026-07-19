@@ -249,5 +249,64 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+class SplitterTests(unittest.TestCase):
+    @staticmethod
+    def cue(text, start, end, uncertain=False):
+        return {"start_seconds": start, "end_seconds": end, "text": text,
+                "source_line_indices": [0], "confidence": 0.9,
+                "uncertain": uncertain}
+
+    def test_short_cues_pass_through_unchanged(self):
+        cue = self.cue("Short and sweet.", 1.0, 4.0)
+        self.assertEqual(lyric_align.split_long_cues([cue], []), [cue])
+
+    def test_long_cue_splits_at_sentence_punctuation(self):
+        text = ("But it's playing something way too happy and loud. "
+                "This shouldn't work at all but somehow it works fine.")
+        cue = self.cue(text, 0.0, 10.0)
+        pieces = lyric_align.split_long_cues([cue], [])
+        self.assertEqual(len(pieces), 2)
+        self.assertEqual(pieces[0]["text"],
+                         "But it's playing something way too happy and loud.")
+        self.assertEqual(pieces[1]["text"],
+                         "This shouldn't work at all but somehow it works fine.")
+        self.assertEqual(pieces[0]["start_seconds"], 0.0)
+        self.assertEqual(pieces[1]["end_seconds"], 10.0)
+        self.assertEqual(pieces[0]["end_seconds"], pieces[1]["start_seconds"])
+        for piece in pieces:
+            self.assertLessEqual(
+                len(piece["text"]), lyric_align.REVIEW_MAX_CUE_CHARS)
+            self.assertEqual(piece["source_line_indices"], [0])
+
+    def test_split_boundary_snaps_to_a_nearby_word_gap(self):
+        text = ("One two three four five six seven eight nine ten, "
+                "eleven twelve thirteen fourteen fifteen sixteen seventeen.")
+        cue = self.cue(text, 0.0, 10.0)
+        words = [{"start_seconds": 0.0, "end_seconds": 4.6},
+                 {"start_seconds": 5.4, "end_seconds": 10.0}]
+        pieces = lyric_align.split_long_cues([cue], words)
+        self.assertEqual(len(pieces), 2)
+        self.assertAlmostEqual(pieces[0]["end_seconds"], 5.0)
+
+    def test_duration_alone_forces_a_split(self):
+        cue = self.cue("Hold this note forever", 0.0, 20.0)
+        pieces = lyric_align.split_long_cues([cue], [])
+        self.assertGreater(len(pieces), 1)
+
+    def test_unsplittable_cue_is_flagged_uncertain(self):
+        cue = self.cue("s" * 120, 0.0, 3.0)
+        pieces = lyric_align.split_long_cues([cue], [])
+        self.assertEqual(len(pieces), 1)
+        self.assertTrue(pieces[0]["uncertain"])
+
+    def test_splitting_is_deterministic(self):
+        text = ("A long line with, several possible split points, that must "
+                "always split, exactly the same way, every single time here.")
+        cue = self.cue(text, 2.0, 14.0)
+        first = lyric_align.split_long_cues([cue], [])
+        second = lyric_align.split_long_cues([cue], [])
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -375,6 +375,79 @@ class ExternalAnalysisTests(unittest.TestCase):
         self.assertEqual(result["lane"], "lyric_review")
         self.assertEqual(result["lines"][0]["source_line_indices"], [0])
 
+    def test_codex_review_may_split_source_lines_but_stays_chronological(self):
+        source = lyrics_document()
+        line = {"start_seconds": 1.0, "end_seconds": 1.5, "text": "hello",
+                "source_line_indices": [0], "confidence": 0.7,
+                "uncertain": False}
+        second = {**line, "start_seconds": 1.5, "end_seconds": 2.0,
+                  "text": "world"}
+        cleaned, _ = external._validate_codex_review(
+            {"lines": [line, second], "notes": []}, source)
+        self.assertEqual(len(cleaned), 2)
+        shuffled = {**line, "source_line_indices": [1],
+                    "start_seconds": 4.0, "end_seconds": 5.0}
+        with self.assertRaisesRegex(analysis_io.AnalysisValidationError,
+                                    "chronological"):
+            external._validate_codex_review(
+                {"lines": [shuffled, second], "notes": []}, source)
+
+    def test_codex_review_rejects_unreadable_display_lines(self):
+        source = lyrics_document()
+        overlong = {"start_seconds": 1.0, "end_seconds": 2.0,
+                    "text": "x" * (external.REVIEW_TEXT_LIMIT + 1),
+                    "source_line_indices": [0], "confidence": 0.7,
+                    "uncertain": False}
+        with self.assertRaises(analysis_io.AnalysisValidationError):
+            external._validate_codex_review(
+                {"lines": [overlong], "notes": []}, source)
+        source["lines"][0]["end_seconds"] = 40.0
+        source["audio"]["duration_seconds"] = 60.0
+        endless = {"start_seconds": 1.0, "end_seconds": 39.0, "text": "hum",
+                   "source_line_indices": [0], "confidence": 0.7,
+                   "uncertain": False}
+        with self.assertRaises(analysis_io.AnalysisValidationError):
+            external._validate_codex_review(
+                {"lines": [endless], "notes": []}, source)
+
+    def test_codex_review_reports_coverage_and_flags_hallucination_loops(self):
+        source = lyrics_document()
+        source["audio"]["duration_seconds"] = 60.0
+        source["lines"] = [
+            {"start_seconds": 1.0, "end_seconds": 2.0, "text": "hello wrld",
+             "confidence": 0.7, "corrected": False},
+            {"start_seconds": 4.0, "end_seconds": 5.0, "text": "again",
+             "confidence": 0.8, "corrected": False},
+        ] + [
+            {"start_seconds": 10.0 + 2.0 * i, "end_seconds": 11.8 + 2.0 * i,
+             "text": "loop loop loop", "confidence": 0.4, "corrected": False}
+            for i in range(8)
+        ]
+        source_path = self.write_json("lyrics.json", source)
+        observed = {}
+
+        def runner(argv, **kwargs):
+            observed["stdin"] = kwargs["input"]
+            result_path = Path(argv[argv.index("-o") + 1])
+            result_path.write_text(json.dumps({
+                "lines": [{"start_seconds": 1.0, "end_seconds": 2.0,
+                           "text": "Hello, world.", "source_line_indices": [0],
+                           "confidence": 0.7, "uncertain": False}],
+                "notes": ["Loop omitted."],
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        result = external.run_codex_review(
+            source_path, self.root / "review.json", runner=runner)
+        self.assertIn("suspected_hallucination_intervals", observed["stdin"])
+        coverage = result["coverage"]
+        self.assertEqual(coverage["source_lines"], 10)
+        self.assertEqual(coverage["cited_source_lines"], 1)
+        # The eight-line loop is flagged, so only "again" counts as an
+        # uncited reliable source line.
+        self.assertEqual(coverage["uncited_reliable_source_lines"], 1)
+        self.assertEqual(len(coverage["suspected_hallucination_intervals"]), 1)
+
     def test_codex_review_rejects_uncited_or_out_of_envelope_lines(self):
         source = lyrics_document()
         with self.assertRaises(analysis_io.AnalysisValidationError):
@@ -536,7 +609,7 @@ class ExternalAnalysisTests(unittest.TestCase):
                 "adapter_version": analysis_io.ADAPTER_VERSION,
                 "source_kind": "codex_lyric_review",
                 "model": "codex-default",
-                "prompt_version": "lyrics_cleanup_system/v1",
+                "prompt_version": external.LYRIC_PROMPT_VERSION,
                 "prompt_sha256": analysis_io.sha256_file(external.LYRIC_PROMPT),
                 "request_settings": {"sandbox": "read-only", "ephemeral": True},
             },
@@ -743,7 +816,7 @@ class ExternalAnalysisTests(unittest.TestCase):
                 "adapter": "tools/external_analysis.py",
                 "adapter_version": analysis_io.ADAPTER_VERSION,
                 "source_kind": "codex_lyric_review",
-                "prompt_version": "lyrics_cleanup_system/v1",
+                "prompt_version": external.LYRIC_PROMPT_VERSION,
                 "prompt_sha256": "0" * 64,
                 "model": "codex-default",
             },

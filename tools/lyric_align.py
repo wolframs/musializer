@@ -480,6 +480,115 @@ def sync_lyrics(
     }
 
 
+# Display bounds for transcription-review cues. Roughly two wrapped caption
+# lines and a readable dwell time; anything larger is split deterministically.
+REVIEW_MAX_CUE_CHARS = 90
+REVIEW_MAX_CUE_SECONDS = 7.0
+_SENTENCE_DELIMITERS = ".!?;:—"
+_CLAUSE_DELIMITERS = ","
+
+
+def split_long_cues(
+    lines: Sequence[dict[str, Any]],
+    words: Sequence[dict[str, Any]],
+    *,
+    max_chars: int = REVIEW_MAX_CUE_CHARS,
+    max_seconds: float = REVIEW_MAX_CUE_SECONDS,
+) -> list[dict[str, Any]]:
+    """Split oversized cues into readable pieces, deterministically.
+
+    Piece timing is proportional to character share, snapped to the nearest
+    gap between evidence words when one is close. Pieces inherit their
+    parent's citations, confidence, and uncertainty; a cue that cannot be
+    split (one enormous token) is kept but flagged uncertain.
+    """
+    gaps = _word_gap_moments(words)
+    result: list[dict[str, Any]] = []
+    for line in lines:
+        result.extend(_split_cue(dict(line), gaps, max_chars, max_seconds))
+    return result
+
+
+def _word_gap_moments(words: Sequence[dict[str, Any]]) -> list[float]:
+    moments: list[float] = []
+    ordered = sorted(
+        (float(word.get("start_seconds", 0.0)),
+         float(word.get("end_seconds", 0.0)))
+        for word in words
+    )
+    for (_, previous_end), (next_start, _) in zip(ordered, ordered[1:]):
+        if next_start >= previous_end:
+            moments.append((previous_end + next_start) / 2.0)
+    return moments
+
+
+def _split_position(text: str) -> int | None:
+    """Best split index (start of the right piece), balanced around center."""
+    center = len(text) / 2.0
+    window_low = int(len(text) * 0.15)
+    window_high = int(len(text) * 0.85)
+    for delimiters in (_SENTENCE_DELIMITERS, _CLAUSE_DELIMITERS, None):
+        best: tuple[float, int] | None = None
+        for match in re.finditer(r"\s+", text):
+            position = match.start()
+            if not window_low <= position <= window_high:
+                continue
+            if delimiters is not None:
+                if position == 0 or text[position - 1] not in delimiters:
+                    continue
+            distance = abs(position - center)
+            if best is None or distance < best[0]:
+                best = (distance, match.end())
+        if best is not None:
+            return best[1]
+    return None
+
+
+def _split_cue(
+    line: dict[str, Any], gaps: Sequence[float],
+    max_chars: int, max_seconds: float,
+) -> list[dict[str, Any]]:
+    text = str(line["text"])
+    start = float(line["start_seconds"])
+    end = float(line["end_seconds"])
+    if len(text) <= max_chars and end - start <= max_seconds:
+        return [line]
+    position = _split_position(text)
+    if position is None:
+        flagged = dict(line)
+        flagged["uncertain"] = True
+        return [flagged]
+    left_text = text[:position].rstrip()
+    right_text = text[position:].lstrip()
+    if not left_text or not right_text:
+        flagged = dict(line)
+        flagged["uncertain"] = True
+        return [flagged]
+    boundary = start + (end - start) * (len(left_text) / len(text))
+    snapped = _snap_to_gap(boundary, gaps, start, end)
+    left = dict(line); left["text"] = left_text
+    left["start_seconds"] = start; left["end_seconds"] = snapped
+    right = dict(line); right["text"] = right_text
+    right["start_seconds"] = snapped; right["end_seconds"] = end
+    return (_split_cue(left, gaps, max_chars, max_seconds) +
+            _split_cue(right, gaps, max_chars, max_seconds))
+
+
+def _snap_to_gap(
+    boundary: float, gaps: Sequence[float], start: float, end: float,
+) -> float:
+    margin = min(0.8, (end - start) * 0.25)
+    best = boundary
+    best_distance = margin
+    for moment in gaps:
+        if start + 0.2 < moment < end - 0.2:
+            distance = abs(moment - boundary)
+            if distance < best_distance:
+                best = moment
+                best_distance = distance
+    return best
+
+
 def _nearest_gap_is_unbridgeable(
     position: int, starts: Sequence[float | None],
 ) -> bool:

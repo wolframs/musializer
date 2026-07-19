@@ -43,7 +43,13 @@ ROOT = Path(__file__).resolve().parents[1]
 LYRIC_PROMPT = ROOT / "prompts" / "lyrics_cleanup_system.md"
 CODEX_OUTPUT_SCHEMA = ROOT / "schemas" / "codex-lyric-review-output-v1.schema.json"
 LYRIC_REVIEW_VERSION = "musializer.lyric-review/v1"
+LYRIC_PROMPT_VERSION = "lyrics_cleanup_system/v2"
 LYRIC_SYNC_VERSION = lyric_align.LYRIC_SYNC_VERSION
+# The model may emit up to this many characters per reviewed line; the
+# deterministic splitter then reduces cues to display size. The C editor
+# rejects cue text at 512 bytes, so both bounds stay far inside it.
+REVIEW_TEXT_LIMIT = 200
+REVIEW_DURATION_LIMIT_SECONDS = 15.0
 # ffprobe JSON escaping can expand an embedded lyric tag several times over;
 # this bound comfortably holds the 64 KiB reference limit after escaping.
 _PROBE_STDOUT_LIMIT = 512 * 1024
@@ -548,8 +554,8 @@ def _validate_codex_review(raw: Any, source: dict[str, Any]) -> tuple[list[dict[
     if not isinstance(source_lines, list):
         raise AnalysisValidationError("source lyric lane has no lines array")
     audio_duration = duration(source.get("audio", {}).get("duration_seconds"))
-    used: set[int] = set()
     previous_start = -1.0
+    previous_first_index = -1
     cleaned: list[dict[str, Any]] = []
     for index, line in enumerate(raw["lines"]):
         if not isinstance(line, dict):
@@ -559,9 +565,12 @@ def _validate_codex_review(raw: Any, source: dict[str, Any]) -> tuple[list[dict[
             raise AnalysisValidationError(f"review line {index} lacks source evidence")
         if len(set(indices)) != len(indices) or any(i < 0 or i >= len(source_lines) for i in indices):
             raise AnalysisValidationError(f"review line {index} cites an invalid source line")
-        if used.intersection(indices):
-            raise AnalysisValidationError("one Whisper line cannot support multiple reviewed lines")
-        used.update(indices)
+        # A long Whisper segment may legitimately be split across several
+        # display cues, so citation reuse is allowed, but citations must stay
+        # chronological so the review cannot shuffle evidence.
+        if min(indices) < previous_first_index:
+            raise AnalysisValidationError("review citations must remain chronological")
+        previous_first_index = min(indices)
         try:
             start = float(line["start_seconds"])
             end = float(line["end_seconds"])
@@ -574,8 +583,10 @@ def _validate_codex_review(raw: Any, source: dict[str, Any]) -> tuple[list[dict[
         text = text.strip()
         envelope_start = min(float(source_lines[i]["start_seconds"]) for i in indices)
         envelope_end = max(float(source_lines[i]["end_seconds"]) for i in indices)
-        if (not text or len(text) > 2048 or start < max(0.0, envelope_start - 0.25) or
+        if (not text or len(text) > REVIEW_TEXT_LIMIT or
+            start < max(0.0, envelope_start - 0.25) or
             end > min(audio_duration, envelope_end + 0.25) or end <= start or
+            end - start > REVIEW_DURATION_LIMIT_SECONDS or
             start < previous_start or not 0.0 <= confidence <= 1.0):
             raise AnalysisValidationError(f"review line {index} violates evidence/timing bounds")
         if type(line.get("uncertain")) is not bool:
@@ -590,12 +601,27 @@ def _validate_codex_review(raw: Any, source: dict[str, Any]) -> tuple[list[dict[
     return cleaned, notes
 
 
+def _line_midpoint_in_intervals(
+    line: dict[str, Any], intervals: Sequence[tuple[float, float]],
+) -> bool:
+    midpoint = (float(line.get("start_seconds", 0.0)) +
+                float(line.get("end_seconds", 0.0))) / 2.0
+    return any(start <= midpoint <= end for start, end in intervals)
+
+
 def codex_review_request(source: dict[str, Any]) -> str:
     prompt = LYRIC_PROMPT.read_text(encoding="utf-8")
     evidence = {
         "audio": source.get("audio"),
         "lines": source.get("lines", []),
         "words": source.get("words", []),
+        # Detected repetition-loop hallucinations; the prompt instructs the
+        # model to omit evidence inside these windows and note the omission.
+        "suspected_hallucination_intervals": [
+            {"start_seconds": start, "end_seconds": end}
+            for start, end in lyric_align.flag_unreliable_intervals(
+                source.get("lines") or [])
+        ],
     }
     return f"{prompt}\n\nWhisper evidence JSON follows:\n{json.dumps(evidence, ensure_ascii=False)}\n"
 
@@ -639,6 +665,16 @@ def run_codex_review(
         diagnostic_sink.unlink(missing_ok=True)
         raw = read_json(result_path)
     lines, notes = _validate_codex_review(raw, source)
+    lines = lyric_align.split_long_cues(lines, source.get("words") or [])
+    source_lines = source.get("lines") or []
+    unreliable = lyric_align.flag_unreliable_intervals(source_lines)
+    cited: set[int] = set()
+    for line in lines:
+        cited.update(line["source_line_indices"])
+    uncited_reliable = sum(
+        1 for index, line in enumerate(source_lines)
+        if index not in cited
+        and not _line_midpoint_in_intervals(line, unreliable))
     reviewed = {
         "schema_version": LYRIC_REVIEW_VERSION,
         "lane": "lyric_review",
@@ -648,11 +684,20 @@ def run_codex_review(
             "sha256": source_sha,
             "adapter": source.get("provenance", {}).get("adapter"),
         },
+        "coverage": {
+            "source_lines": len(source_lines),
+            "cited_source_lines": len(cited),
+            "uncited_reliable_source_lines": uncited_reliable,
+            "suspected_hallucination_intervals": [
+                {"start_seconds": start, "end_seconds": end}
+                for start, end in unreliable
+            ],
+        },
         "provenance": {
             "adapter": "tools/external_analysis.py",
             "adapter_version": ADAPTER_VERSION,
             "source_kind": "codex_lyric_review",
-            "prompt_version": "lyrics_cleanup_system/v1",
+            "prompt_version": LYRIC_PROMPT_VERSION,
             "prompt_sha256": prompt_sha,
             "model": model or "codex-default",
             "request_settings": {"sandbox": "read-only", "ephemeral": True},
@@ -1101,7 +1146,7 @@ def _review_cache_accepts(
                 adapter_version=ADAPTER_VERSION,
                 source_kind="codex_lyric_review",
                 model=model or "codex-default",
-                prompt_version="lyrics_cleanup_system/v1",
+                prompt_version=LYRIC_PROMPT_VERSION,
                 prompt_sha256=prompt_sha,
                 request_settings={"sandbox": "read-only", "ephemeral": True},
             ))

@@ -11,6 +11,28 @@
     "audio": {"type": "object"},
     "source": {"type": "object"},
     "provenance": {"type": "object"},
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_lines", "cited_source_lines", "uncited_reliable_source_lines", "suspected_hallucination_intervals"],
+      "properties": {
+        "source_lines": {"type": "integer", "minimum": 0},
+        "cited_source_lines": {"type": "integer", "minimum": 0},
+        "uncited_reliable_source_lines": {"type": "integer", "minimum": 0},
+        "suspected_hallucination_intervals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start_seconds", "end_seconds"],
+            "properties": {
+              "start_seconds": {"type": "number", "minimum": 0},
+              "end_seconds": {"type": "number", "exclusiveMinimum": 0}
+            }
+          }
+        }
+      }
+    },
     "lines": {
       "type": "array",
       "items": {"$ref": "#/$defs/line"}
@@ -25,7 +47,7 @@
       "properties": {
         "start_seconds": {"type": "number", "minimum": 0},
         "end_seconds": {"type": "number", "exclusiveMinimum": 0},
-        "text": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "text": {"type": "string", "minLength": 1, "maxLength": 512},
         "source_line_indices": {
           "type": "array", "minItems": 1, "uniqueItems": true,
           "items": {"type": "integer", "minimum": 0}

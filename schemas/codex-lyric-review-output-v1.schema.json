@@ -13,7 +13,7 @@
         "properties": {
           "start_seconds": {"type": "number", "minimum": 0},
           "end_seconds": {"type": "number", "exclusiveMinimum": 0},
-          "text": {"type": "string", "minLength": 1, "maxLength": 2048},
+          "text": {"type": "string", "minLength": 1, "maxLength": 200, "description": "One short display phrase; aim well below 100 characters."},
           "source_line_indices": {"type": "array", "minItems": 1, "description": "Whisper line indices supporting this line; entries must be unique. Uniqueness is enforced by the local validator because structured-output endpoints reject the uniqueItems keyword.", "items": {"type": "integer", "minimum": 0}},
           "confidence": {"type": "number", "minimum": 0, "maximum": 1},
           "uncertain": {"type": "boolean"}
