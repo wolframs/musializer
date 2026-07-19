@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -299,9 +300,33 @@ def _command_description(argv: Sequence[str], private_positions: set[int] | None
     return ["<private-file>" if i in private_positions else value for i, value in enumerate(argv)]
 
 
+# whisper.cpp only accepts these exact --dtw preset names; passing anything
+# else makes whisper-cli fail outright, so unknown models run without DTW
+# instead of not at all.
+_DTW_PRESETS = frozenset({
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+    "medium", "medium.en", "large.v1", "large.v2", "large.v3",
+    "large.v3.turbo",
+})
+
+
+def _dtw_model_name(model_file_name: str) -> str | None:
+    if not (model_file_name.startswith("ggml-") and model_file_name.endswith(".bin")):
+        return None
+    stem = model_file_name[len("ggml-"):-len(".bin")]
+    stem = re.sub(r"-q\d+_\d+$", "", stem)
+    preset = stem.replace("large-v", "large.v").replace("-turbo", ".turbo")
+    return preset if preset in _DTW_PRESETS else None
+
+
+def _whisper_thread_count() -> int:
+    return max(1, os.cpu_count() or 4)
+
+
 def whisper_request(
     audio: Path, *, whisper_bin: Path, model: Path, language: str,
     dtw_model: str | None, ffmpeg: str, output_prefix: Path,
+    threads: int | None = None,
 ) -> tuple[list[str], list[str]]:
     wav = output_prefix.with_suffix(".16k.wav")
     decode = [
@@ -312,6 +337,7 @@ def whisper_request(
     whisper = [
         str(whisper_bin), "-f", str(wav), "--output-file", str(output_prefix),
         "--output-json", "-ojf", "-m", str(model), "-l", language,
+        "-t", str(threads if threads is not None else _whisper_thread_count()),
     ]
     if dtw_model:
         whisper.extend(["--dtw", dtw_model])
@@ -330,8 +356,8 @@ def run_whisper(
         raise AnalysisValidationError("audio, Whisper executable, and model must be files")
     audio_sha = sha256_file(audio)
     model_sha = sha256_file(model)
-    if dtw_model is None and model.name.startswith("ggml-") and model.name.endswith(".bin"):
-        dtw_model = model.name[len("ggml-"):-len(".bin")]
+    if dtw_model is None:
+        dtw_model = _dtw_model_name(model.name)
     with tempfile.TemporaryDirectory(prefix="musializer-whisper-") as temporary:
         prefix = Path(temporary) / "transcription"
         decode, whisper = whisper_request(
@@ -907,9 +933,7 @@ def _whisper_cache_accepts(
         return False
     if model is not None:
         if not model.is_file(): return False
-        dtw_model = (model.name[len("ggml-"):-len(".bin")]
-                     if model.name.startswith("ggml-") and model.name.endswith(".bin")
-                     else None)
+        dtw_model = _dtw_model_name(model.name)
         expected_settings = {
             "language": "en", "dtw_model": dtw_model,
             "model_sha256": sha256_file(model), "gpu_requested": True,
@@ -983,13 +1007,29 @@ def _mimo_cache_accepts(
             ))
 
 
+# Best-accuracy-first among models the discovered install may hold; the
+# MUSIALIZER_WHISPER_MODEL override always wins over discovery.
+_WHISPER_INSTALL = Path("/tmp/music-visualizations-whisper-1.8.6")
+_WHISPER_MODEL_PREFERENCE = (
+    "ggml-large-v3.bin",
+    "ggml-large-v3-q5_0.bin",
+    "ggml-large-v3-turbo.bin",
+    "ggml-medium.en.bin",
+)
+
+
 def _default_whisper_paths() -> tuple[Path | None, Path | None]:
-    install = Path("/tmp/music-visualizations-whisper-1.8.6")
     binary = os.environ.get("MUSIALIZER_WHISPER_BIN")
     model = os.environ.get("MUSIALIZER_WHISPER_MODEL")
+    discovered_binary = _WHISPER_INSTALL / "build/bin/whisper-cli"
+    discovered_model = next(
+        (candidate for name in _WHISPER_MODEL_PREFERENCE
+         if (candidate := _WHISPER_INSTALL / name).is_file()),
+        None,
+    )
     return (
-        Path(binary) if binary else (install / "build/bin/whisper-cli" if (install / "build/bin/whisper-cli").is_file() else None),
-        Path(model) if model else (install / "ggml-medium.en.bin" if (install / "ggml-medium.en.bin").is_file() else None),
+        Path(binary) if binary else (discovered_binary if discovered_binary.is_file() else None),
+        Path(model) if model else discovered_model,
     )
 
 

@@ -306,6 +306,52 @@ class ExternalAnalysisTests(unittest.TestCase):
         self.assertTrue(output.is_file())
         self.assertEqual(result["lines"][0]["text"], "hello")
         self.assertEqual(result["provenance"]["source_kind"], "whisper_import")
+        whisper_argv = calls[1][0]
+        self.assertIn("-t", whisper_argv)
+        self.assertGreaterEqual(int(whisper_argv[whisper_argv.index("-t") + 1]), 1)
+        self.assertEqual(whisper_argv[whisper_argv.index("--dtw") + 1], "medium.en")
+
+    def test_dtw_names_map_to_whisper_cpp_presets(self):
+        cases = {
+            "ggml-medium.en.bin": "medium.en",
+            "ggml-large-v3.bin": "large.v3",
+            "ggml-large-v3-turbo.bin": "large.v3.turbo",
+            "ggml-large-v3-q5_0.bin": "large.v3",
+            "ggml-large-v3-turbo-q5_0.bin": "large.v3.turbo",
+            "ggml-large-v2.bin": "large.v2",
+            "ggml-tiny.bin": "tiny",
+            # Unknown or foreign names must run without DTW rather than
+            # passing a preset whisper-cli rejects outright.
+            "ggml-large.bin": None,
+            "ggml-distil-large-v3.bin": None,
+            "custom-model.bin": None,
+            "ggml-medium.en.gguf": None,
+        }
+        for name, expected in cases.items():
+            self.assertEqual(external._dtw_model_name(name), expected, name)
+
+    def test_default_whisper_model_prefers_the_most_accurate_available(self):
+        install = self.root / "whisper-install"
+        (install / "build/bin").mkdir(parents=True)
+        (install / "build/bin/whisper-cli").write_bytes(b"binary")
+        with mock.patch.object(external, "_WHISPER_INSTALL", install):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(external._default_whisper_paths()[1], None)
+                (install / "ggml-medium.en.bin").write_bytes(b"m")
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 install / "ggml-medium.en.bin")
+                (install / "ggml-large-v3-turbo.bin").write_bytes(b"t")
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 install / "ggml-large-v3-turbo.bin")
+                (install / "ggml-large-v3.bin").write_bytes(b"l")
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 install / "ggml-large-v3.bin")
+            with mock.patch.dict(
+                    os.environ,
+                    {"MUSIALIZER_WHISPER_MODEL": "/override/model.bin"},
+                    clear=True):
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 Path("/override/model.bin"))
 
     def test_codex_review_is_stdin_only_and_evidence_bounded(self):
         source_path = self.write_json("lyrics.json", lyrics_document())
