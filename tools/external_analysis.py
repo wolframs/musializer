@@ -35,6 +35,7 @@ from analysis_io import (
     sha256_file,
 )
 from import_whisper import normalize_whisper
+import lyric_align
 import mimo_openrouter as mimo_adapter
 
 
@@ -42,6 +43,11 @@ ROOT = Path(__file__).resolve().parents[1]
 LYRIC_PROMPT = ROOT / "prompts" / "lyrics_cleanup_system.md"
 CODEX_OUTPUT_SCHEMA = ROOT / "schemas" / "codex-lyric-review-output-v1.schema.json"
 LYRIC_REVIEW_VERSION = "musializer.lyric-review/v1"
+LYRIC_SYNC_VERSION = lyric_align.LYRIC_SYNC_VERSION
+# ffprobe JSON escaping can expand an embedded lyric tag several times over;
+# this bound comfortably holds the 64 KiB reference limit after escaping.
+_PROBE_STDOUT_LIMIT = 512 * 1024
+REFERENCE_SIBLING_SUFFIX = ".lyrics.txt"
 SCENE_PLAN_VERSION = "musializer.scene-plan/v1"
 SEMANTIC_NOTES_VERSION = "musializer.semantic-notes/v1"
 BRIDGE_VERSION = "MUSIALIZER_BRIDGE\t1"
@@ -137,6 +143,7 @@ def _join_workers_bounded(workers: Sequence[threading.Thread],
 def _run_bounded_process(
     argv: Sequence[str], *, timeout: float, stdin: str | None,
     cwd: Path | None, env: dict[str, str] | None,
+    stdout_limit: int = DIAGNOSTIC_TAIL_LIMIT,
 ) -> subprocess.CompletedProcess[str]:
     """Run a real child while draining stdout/stderr into bounded tails."""
     options: dict[str, Any] = {
@@ -152,7 +159,7 @@ def _run_bounded_process(
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     process = subprocess.Popen(list(argv), **options)
     assert process.stdout is not None and process.stderr is not None
-    stdout_tail = _BoundedTail(DIAGNOSTIC_TAIL_LIMIT)
+    stdout_tail = _BoundedTail(stdout_limit)
     stderr_tail = _BoundedTail(DIAGNOSTIC_TAIL_LIMIT)
     readers = [
         threading.Thread(target=_drain_child_stream,
@@ -216,6 +223,7 @@ def _run(
     argv: Sequence[str], *, timeout: float, stdin: str | None = None,
     cwd: Path | None = None, env: dict[str, str] | None = None,
     runner: Runner = subprocess.run, diagnostic_sink: Path | None = None,
+    stdout_limit: int = DIAGNOSTIC_TAIL_LIMIT,
 ) -> subprocess.CompletedProcess[str]:
     if not argv or timeout <= 0 or not math.isfinite(timeout):
         raise AnalysisValidationError("external command and positive finite timeout are required")
@@ -223,7 +231,8 @@ def _run(
     try:
         if runner is subprocess.run:
             result = _run_bounded_process(
-                argv, timeout=timeout, stdin=stdin, cwd=cwd, env=env)
+                argv, timeout=timeout, stdin=stdin, cwd=cwd, env=env,
+                stdout_limit=stdout_limit)
         else:
             # Injected runners are used only by deterministic offline tests.
             result = runner(
@@ -399,6 +408,137 @@ def run_whisper(
         atomic_write_json(raw_output or output.with_suffix(".whisper.raw.json"), raw)
         atomic_write_json(output, normalized)
         return normalized
+
+
+def _reference_from_text(text: str, source: str) -> dict[str, Any]:
+    if not text.strip():
+        raise AnalysisValidationError("reference lyrics are empty")
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) > lyric_align.MAX_REFERENCE_BYTES:
+        raise AnalysisValidationError("reference lyrics exceed the size bound")
+    return {"source": source, "text": text,
+            "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def discover_reference_lyrics(
+    audio: Path, *, override: Path | None = None, ffprobe: str = "ffprobe",
+    timeout: float = 60.0, runner: Runner = subprocess.run,
+) -> dict[str, Any] | None:
+    """Locate authored lyrics for a track without any network access.
+
+    Priority: an explicit user-supplied file, a sibling
+    ``<stem>.lyrics.txt``, then unsynchronized lyric tags embedded in the
+    audio container (ID3 USLT and friends, surfaced by ffprobe as tags whose
+    key contains "lyric"). Returns None when nothing usable exists. An
+    explicit override that is empty or oversized is an error; problems with
+    merely discovered sources are reported to stderr (the job log) and
+    skipped so transcription can still run.
+    """
+    if override is not None:
+        return _reference_from_text(
+            override.read_text(encoding="utf-8"), f"file:{override.name}")
+    sibling = audio.with_name(audio.stem + REFERENCE_SIBLING_SUFFIX)
+    if sibling.is_file():
+        try:
+            return _reference_from_text(
+                sibling.read_text(encoding="utf-8"), f"file:{sibling.name}")
+        except (AnalysisValidationError, UnicodeDecodeError, OSError) as error:
+            print(f"Ignoring sibling lyrics file: {error}", file=sys.stderr)
+    probe = [
+        ffprobe, "-v", "error", "-show_entries", "format_tags:stream_tags",
+        "-of", "json", str(audio),
+    ]
+    try:
+        completed = _run(probe, timeout=timeout, env=_safe_local_env(),
+                         runner=runner, stdout_limit=_PROBE_STDOUT_LIMIT)
+        payload = json.loads(completed.stdout or "{}")
+    except (RuntimeError, json.JSONDecodeError):
+        return None
+    tag_sets = [payload.get("format", {}).get("tags", {})]
+    for stream in payload.get("streams") or []:
+        if isinstance(stream, dict):
+            tag_sets.append(stream.get("tags", {}))
+    candidates: list[tuple[str, str]] = []
+    for tags in tag_sets:
+        if not isinstance(tags, dict):
+            continue
+        for key, value in tags.items():
+            if ("lyric" in key.lower() and isinstance(value, str)
+                    and value.strip()):
+                candidates.append((key, value))
+    # Prefer English, then plain "lyrics"-style keys; the ordering must stay
+    # deterministic when a container carries several lyric tags.
+    candidates.sort(key=lambda item: (
+        0 if item[0].lower().endswith("eng") else 1,
+        0 if item[0].lower().startswith("lyric") else 1,
+        item[0].lower(),
+    ))
+    for key, value in candidates:
+        try:
+            return _reference_from_text(value, f"embedded:{key}")
+        except AnalysisValidationError as error:
+            print(f"Ignoring embedded lyric tag {key}: {error}",
+                  file=sys.stderr)
+    return None
+
+
+def run_lyric_sync(
+    source: Path, reference: dict[str, Any], output: Path,
+) -> dict[str, Any]:
+    """Align discovered reference lyrics to Whisper evidence, atomically."""
+    evidence = read_json(source)
+    if evidence.get("schema_version") != "musializer.lyric-timing/v1":
+        raise AnalysisValidationError(
+            "lyric sync requires musializer.lyric-timing/v1 evidence")
+    audio = evidence.get("audio", {})
+    audio_duration = duration(audio.get("duration_seconds"))
+    document = lyric_align.sync_lyrics(
+        reference["text"], evidence, audio_duration=audio_duration)
+    document["audio"] = {
+        "sha256": audio.get("sha256"),
+        "duration_seconds": audio_duration,
+    }
+    document["reference"] = {
+        "source": reference["source"],
+        "sha256": reference["sha256"],
+    }
+    document["provenance"] = {
+        "adapter": "tools/external_analysis.py",
+        "adapter_version": ADAPTER_VERSION,
+        "source_kind": "lyric_sync",
+        "audio_sha256": audio.get("sha256"),
+        "schema_version": LYRIC_SYNC_VERSION,
+        "request_settings": {"aligner_version": lyric_align.ALIGNER_VERSION},
+        "generation": {
+            "whisper_sha256": sha256_file(source),
+            "reference_sha256": reference["sha256"],
+        },
+    }
+    atomic_write_json(output, document)
+    return document
+
+
+def _sync_cache_accepts(
+    document: dict[str, Any], *, whisper_sha256: str,
+    reference_sha256: str | None,
+) -> bool:
+    if document.get("aligner_version") != lyric_align.ALIGNER_VERSION:
+        return False
+    if (reference_sha256 is not None and
+            document.get("reference", {}).get("sha256") != reference_sha256):
+        return False
+    provenance = document.get("provenance", {})
+    generation = (provenance.get("generation", {})
+                  if isinstance(provenance, dict) else {})
+    if generation.get("whisper_sha256") != whisper_sha256:
+        return False
+    return _provenance_matches(
+        document,
+        adapter="tools/external_analysis.py",
+        adapter_version=ADAPTER_VERSION,
+        source_kind="lyric_sync",
+        request_settings={"aligner_version": lyric_align.ALIGNER_VERSION},
+    )
 
 
 def _validate_codex_review(raw: Any, source: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1038,6 +1178,7 @@ def run_assist(
     bridge_path: Path | None = None, whisper_bin: Path | None = None,
     whisper_model: Path | None = None, codex_bin: str = "codex",
     codex_model: str | None = None, semantic_cache: Path | None = None,
+    lyrics_file: Path | None = None,
     zdr: bool = False, external_timeout: float = 2400.0,
     dry_run: bool = False, runner: Runner = subprocess.run,
 ) -> dict[str, Any]:
@@ -1053,6 +1194,7 @@ def run_assist(
     paths = {
         "measured": output_dir / "measured.json",
         "lyrics": output_dir / "lyrics.whisper.json",
+        "sync": output_dir / "lyrics.sync.json",
         "review": output_dir / "lyrics.review.json",
         "semantic": semantic_cache or output_dir / "semantic.cache.json",
         "plan": output_dir / "scene-plan.json",
@@ -1063,7 +1205,8 @@ def run_assist(
     whisper_bin = whisper_bin or detected_bin
     whisper_model = whisper_model or detected_model
     actions = ["measured", "plan", "bridge"]
-    if mode in {"lyrics", "all"}: actions[1:1] = ["whisper", "codex_lyric_review"]
+    if mode in {"lyrics", "all"}:
+        actions[1:1] = ["whisper", "lyric_sync_or_codex_review"]
     if mode in {"mimo", "all"}: actions[1:1] = ["mimo_openrouter"]
     if dry_run:
         return {
@@ -1094,6 +1237,7 @@ def run_assist(
     measured_duration = duration(measured.get("audio", {}).get("duration_seconds"))
 
     lyrics: dict[str, Any] | None = None
+    lyrics_lane_path: Path | None = None
     if mode in {"lyrics", "all"}:
         whisper_lane = _cache_matches(
             paths["lyrics"], "musializer.lyric-timing/v1", audio_sha,
@@ -1112,19 +1256,38 @@ def run_assist(
             cache_status["lyrics"] = "generated"
         else: cache_status["lyrics"] = "reused"
         source_sha = sha256_file(paths["lyrics"])
-        lyrics = _cache_matches(
-            paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
-            accept=lambda value: _review_cache_accepts(
-                value, source_sha256=source_sha, model=codex_model,
-            ),
-        )
-        if lyrics is None:
-            lyrics = run_codex_review(
-                paths["lyrics"], paths["review"], codex_bin=codex_bin,
-                model=codex_model, timeout=external_timeout, runner=runner,
+        reference = discover_reference_lyrics(
+            audio, override=lyrics_file, runner=runner)
+        if reference is not None:
+            # Authored lyrics exist: display text is already decided, so the
+            # deterministic aligner replaces the Codex wording review.
+            lyrics = _cache_matches(
+                paths["sync"], LYRIC_SYNC_VERSION, audio_sha,
+                accept=lambda value: _sync_cache_accepts(
+                    value, whisper_sha256=source_sha,
+                    reference_sha256=reference["sha256"],
+                ),
             )
-            cache_status["review"] = "generated"
-        else: cache_status["review"] = "reused"
+            if lyrics is None:
+                lyrics = run_lyric_sync(paths["lyrics"], reference, paths["sync"])
+                cache_status["sync"] = "generated"
+            else: cache_status["sync"] = "reused"
+            lyrics_lane_path = paths["sync"]
+        else:
+            lyrics = _cache_matches(
+                paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
+                accept=lambda value: _review_cache_accepts(
+                    value, source_sha256=source_sha, model=codex_model,
+                ),
+            )
+            if lyrics is None:
+                lyrics = run_codex_review(
+                    paths["lyrics"], paths["review"], codex_bin=codex_bin,
+                    model=codex_model, timeout=external_timeout, runner=runner,
+                )
+                cache_status["review"] = "generated"
+            else: cache_status["review"] = "reused"
+            lyrics_lane_path = paths["review"]
     elif mode == "sections":
         # Scene changes may use already-established local lyric evidence, but
         # never trigger lyric generation and never inherit a semantic lane.
@@ -1137,11 +1300,22 @@ def run_assist(
         if whisper_lane is not None:
             source_sha = sha256_file(paths["lyrics"])
             lyrics = _cache_matches(
-                paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
-                accept=lambda value: _review_cache_accepts(
-                    value, source_sha256=source_sha, model=codex_model,
+                paths["sync"], LYRIC_SYNC_VERSION, audio_sha,
+                accept=lambda value: _sync_cache_accepts(
+                    value, whisper_sha256=source_sha, reference_sha256=None,
                 ),
             )
+            if lyrics is not None:
+                lyrics_lane_path = paths["sync"]
+            else:
+                lyrics = _cache_matches(
+                    paths["review"], LYRIC_REVIEW_VERSION, audio_sha,
+                    accept=lambda value: _review_cache_accepts(
+                        value, source_sha256=source_sha, model=codex_model,
+                    ),
+                )
+                if lyrics is not None:
+                    lyrics_lane_path = paths["review"]
 
     semantic: dict[str, Any] | None = None
     if mode in {"mimo", "all"}:
@@ -1172,24 +1346,27 @@ def run_assist(
         else: cache_status["semantic"] = "reused"
         semantic = _semantic_document(envelope)
 
-    lyrics_path = paths["review"] if lyrics else None
     plan = build_scene_plan(
-        paths["measured"], lyrics_path=lyrics_path,
+        paths["measured"], lyrics_path=lyrics_lane_path if lyrics else None,
         semantic_path=paths["semantic"] if semantic else None,
     )
     atomic_write_json(paths["plan"], plan)
     atomic_write_text(paths["bridge"], build_bridge(plan, lyrics=lyrics, semantic=semantic))
+    lyric_lane = lyrics.get("lane") if lyrics else None
     manifest = {
         "schema_version": "musializer.assist-manifest/v1", "mode": mode,
         "audio": {"sha256": audio_sha, "duration_seconds": measured_duration},
         "cache_status": cache_status,
         "artifacts": {key: str(value) for key, value in paths.items() if key != "manifest"},
         "provenance_streams": [
-            "measured_audio", *( ["lyrics", "lyric_review"] if lyrics else [] ),
+            "measured_audio", *( ["lyrics", lyric_lane] if lyrics else [] ),
             *( [semantic.get("lane")] if semantic else [] ), "scene_plan",
         ],
+        "lyric_source": (lyrics.get("reference", {}).get("source")
+                         if lyric_lane == "lyric_sync" else None),
         "result_counts": {
             "lyrics": len(lyrics.get("lines", [])) if lyrics else 0,
+            "lyrics_unmatched": len(lyrics.get("unmatched", [])) if lyrics else 0,
             "sections": len(plan.get("sections", [])),
             "semantics": len(semantic.get("segments", [])) if semantic else 0,
         },
@@ -1211,6 +1388,10 @@ def main(argv: list[str] | None = None) -> int:
     whisper.add_argument("--ffmpeg", default="ffmpeg"); whisper.add_argument("--timeout", type=float, default=3600)
     whisper.add_argument("--decode-timeout", type=float, default=600); whisper.add_argument("--raw-output", type=Path)
     whisper.add_argument("--dry-run", action="store_true"); whisper.add_argument("--request-dump", type=Path)
+
+    sync = sub.add_parser("sync-lyrics", help="deterministically align known lyrics to Whisper evidence")
+    sync.add_argument("lyrics", type=Path); sync.add_argument("reference", type=Path)
+    sync.add_argument("output", type=Path)
 
     clean = sub.add_parser("clean-lyrics", help="run evidence-preserving Codex lyric review")
     clean.add_argument("lyrics", type=Path); clean.add_argument("output", type=Path)
@@ -1235,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
     assist.add_argument("--bridge", type=Path); assist.add_argument("--whisper-bin", type=Path)
     assist.add_argument("--whisper-model", type=Path); assist.add_argument("--codex-bin", default="codex")
     assist.add_argument("--codex-model"); assist.add_argument("--semantic-cache", type=Path)
+    assist.add_argument("--lyrics-file", type=Path)
     assist.add_argument("--zdr", action="store_true"); assist.add_argument("--timeout", type=float, default=2400)
     assist.add_argument("--new-process-group", action="store_true", help=argparse.SUPPRESS)
     assist.add_argument("--dry-run", action="store_true"); assist.add_argument("--request-dump", type=Path)
@@ -1262,6 +1444,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.dry_run:
                 if args.request_dump: atomic_write_json(args.request_dump, result)
                 else: print(json.dumps(result, indent=2))
+        elif args.command == "sync-lyrics":
+            reference = _reference_from_text(
+                args.reference.read_text(encoding="utf-8"),
+                f"file:{args.reference.name}")
+            run_lyric_sync(args.lyrics, reference, args.output)
         elif args.command == "import-mimo":
             atomic_write_json(args.output, import_mimo_export(args.export, args.audio, args.duration))
         elif args.command == "assist":
@@ -1272,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
                 bridge_path=args.bridge, whisper_bin=args.whisper_bin,
                 whisper_model=args.whisper_model, codex_bin=args.codex_bin,
                 codex_model=args.codex_model, semantic_cache=args.semantic_cache,
+                lyrics_file=args.lyrics_file,
                 zdr=args.zdr, external_timeout=args.timeout, dry_run=args.dry_run,
             )
             if args.dry_run:
@@ -1279,11 +1467,18 @@ def main(argv: list[str] | None = None) -> int:
                 else: print(json.dumps(result, indent=2))
             else:
                 counts = result["result_counts"]
+                sync_note = ""
+                if result.get("lyric_source"):
+                    sync_note = (
+                        f" Lyric timing was synchronized to {result['lyric_source']}"
+                        f" ({counts.get('lyrics_unmatched', 0)} reference lines"
+                        " found no timing).")
                 print(
                     "External analysis completed: "
                     f"{counts['lyrics']} lyric cues, "
                     f"{counts['sections']} scene sections, and "
-                    f"{counts['semantics']} semantic cues. "
+                    f"{counts['semantics']} semantic cues."
+                    f"{sync_note} "
                     "The manifest, bridge, and evidence remain in the job folder.",
                     file=sys.stderr,
                 )

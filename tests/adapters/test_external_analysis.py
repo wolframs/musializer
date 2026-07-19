@@ -579,6 +579,136 @@ class ExternalAnalysisTests(unittest.TestCase):
             envelope, request_identity=changed_request,
         ))
 
+    def test_reference_discovery_prefers_override_then_sibling_then_tags(self):
+        audio = self.root / "track.mp3"; audio.write_bytes(b"audio")
+        probe_payload = json.dumps(
+            {"format": {"tags": {"lyrics-eng": "Embedded lines"}}})
+
+        def prober(argv, **_kwargs):
+            self.assertEqual(Path(argv[0]).name, "ffprobe")
+            self.assertNotIn("Embedded lines", " ".join(argv))
+            return subprocess.CompletedProcess(argv, 0, probe_payload, "")
+
+        found = external.discover_reference_lyrics(audio, runner=prober)
+        self.assertEqual(found["source"], "embedded:lyrics-eng")
+        self.assertEqual(found["text"], "Embedded lines")
+
+        sibling = self.root / "track.lyrics.txt"
+        sibling.write_text("Sibling lines", encoding="utf-8")
+        found = external.discover_reference_lyrics(audio, runner=prober)
+        self.assertEqual(found["source"], "file:track.lyrics.txt")
+
+        override = self.root / "pasted.txt"
+        override.write_text("Pasted lines", encoding="utf-8")
+        found = external.discover_reference_lyrics(
+            audio, override=override, runner=prober)
+        self.assertEqual(found["source"], "file:pasted.txt")
+
+        def silent_prober(argv, **_kwargs):
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+        sibling.unlink()
+        self.assertIsNone(
+            external.discover_reference_lyrics(audio, runner=silent_prober))
+        with self.assertRaises(analysis_io.AnalysisValidationError):
+            empty = self.root / "empty.txt"
+            empty.write_text("  \n", encoding="utf-8")
+            external.discover_reference_lyrics(
+                audio, override=empty, runner=prober)
+
+    def test_discovered_reference_switches_assist_to_deterministic_sync(self):
+        audio = self.root / "track.wav"; audio.write_bytes(b"fixture audio")
+        audio_sha = analysis_io.sha256_file(audio)
+        output_dir = self.root / "analysis"; output_dir.mkdir()
+        measured = measured_document(); measured["audio"]["sha256"] = audio_sha
+        self.write_json("analysis/measured.json", measured)
+        model = self.root / "ggml-medium.en.bin"; model.write_bytes(b"model")
+        whisper_bin = self.root / "whisper-cli"; whisper_bin.write_bytes(b"bin")
+        whisper = lyrics_document(); whisper["audio"]["sha256"] = audio_sha
+        whisper["provenance"] = {
+            "adapter": "tools/external_analysis.py",
+            "adapter_version": analysis_io.ADAPTER_VERSION,
+            "source_kind": "whisper_import",
+            "model": model.name,
+            "request_settings": {
+                "language": "en", "dtw_model": "medium.en",
+                "model_sha256": analysis_io.sha256_file(model),
+                "gpu_requested": True,
+            },
+        }
+        self.write_json("analysis/lyrics.whisper.json", whisper)
+        probe_payload = json.dumps(
+            {"format": {"tags": {"lyrics-eng": "Hello world\nAgain"}}})
+
+        def runner(argv, **_kwargs):
+            name = Path(argv[0]).name
+            self.assertNotEqual(name, "codex",
+                                "sync mode must not invoke the Codex review")
+            self.assertEqual(name, "ffprobe")
+            return subprocess.CompletedProcess(argv, 0, probe_payload, "")
+
+        result = external.run_assist(
+            audio, output_dir, audio_duration=12, mode="lyrics",
+            whisper_bin=whisper_bin, whisper_model=model, runner=runner,
+        )
+        self.assertEqual(result["cache_status"], {
+            "measured": "reused", "lyrics": "reused", "sync": "generated",
+        })
+        self.assertEqual(result["lyric_source"], "embedded:lyrics-eng")
+        self.assertIn("lyric_sync", result["provenance_streams"])
+        self.assertNotIn("lyric_review", result["provenance_streams"])
+        synced = analysis_io.read_json(output_dir / "lyrics.sync.json")
+        self.assertEqual(synced["lane"], "lyric_sync")
+        texts = [line["text"] for line in synced["lines"]]
+        self.assertEqual(texts, ["Hello world", "Again"])
+        self.assertEqual(result["result_counts"]["lyrics"], 2)
+        bridge = (output_dir / "analysis.bridge.tsv").read_text(encoding="utf-8")
+        encoded = base64.b64encode("Hello world".encode()).decode()
+        self.assertIn(encoded, bridge)
+
+        # A second run must reuse the sync stage byte-for-byte.
+        again = external.run_assist(
+            audio, output_dir, audio_duration=12, mode="lyrics",
+            whisper_bin=whisper_bin, whisper_model=model, runner=runner,
+        )
+        self.assertEqual(again["cache_status"]["sync"], "reused")
+
+    def test_sync_cache_identity_covers_reference_evidence_and_aligner(self):
+        whisper_path = self.write_json("lyrics.whisper.json", lyrics_document())
+        whisper_sha = analysis_io.sha256_file(whisper_path)
+        reference = external._reference_from_text("Hello world", "embedded:lyrics")
+        document = {
+            "schema_version": external.LYRIC_SYNC_VERSION,
+            "lane": "lyric_sync",
+            "aligner_version": "1",
+            "audio": {"sha256": SHA, "duration_seconds": 12.0},
+            "reference": {"source": "embedded:lyrics",
+                          "sha256": reference["sha256"]},
+            "provenance": {
+                "adapter": "tools/external_analysis.py",
+                "adapter_version": analysis_io.ADAPTER_VERSION,
+                "source_kind": "lyric_sync",
+                "request_settings": {"aligner_version": "1"},
+                "generation": {"whisper_sha256": whisper_sha,
+                               "reference_sha256": reference["sha256"]},
+            },
+        }
+        self.assertTrue(external._sync_cache_accepts(
+            document, whisper_sha256=whisper_sha,
+            reference_sha256=reference["sha256"]))
+        self.assertTrue(external._sync_cache_accepts(
+            document, whisper_sha256=whisper_sha, reference_sha256=None))
+        self.assertFalse(external._sync_cache_accepts(
+            document, whisper_sha256="0" * 64,
+            reference_sha256=reference["sha256"]))
+        self.assertFalse(external._sync_cache_accepts(
+            document, whisper_sha256=whisper_sha, reference_sha256="0" * 64))
+        stale = json.loads(json.dumps(document))
+        stale["aligner_version"] = "0"
+        self.assertFalse(external._sync_cache_accepts(
+            stale, whisper_sha256=whisper_sha,
+            reference_sha256=reference["sha256"]))
+
     def test_stale_codex_fingerprint_regenerates_only_review_stage(self):
         audio = self.root / "track.wav"; audio.write_bytes(b"fixture audio")
         audio_sha = analysis_io.sha256_file(audio)
@@ -623,6 +753,8 @@ class ExternalAnalysisTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def codex_runner(argv, **_kwargs):
+            if Path(argv[0]).name == "ffprobe":
+                return subprocess.CompletedProcess(argv, 0, "{}", "")
             calls.append(argv)
             self.assertEqual(argv[0], "codex")
             result_path = Path(argv[argv.index("-o") + 1])
