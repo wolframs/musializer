@@ -88,11 +88,14 @@ MiMo caches include its model, prompt, output schema, audio metadata, routing,
 fallback, and ZDR request settings. A mismatch regenerates that stage and its
 downstream products while leaving still-valid upstream evidence reusable.
 Whisper is configured with `MUSIALIZER_WHISPER_BIN` and
-`MUSIALIZER_WHISPER_MODEL` or the corresponding flags. On this workstation the
-helper also detects the prior setup at
-`/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli`; among models
-in that install root it prefers `ggml-large-v3-turbo.bin`, then
-`ggml-large-v3.bin`, `ggml-large-v3-q5_0.bin`, and `ggml-medium.en.bin`.
+`MUSIALIZER_WHISPER_MODEL` or the corresponding flags. Discovery otherwise
+checks `~/.local/share/musializer/whisper.cpp` (the durable per-user install;
+CUDA-enabled on this workstation) and then the legacy tmpfs setup at
+`/tmp/music-visualizations-whisper-1.8.6`, taking `build/bin/whisper-cli`
+from the first install that has one. Models are ranked
+`ggml-large-v3-turbo.bin`, then `ggml-large-v3.bin`,
+`ggml-large-v3-q5_0.bin`, and `ggml-medium.en.bin`, with the best model in
+any install outranking a lesser model in a preferred install.
 The order was measured on sung material: turbo recovered strictly more lyric
 lines than full large-v3 (which suppressed loud ensemble passages) with no
 hallucination loops, at roughly a seventh of the CPU cost.

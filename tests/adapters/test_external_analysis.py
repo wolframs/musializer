@@ -334,7 +334,8 @@ class ExternalAnalysisTests(unittest.TestCase):
         install = self.root / "whisper-install"
         (install / "build/bin").mkdir(parents=True)
         (install / "build/bin/whisper-cli").write_bytes(b"binary")
-        with mock.patch.object(external, "_WHISPER_INSTALL", install):
+        with mock.patch.object(external, "_whisper_installs",
+                               return_value=(install,)):
             with mock.patch.dict(os.environ, {}, clear=True):
                 self.assertEqual(external._default_whisper_paths()[1], None)
                 (install / "ggml-medium.en.bin").write_bytes(b"m")
@@ -352,6 +353,24 @@ class ExternalAnalysisTests(unittest.TestCase):
                     clear=True):
                 self.assertEqual(external._default_whisper_paths()[1],
                                  Path("/override/model.bin"))
+
+    def test_whisper_discovery_prefers_durable_install_but_best_model_anywhere(self):
+        durable = self.root / "durable"; legacy = self.root / "legacy"
+        for install in (durable, legacy):
+            (install / "build/bin").mkdir(parents=True)
+            (install / "build/bin/whisper-cli").write_bytes(b"binary")
+        (durable / "ggml-medium.en.bin").write_bytes(b"m")
+        (legacy / "ggml-large-v3-turbo.bin").write_bytes(b"t")
+        with mock.patch.object(external, "_whisper_installs",
+                               return_value=(durable, legacy)):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                binary, model = external._default_whisper_paths()
+                self.assertEqual(binary, durable / "build/bin/whisper-cli")
+                # Model quality outranks install location.
+                self.assertEqual(model, legacy / "ggml-large-v3-turbo.bin")
+                (durable / "ggml-large-v3-turbo.bin").write_bytes(b"t")
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 durable / "ggml-large-v3-turbo.bin")
 
     def test_codex_review_is_stdin_only_and_evidence_bounded(self):
         source_path = self.write_json("lyrics.json", lyrics_document())

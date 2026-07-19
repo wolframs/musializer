@@ -58,8 +58,14 @@ union of the other two models outright on sung material and stays far inside
 the assist timeout on CPU. Full large-v3's beam search suppressed loud
 ensemble passages, so "bigger" was not better here. A multi-model evidence
 union with per-source loop cleaning remains a viable Phase-2 lever, now
-lower priority. A CUDA/Vulkan whisper rebuild is still the biggest UX lever
-(4.6 min -> seconds).
+lower priority. CUDA rebuild DONE 2026-07-19: whisper.cpp v1.8.6 with
+GGML_CUDA (arch 86, nvcc 12.4/g++-13) at ~/.local/share/musializer/whisper.cpp
+(`build` symlinks `build-cuda`; models copied out of tmpfs) transcribes the
+fixture in 13.5 s versus 4.6 CPU minutes. Discovery prefers the durable
+install and picks the best model across installs. Caveat: GPU beam search can
+diverge from CPU — one CUDA run looped on "100." for 46 s; the loop detector
+flagged the stretch and reported the 7 covered lines as unmatched instead of
+guessing, and at 13 s a re-run is cheap.
 
 ## Slices
 

@@ -1192,13 +1192,22 @@ def _mimo_cache_accepts(
             ))
 
 
-# Preference among models the discovered install may hold; the
-# MUSIALIZER_WHISPER_MODEL override always wins over discovery. turbo leads:
-# on the singing fixture it recovered strictly more lyric lines than full
-# large-v3 (which suppressed loud ensemble passages) with no hallucination
-# loops, at roughly a seventh of the CPU cost — full large-v3 can exceed the
-# 40-minute assist timeout for longer tracks on CPU-only builds.
-_WHISPER_INSTALL = Path("/tmp/music-visualizations-whisper-1.8.6")
+# Discovery roots, most preferred first: the durable per-user install (its
+# build is CUDA-enabled on this workstation), then the original /tmp setup,
+# which is tmpfs and vanishes on reboot. MUSIALIZER_WHISPER_BIN and
+# MUSIALIZER_WHISPER_MODEL always win over discovery.
+def _whisper_installs() -> tuple[Path, ...]:
+    return (
+        Path.home() / ".local/share/musializer/whisper.cpp",
+        Path("/tmp/music-visualizations-whisper-1.8.6"),
+    )
+
+
+# Model preference. turbo leads: on the singing fixture it recovered strictly
+# more lyric lines than full large-v3 (which suppressed loud ensemble
+# passages) with no hallucination loops, at roughly a seventh of the CPU
+# cost — full large-v3 can exceed the 40-minute assist timeout for longer
+# tracks on CPU-only builds.
 _WHISPER_MODEL_PREFERENCE = (
     "ggml-large-v3-turbo.bin",
     "ggml-large-v3.bin",
@@ -1210,14 +1219,21 @@ _WHISPER_MODEL_PREFERENCE = (
 def _default_whisper_paths() -> tuple[Path | None, Path | None]:
     binary = os.environ.get("MUSIALIZER_WHISPER_BIN")
     model = os.environ.get("MUSIALIZER_WHISPER_MODEL")
-    discovered_binary = _WHISPER_INSTALL / "build/bin/whisper-cli"
+    installs = _whisper_installs()
+    discovered_binary = next(
+        (candidate for install in installs
+         if (candidate := install / "build/bin/whisper-cli").is_file()),
+        None,
+    )
+    # The best model anywhere beats a lesser model in a preferred install.
     discovered_model = next(
         (candidate for name in _WHISPER_MODEL_PREFERENCE
-         if (candidate := _WHISPER_INSTALL / name).is_file()),
+         for install in installs
+         if (candidate := install / name).is_file()),
         None,
     )
     return (
-        Path(binary) if binary else (discovered_binary if discovered_binary.is_file() else None),
+        Path(binary) if binary else discovered_binary,
         Path(model) if model else discovered_model,
     )
 
