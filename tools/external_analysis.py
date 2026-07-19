@@ -1192,13 +1192,17 @@ def _mimo_cache_accepts(
             ))
 
 
-# Best-accuracy-first among models the discovered install may hold; the
-# MUSIALIZER_WHISPER_MODEL override always wins over discovery.
+# Preference among models the discovered install may hold; the
+# MUSIALIZER_WHISPER_MODEL override always wins over discovery. turbo leads:
+# on the singing fixture it recovered strictly more lyric lines than full
+# large-v3 (which suppressed loud ensemble passages) with no hallucination
+# loops, at roughly a seventh of the CPU cost — full large-v3 can exceed the
+# 40-minute assist timeout for longer tracks on CPU-only builds.
 _WHISPER_INSTALL = Path("/tmp/music-visualizations-whisper-1.8.6")
 _WHISPER_MODEL_PREFERENCE = (
+    "ggml-large-v3-turbo.bin",
     "ggml-large-v3.bin",
     "ggml-large-v3-q5_0.bin",
-    "ggml-large-v3-turbo.bin",
     "ggml-medium.en.bin",
 )
 

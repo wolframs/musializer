@@ -225,9 +225,10 @@ Assistance is optional and capability-based:
   fall back to Whisper transcription plus an evidence-preserving headless
   Codex wording review, which is now bounded to short readable cues, must
   account for the whole track, and is followed by a deterministic splitter.
-  Whisper discovery prefers the most accurate installed model
-  (`large-v3` > `large-v3-q5_0` > `large-v3-turbo` > `medium.en`;
-  `MUSIALIZER_WHISPER_MODEL` overrides).
+  Whisper discovery prefers the best installed model
+  (`large-v3-turbo` > `large-v3` > `large-v3-q5_0` > `medium.en`, an order
+  measured on sung material where turbo recovered the most lyric lines at a
+  fraction of the cost; `MUSIALIZER_WHISPER_MODEL` overrides).
 - **MiMo feelings** uses the local measured analysis plus MiMo V2.5 through
   OpenRouter to produce semantic energy/tension/valence cues.
 - **Full assist** combines those stages while retaining separate provenance.

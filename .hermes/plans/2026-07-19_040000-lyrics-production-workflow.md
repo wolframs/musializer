@@ -40,6 +40,27 @@ Explicitly deferred: Demucs vocal stems, external forced aligners
 timing in the C model / bridge (Cadence keeps derived estimates), CUDA rebuild
 of whisper.cpp (needs toolkit install decision).
 
+## Model evaluation on the fixture (2026-07-19, CPU-only whisper build)
+
+Reference: 123 timeable authored lines. "direct" = evidence-matched, "est" =
+flagged interpolation, rest reported unmatched. All runs through the shipped
+sync pipeline (loop detection active).
+
+| evidence                | words | direct | est | unmatched | hallucination | notes |
+| ----------------------- | ----- | ------ | --- | --------- | ------------- | ----- |
+| medium.en (4 threads)   | 757   | 83     | 21  | 19        | 81 s loop     | heard the 99.x count-up; missed whispered outro; ~8 min |
+| large-v3 (24 threads)   | 410   | 84     | 13  | 26        | none          | heard whispered outro + finale; suppressed count-up; 32.5 min CPU |
+| union (per-source clean)| —     | 96     | 10  | 17        | filtered      | med+large union; residual = shouted rave chorus |
+| large-v3-turbo (24 thr) | 467   | 102    | 20  | 1         | none          | heard everything incl. the rave chorus; 4.6 min CPU; sole miss: "Oh no" |
+
+Conclusions: large-v3-turbo is the discovery default (shipped) — it beat the
+union of the other two models outright on sung material and stays far inside
+the assist timeout on CPU. Full large-v3's beam search suppressed loud
+ensemble passages, so "bigger" was not better here. A multi-model evidence
+union with per-source loop cleaning remains a viable Phase-2 lever, now
+lower priority. A CUDA/Vulkan whisper rebuild is still the biggest UX lever
+(4.6 min -> seconds).
+
 ## Slices
 
 1. Adapter hygiene: valid `--dtw` names, `--threads`, best-available model

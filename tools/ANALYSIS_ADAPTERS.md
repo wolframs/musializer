@@ -91,8 +91,11 @@ Whisper is configured with `MUSIALIZER_WHISPER_BIN` and
 `MUSIALIZER_WHISPER_MODEL` or the corresponding flags. On this workstation the
 helper also detects the prior setup at
 `/tmp/music-visualizations-whisper-1.8.6/build/bin/whisper-cli`; among models
-in that install root it prefers `ggml-large-v3.bin`, then
-`ggml-large-v3-q5_0.bin`, `ggml-large-v3-turbo.bin`, and `ggml-medium.en.bin`.
+in that install root it prefers `ggml-large-v3-turbo.bin`, then
+`ggml-large-v3.bin`, `ggml-large-v3-q5_0.bin`, and `ggml-medium.en.bin`.
+The order was measured on sung material: turbo recovered strictly more lyric
+lines than full large-v3 (which suppressed loud ensemble passages) with no
+hallucination loops, at roughly a seventh of the CPU cost.
 Whisper receives a temporary FFmpeg-decoded 16 kHz mono WAV, requests full
 JSON plus model-aligned token timing using the exact whisper.cpp `--dtw`
 preset name (quantization suffixes are stripped; models without a known

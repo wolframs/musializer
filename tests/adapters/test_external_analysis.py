@@ -340,12 +340,12 @@ class ExternalAnalysisTests(unittest.TestCase):
                 (install / "ggml-medium.en.bin").write_bytes(b"m")
                 self.assertEqual(external._default_whisper_paths()[1],
                                  install / "ggml-medium.en.bin")
-                (install / "ggml-large-v3-turbo.bin").write_bytes(b"t")
-                self.assertEqual(external._default_whisper_paths()[1],
-                                 install / "ggml-large-v3-turbo.bin")
                 (install / "ggml-large-v3.bin").write_bytes(b"l")
                 self.assertEqual(external._default_whisper_paths()[1],
                                  install / "ggml-large-v3.bin")
+                (install / "ggml-large-v3-turbo.bin").write_bytes(b"t")
+                self.assertEqual(external._default_whisper_paths()[1],
+                                 install / "ggml-large-v3-turbo.bin")
             with mock.patch.dict(
                     os.environ,
                     {"MUSIALIZER_WHISPER_MODEL": "/override/model.bin"},

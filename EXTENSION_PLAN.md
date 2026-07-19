@@ -1144,8 +1144,12 @@ failure-path test.
   deterministic post-splitter snapping to word gaps.
 - Adapter hygiene: valid whisper.cpp `--dtw` preset names (large models
   previously failed outright), one thread per host CPU, and
-  best-available-model discovery (`large-v3` first, `medium.en` last;
-  `MUSIALIZER_WHISPER_MODEL` still wins).
+  best-available-model discovery (`large-v3-turbo` first, `medium.en` last;
+  `MUSIALIZER_WHISPER_MODEL` still wins). Measured on the fixture through
+  the full sync pipeline: turbo timed 122/123 authored lines in 4.6 CPU
+  minutes with no hallucination; full large-v3 timed 97 in 32.5 minutes
+  (it suppressed loud ensemble passages); the old medium.en default timed
+  104 but looped on a hallucination for the final 81 seconds.
 - Explicitly deferred: Demucs stems, external forced aligners, online lyric
   lookup, word-level timing in the C model, CUDA whisper rebuild (the /tmp
   whisper.cpp build is CPU-only; a toolkit install is the user's call).
