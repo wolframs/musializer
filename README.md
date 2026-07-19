@@ -32,9 +32,9 @@ The upstream demo below remains a lovely snapshot of where it began.
   star density plus event reach, duration, and hue response. Song Atlas includes broad
   terrain/camera ranges, 1x-3x sampling detail, manual or music-reactive hue,
   camera orbit, distance, and drift controls, and Filled/Wireframe surface
-  modes; exact values,
-  numbered per-scene presets, and per-scene resets are saved with the track and
-  reused by offline export.
+  modes; exact values and per-scene resets are saved with the track and
+  reused by offline export, while numbered per-scene tuning presets live in a
+  per-user library shared across every track and project.
 - Turn timed lyric words into beat-choreographed kinetic geometry with Cadence,
   or accepted semantic energy/tension/valence into a growing whole-track textile
   with Loom.
@@ -156,7 +156,17 @@ The normal workflow is:
    slider for live feedback. **Reset** requires confirmation and exposes a
    one-shot **Undo reset** action.
    **Save new** captures a per-scene preset; **Load**, **Update**, and
-   **Delete** manage the selected preset.
+   **Delete** manage the selected preset. Presets are shared across all
+   tracks and projects: they persist in a strict-JSON per-user store
+   (`$XDG_DATA_HOME/musializer/presets.json` or
+   `~/.local/share/musializer/presets.json` on Linux,
+   `%APPDATA%\Musializer\presets.json` on Windows,
+   `~/Library/Application Support/Musializer/presets.json` on macOS;
+   `MUSIALIZER_PRESET_STORE` overrides the path), written atomically after
+   every change. Projects saved by older builds keep their track-local
+   presets byte-for-byte, and opening one copies any presets you do not
+   already have into the shared library. A store file this build cannot
+   accept is left untouched and read-only rather than overwritten.
 3. Open **Lyrics** to write or import lyric cues and adjust their start/end
    times against the playhead.
 4. Open **Assist** for timed-lyric help, measured scene planning, semantic music

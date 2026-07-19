@@ -14,6 +14,7 @@
 #include "analysis_bridge.h"
 #include "analysis_candidate.h"
 #include "assist_ui_state.h"
+#include "preset_store.h"
 #include "route_editor_state.h"
 #include "caption_layout.h"
 #include "audio_analyzer.h"
@@ -100,7 +101,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 27
+#define PLUG_STATE_VERSION 28
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -210,6 +211,15 @@ typedef struct {
     bool scene_preset_delete_confirmation;
     Scene_Id scene_preset_delete_scene;
     size_t scene_preset_delete_index;
+    // The user-level tuning preset library, durable in the per-user store
+    // file and shared by every track and project. Track scene_presets remain
+    // project data: preserved on open/save but no longer surfaced in the UI.
+    Scene_Settings_Preset_Library shared_presets;
+    size_t selected_shared_preset[SCENE_SETTINGS_SCENE_COUNT];
+    char preset_store_path[PLUG_RELOAD_PATH_CAPACITY];
+    // False when the store file exists but could not be accepted; mutations
+    // are blocked so a recoverable file is never overwritten.
+    bool preset_store_ready;
     uint64_t scene_frame_index;
     double scene_previous_time;
     bool scene_clock_initialized;
@@ -3087,6 +3097,61 @@ static bool cancel_assist_job_blocking(void)
     return finished;
 }
 
+// Shared tuning presets are user-level savefile data, not project state:
+// mutations persist immediately or the user hears exactly why. When the
+// store file was rejected at startup it stays read-only so a recoverable
+// file is never overwritten.
+static bool shared_presets_editable(void)
+{
+    if (p->preset_store_ready) return true;
+    notice_push(UI_NOTICE_WARNING, "Shared presets are read-only",
+                "Fix or remove the preset library file, then restart "
+                "Musializer.",
+                p->preset_store_path[0] != '\0' ? p->preset_store_path : NULL,
+                false);
+    return false;
+}
+
+static void shared_presets_persist(void)
+{
+    if (!p->preset_store_ready) return;
+    Preset_Store_Result saved =
+        preset_store_save(p->preset_store_path, &p->shared_presets);
+    if (saved != PRESET_STORE_OK) {
+        notice_push(UI_NOTICE_ERROR, "Shared presets could not be saved",
+                    preset_store_result_string(saved), p->preset_store_path,
+                    true);
+    }
+}
+
+// Copies a project's track-local presets into the shared library (identity:
+// scene + exact values). The project keeps its own copies untouched so old
+// files round-trip byte-stable; the user simply sees their presets appear
+// in the shared list.
+static void shared_presets_adopt(const Scene_Settings_Preset_Library *library)
+{
+    if (!p->preset_store_ready) return;
+    size_t imported = 0;
+    size_t skipped = 0;
+    if (!preset_store_merge(&p->shared_presets, library, &imported,
+                            &skipped)) return;
+    if (imported > 0) {
+        shared_presets_persist();
+        char detail[UI_NOTICE_DETAIL_CAPACITY];
+        snprintf(detail, sizeof(detail),
+                 "%zu track preset%s now in the shared library%s.",
+                 imported, imported == 1 ? " is" : "s are",
+                 skipped > 0 ? "; full scenes skipped the rest" : "");
+        notice_push(UI_NOTICE_INFO, "Track presets copied", detail, NULL,
+                    false);
+    } else if (skipped > 0) {
+        notice_push(UI_NOTICE_WARNING,
+                    "Track presets were not copied",
+                    "The shared library has no free slots for their scenes.",
+                    NULL, false);
+    }
+}
+
 static bool build_project(Track *track, const char *project_path,
                           const char *stored_audio_path,
                           const char *stored_ascii_image_path,
@@ -3686,6 +3751,7 @@ static bool open_project_path(const char *path)
     track->playback_scene_settings = hydrated_settings;
     track->scene_routes = hydrated_routes;
     track->scene_presets = preset_library;
+    shared_presets_adopt(&preset_library);
     if (hydrated_ascii != NULL) {
         memcpy(track->ascii_cells, hydrated_ascii,
                hydrated_ascii_columns*hydrated_ascii_rows*
@@ -4612,8 +4678,8 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         p->scene_settings_scroll = 0.0f;
     }
     size_t scene_index = (size_t)p->scene.id;
-    size_t preset_count = track->scene_presets.counts[scene_index];
-    size_t *selected = &track->selected_scene_preset[scene_index];
+    size_t preset_count = p->shared_presets.counts[scene_index];
+    size_t *selected = &p->selected_shared_preset[scene_index];
     if (preset_count == 0) *selected = 0;
     else if (*selected >= preset_count) *selected = preset_count - 1;
     if (p->scene_preset_delete_confirmation &&
@@ -4646,7 +4712,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             *selected = (*selected + 1)%preset_count;
         }
         disabled_text_button(preset_name,
-            track->scene_presets.items[scene_index][*selected].name, true);
+            p->shared_presets.items[scene_index][*selected].name, true);
     } else {
         disabled_text_button(previous, "<", false);
         DrawRectangleLinesEx(preset_name, 1.0f, ColorAlpha(COLOR_UI_RULE, 0.72f));
@@ -4671,16 +4737,17 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     if (preset_count > 0) {
         if ((text_button(UINT64_C(0x5052455345544150), apply,
                          "Load", false) & BS_CLICKED) != 0 &&
-            scene_settings_preset_apply(&track->scene_presets, scene_index,
+            scene_settings_preset_apply(&p->shared_presets, scene_index,
                                         *selected, editable_settings)) {
             commit_active_cue_settings(track, p->scene.id);
             mark_project_dirty(track);
         }
         if ((text_button(UINT64_C(0x5052455345545250), replace,
                          "Update", false) & BS_CLICKED) != 0 &&
-            scene_settings_preset_replace(&track->scene_presets, scene_index,
+            shared_presets_editable() &&
+            scene_settings_preset_replace(&p->shared_presets, scene_index,
                                           *selected, editable_settings)) {
-            mark_project_dirty(track);
+            shared_presets_persist();
         }
         const char *delete_label = p->scene_preset_delete_confirmation ?
                                    "Confirm" : "Delete";
@@ -4694,14 +4761,15 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                 p->scene_preset_delete_confirmation = true;
                 p->scene_preset_delete_scene = p->scene.id;
                 p->scene_preset_delete_index = *selected;
-            } else if (scene_settings_preset_remove(
-                           &track->scene_presets, scene_index, *selected)) {
+            } else if (shared_presets_editable() &&
+                       scene_settings_preset_remove(
+                           &p->shared_presets, scene_index, *selected)) {
                 p->scene_preset_delete_confirmation = false;
                 if (*selected > 0 &&
-                    *selected >= track->scene_presets.counts[scene_index]) {
+                    *selected >= p->shared_presets.counts[scene_index]) {
                     (*selected)--;
                 }
-                mark_project_dirty(track);
+                shared_presets_persist();
             }
         }
         tooltip(apply, "Load this preset into the active scene", SIDE_BOTTOM, false);
@@ -4716,13 +4784,14 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     }
     if (preset_count < SCENE_SETTINGS_PRESETS_PER_SCENE &&
         (text_button(UINT64_C(0x5052455345545341), save,
-                     "Save new", false) & BS_CLICKED) != 0) {
+                     "Save new", false) & BS_CLICKED) != 0 &&
+        shared_presets_editable()) {
         char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
         snprintf(name, sizeof(name), "Preset %llu",
-                 (unsigned long long)track->scene_presets.next_id);
-        if (scene_settings_preset_save(&track->scene_presets, scene_index,
+                 (unsigned long long)p->shared_presets.next_id);
+        if (scene_settings_preset_save(&p->shared_presets, scene_index,
                                        name, editable_settings, selected)) {
-            mark_project_dirty(track);
+            shared_presets_persist();
         }
     } else if (preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE) {
         disabled_text_button(save, "Full", false);
@@ -4881,7 +4950,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     }
 
     DrawTextEx(ui_font(), track->cue_settings_active ?
-               "Editing this cue snapshot" : "Presets saved with this track",
+               "Editing this cue snapshot" : "Presets shared across all tracks",
                (Vector2){boundary.x + padding,
                          content.y + content.height + 15.0f},
                14.0f, 0.0f, COLOR_UI_MUTED);
@@ -6939,6 +7008,28 @@ MUSIALIZER_PLUG void plug_init(void)
 
     load_assets();
     p->current_track = -1;
+
+    scene_settings_preset_library_init(&p->shared_presets);
+    p->preset_store_ready = false;
+    if (!preset_store_default_path(p->preset_store_path,
+                                   sizeof(p->preset_store_path))) {
+        p->preset_store_path[0] = '\0';
+        notice_push(UI_NOTICE_ERROR, "Shared presets are unavailable",
+                    "No per-user data directory could be resolved for the "
+                    "preset library.", NULL, true);
+    } else {
+        Preset_Store_Result loaded =
+            preset_store_load(p->preset_store_path, &p->shared_presets);
+        if (loaded == PRESET_STORE_OK || loaded == PRESET_STORE_MISSING) {
+            p->preset_store_ready = true;
+        } else {
+            // Keep the store read-only: overwriting a rejected file could
+            // destroy presets a newer build or a hand edit still understands.
+            notice_push(UI_NOTICE_ERROR, "Shared presets could not be loaded",
+                        preset_store_result_string(loaded),
+                        p->preset_store_path, true);
+        }
+    }
 
     // TODO: restore master volume between sessions
     SetMasterVolume(0.5);

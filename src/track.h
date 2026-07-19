@@ -51,8 +51,10 @@ typedef struct {
     Scene_Settings playback_scene_settings;
     Scene_Route_Table scene_routes;
     bool cue_settings_active;
+    // Track-local presets are project data: read and written byte-stable for
+    // old .musi files, copied into the shared per-user library on open, and
+    // no longer surfaced directly in the UI.
     Scene_Settings_Preset_Library scene_presets;
-    size_t selected_scene_preset[SCENE_SETTINGS_SCENE_COUNT];
     AsciiCell ascii_cells[ASCII_GRID_MAX_CELLS];
     size_t ascii_columns;
     size_t ascii_rows;

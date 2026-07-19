@@ -69,6 +69,25 @@ typedef enum Musi_Project_Bundle_Result {
     MUSI_PROJECT_BUNDLE_ERROR_PUBLISH,
 } Musi_Project_Bundle_Result;
 
+// The per-user shared preset store file ("musializer.presets/v1"): the same
+// strict JSON discipline and Musi_Scene_Preset record shape as the project
+// codec, reused for tuning presets that live with the user instead of one
+// track. Both directions validate ids (nonzero, unique, below next_id),
+// bounded UTF-8 names, stable scene names, and finite bounded settings.
+typedef struct Musi_Preset_Store_Document {
+    uint64_t next_id;
+    size_t preset_count;
+    Musi_Scene_Preset presets[MUSI_PROJECT_MAX_SCENE_PRESETS];
+} Musi_Preset_Store_Document;
+
+void musi_preset_store_document_init(Musi_Preset_Store_Document *store);
+Musi_Project_Io_Result musi_preset_store_serialize(
+    const Musi_Preset_Store_Document *store, char *output, size_t capacity,
+    size_t *required_size);
+Musi_Project_Io_Result musi_preset_store_deserialize(
+    Musi_Preset_Store_Document *destination, const char *input,
+    size_t input_size);
+
 // required_size includes the trailing NUL. Output remains untouched on error.
 Musi_Project_Io_Result musi_project_json_serialize(const Musi_Project *project,
                                                    char *output, size_t capacity,

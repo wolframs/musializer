@@ -1098,6 +1098,27 @@ failure-path test.
   Python adapter/product tests. Debug, release, sanitizer, and hot-reload
   application builds pass.
 
+### 2026-07-19 - Anchor-based route editor and shared preset library
+
+- Rebuilt the Tune route editor around two (source level -> output value)
+  anchor rows with source-aware names (Quiet/Loud, Calm/Busy, Beat start/Beat
+  end), a live in->out readout, and a transfer-curve graph whose every sample
+  goes through the frame loop's own `scene_route_output_value`, extracted from
+  `scene_routes_apply` with a bit-for-bit agreement test. The UI font atlas
+  gained the arrow codepoint range routed-row summaries always needed.
+- Added `--mute` for silent scripted launches; render smoke tests and the
+  manual lyrics-assist E2E suite (`tests/e2e/`, deliberately outside all
+  automated runners) pass it.
+- Moved numbered tuning presets from per-track project data into a per-user
+  shared library: strict-JSON `presets.json` under the platform data
+  directory (`MUSIALIZER_PRESET_STORE` override), encoded by the project
+  codec's own writer/parser, written atomically after every mutation, and
+  held read-only when an existing file cannot be accepted. Old projects keep
+  their track-local presets byte-stable and copy them into the shared
+  library on open (identity: scene plus exact values). Track preset editing
+  UI now binds to the shared library; `.musi` round-trip of legacy presets
+  is unchanged.
+
 ## Milestones
 
 ### M0 - Preserve the baseline

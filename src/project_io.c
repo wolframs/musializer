@@ -235,6 +235,75 @@ Musi_Project_Io_Result musi_project_json_deserialize(Musi_Project*dest,const cha
     if(r==MUSI_PROJECT_IO_OK)memcpy(dest,p,sizeof(*dest));
     free(p);return r;
 }
+static void preset_store_write(Writer*w,const Musi_Preset_Store_Document*store)
+{
+    lit(w,"{\"schema_version\":\"musializer.presets/v1\",\"next_id\":");u64(w,store->next_id);
+    lit(w,",\"presets\":[");
+    for(size_t i=0;i<store->preset_count;++i){const Musi_Scene_Preset*s=&store->presets[i];if(i)lit(w,",");
+        lit(w,"{\"id\":");u64(w,s->id);lit(w,",\"scene_name\":");string(w,s->scene_name);
+        lit(w,",\"name\":");string(w,s->name);lit(w,",\"settings\":[");
+        for(size_t j=0;j<s->setting_count;++j){if(j)lit(w,",");real(w,s->settings[j]);}lit(w,"]}");}
+    lit(w,"]}");
+}
+static bool parse_preset_store(Parser*x,Musi_Preset_Store_Document*store)
+{static const char*names[]={"schema_version","next_id","presets"};uint64_t mask=0;bool first=true;char k[80],version[64];
+ if(!take(x,'{'))return false;
+ while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;
+  int f=field_index(k,names,3);if(f<0)UNKNOWN();SEEN(f);
+  if(f==0){if(!jstring(x,version,sizeof(version)))return false;if(strcmp(version,"musializer.presets/v1")){x->error=MUSI_PROJECT_IO_ERROR_SCHEMA;return false;}}
+  else if(f==1){if(!ju64(x,&store->next_id))return false;}
+  else{if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}
+   if(store->preset_count&&!take(x,','))return false;
+   if(store->preset_count>=MUSI_PROJECT_MAX_SCENE_PRESETS){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}
+   if(!parse_scene_preset(x,&store->presets[store->preset_count++]))return false;}}}
+ if(mask!=7){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
+static bool preset_store_document_valid(const Musi_Preset_Store_Document*store)
+{
+    if(store->preset_count>MUSI_PROJECT_MAX_SCENE_PRESETS)return false;
+    for(size_t i=0;i<store->preset_count;++i){
+        const Musi_Scene_Preset*s=&store->presets[i];
+        size_t scene_length=strlen(s->scene_name);
+        size_t name_length=strlen(s->name);
+        if(s->id==0||s->id>=store->next_id||
+           scene_length==0||scene_length>=sizeof(s->scene_name)||
+           name_length==0||name_length>=sizeof(s->name)||
+           s->setting_count==0||s->setting_count>SCENE_SETTINGS_MAX_CONTROLS)return false;
+        for(size_t j=0;j<s->setting_count;++j){
+            if(!isfinite(s->settings[j]))return false;
+        }
+        for(size_t j=0;j<i;++j){
+            if(store->presets[j].id==s->id)return false;
+        }
+    }
+    return true;
+}
+
+void musi_preset_store_document_init(Musi_Preset_Store_Document*store)
+{
+    if(store==NULL)return;
+    memset(store,0,sizeof(*store));
+    store->next_id=1;
+}
+Musi_Project_Io_Result musi_preset_store_serialize(const Musi_Preset_Store_Document*store,char*out,size_t cap,size_t*required)
+{
+    if(!store||!required)return MUSI_PROJECT_IO_ERROR_NULL;
+    if(!preset_store_document_valid(store))return MUSI_PROJECT_IO_ERROR_VALIDATION;
+    Writer measure={0};preset_store_write(&measure,store);*required=measure.used+1;
+    if(measure.failed)return MUSI_PROJECT_IO_ERROR_STRING;
+    if(!out||cap<*required)return MUSI_PROJECT_IO_ERROR_OUTPUT_TOO_SMALL;
+    Writer w={.out=out,.cap=cap};preset_store_write(&w,store);if(w.failed)return MUSI_PROJECT_IO_ERROR_OUTPUT_TOO_SMALL;out[w.used]=0;return MUSI_PROJECT_IO_OK;
+}
+Musi_Project_Io_Result musi_preset_store_deserialize(Musi_Preset_Store_Document*dest,const char*input,size_t size)
+{
+    if(!dest||!input)return MUSI_PROJECT_IO_ERROR_NULL;
+    if(!size||size>MUSI_PROJECT_JSON_MAX_INPUT||memchr(input,0,size))return MUSI_PROJECT_IO_ERROR_INPUT_SIZE;
+    Musi_Preset_Store_Document store;musi_preset_store_document_init(&store);
+    Parser x={.p=input,.end=input+size,.error=MUSI_PROJECT_IO_OK};bool ok=parse_preset_store(&x,&store);ws(&x);
+    Musi_Project_Io_Result r=ok&&x.p==x.end?MUSI_PROJECT_IO_OK:(x.error?x.error:MUSI_PROJECT_IO_ERROR_SYNTAX);
+    if(r==MUSI_PROJECT_IO_OK&&!preset_store_document_valid(&store))r=MUSI_PROJECT_IO_ERROR_VALIDATION;
+    if(r==MUSI_PROJECT_IO_OK)memcpy(dest,&store,sizeof(*dest));
+    return r;
+}
 const char*musi_project_io_result_string(Musi_Project_Io_Result r)
 {static const char*n[]={"ok","null argument","invalid input size","malformed JSON","unknown field","duplicate field","missing field","invalid or oversized string","invalid number","array capacity exceeded","schema mismatch","project validation failed","output buffer too small","allocation failed"};return r>=0&&(size_t)r<sizeof(n)/sizeof(n[0])?n[r]:"unknown project I/O error";}
 
