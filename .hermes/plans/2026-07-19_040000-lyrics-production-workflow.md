@@ -1,6 +1,8 @@
 # Lyrics production workflow (sync-known-lyrics + transcription fixes)
 
-Status: in progress (2026-07-19)
+Status: shipped and approved hands-on (2026-07-19) — Wolfram ran the CUDA
+assist on a real track: "it was exactly roughly instant". All five slices
+plus the CUDA/durable-install follow-up are on master.
 
 ## Diagnosis (verified on `Ctrl+Z The Apocalypse`, job 8fbbd8ccda3bd2d1)
 
