@@ -24,6 +24,15 @@ workspace-min|960x640|--project PROJECT --ui-probe panel=none,time=6,size=960x64
 panel-lyrics-720p|1280x720|--project PROJECT --ui-probe panel=lyrics,time=6,size=1280x720
 panel-lyrics-1080p|1920x1080|--project PROJECT --ui-probe panel=lyrics,time=6,size=1920x1080
 panel-lyrics-min|960x640|--project PROJECT --ui-probe panel=lyrics,time=6,size=960x640
+# Cue-editing form and the armed Assist prompt. Both were unreachable by
+# capture until the lyric= and assist= probe keys existed, and both were hiding
+# a defect: an action row drawn past the window bottom, and a collapsed tracks
+# panel whose buttons still took the scene grid's clicks.
+lyrics-selected-min|960x640|--project PROJECT --ui-probe panel=lyrics,lyric=2,time=6,size=960x640
+lyrics-selected-720p|1280x720|--project PROJECT --ui-probe panel=lyrics,lyric=2,time=6,size=1280x720
+lyrics-selected-1080p|1920x1080|--project PROJECT --ui-probe panel=lyrics,lyric=2,time=6,size=1920x1080
+assist-confirm-min|960x640|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,size=960x640
+assist-confirm-720p|1280x720|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,size=1280x720
 panel-tune-720p|1280x720|--project PROJECT --ui-probe panel=tune,time=6,size=1280x720
 panel-tune-min|960x640|--project PROJECT --ui-probe panel=tune,time=6,size=960x640
 panel-export-720p|1280x720|--project PROJECT --ui-probe panel=export,time=6,size=1280x720
