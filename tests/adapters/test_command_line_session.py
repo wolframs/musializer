@@ -68,6 +68,30 @@ class CommandLineSessionTests(unittest.TestCase):
         self.assertTrue(project.is_file())
         return project
 
+    def sweep(self, marker):
+        """Kill any surviving app process launched for this test.
+
+        A leaked instance is not harmless: headless under Xvfb there is no vsync,
+        so it spins a full core forever. Six of them once put this workstation at
+        load 33. The marker is the test's unique temporary directory, so this
+        cannot match an application the operator is running themselves.
+        """
+        killed = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+            except OSError:
+                continue  # Exited while we looked, or not ours to read.
+            if marker in cmdline and "musializer" in cmdline:
+                try:
+                    os.kill(int(entry.name), signal.SIGKILL)
+                    killed.append(entry.name)
+                except (OSError, ValueError):
+                    pass
+        return killed
+
     def hold_open(self, *arguments):
         """Run the app long enough for an autosave to fire, then stop it."""
         # xvfb-run is a wrapper script, so signalling it alone orphans the
@@ -97,6 +121,7 @@ class CommandLineSessionTests(unittest.TestCase):
     def test_startup_flags_do_not_rewrite_the_opened_project(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            self.addCleanup(self.sweep, str(directory))
             project = self.build_project(directory)
             original = hashlib.sha256(project.read_bytes()).hexdigest()
 
@@ -119,6 +144,7 @@ class CommandLineSessionTests(unittest.TestCase):
     def test_opening_a_project_alone_leaves_it_untouched(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            self.addCleanup(self.sweep, str(directory))
             project = self.build_project(directory)
             original = hashlib.sha256(project.read_bytes()).hexdigest()
             self.hold_open("--project", str(project),
@@ -130,6 +156,7 @@ class CommandLineSessionTests(unittest.TestCase):
         """The opt-in path has to keep working, or the fix above is a regression."""
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            self.addCleanup(self.sweep, str(directory))
             project = self.build_project(directory)
             derived = directory / "derived.musi"
             completed = subprocess.run(
