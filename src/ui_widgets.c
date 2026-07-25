@@ -159,10 +159,54 @@ int ui_widgets_button_with_id(uint64_t *active_button_id, uint64_t id,
     return (pressed<<2) | (clicked<<1) | hoverover;
 }
 
-int ui_widgets_styled_text_button(uint64_t *active_button_id, Font font,
-                                  uint64_t id, Rectangle boundary,
-                                  const char *label, bool selected,
-                                  Button_Style style)
+// Centres a button label, at a shared row size when one is supplied and at a
+// self-fitted size otherwise, and ellipsizes rather than shrinking without end.
+static void ui_widgets_draw_button_label(Font font, Rectangle boundary,
+                                         const char *label, float font_size,
+                                         float press_offset, Color color)
+{
+    if (label == NULL || label[0] == '\0') return;
+
+    Ui_Widgets_Caption_Measurement measurement = {font, 0.0f, 0.0f};
+    float size = font_size;
+    if (!(size > 0.0f)) {
+        size = ui_row_base_font_size(boundary.height);
+        measurement.font_size = size;
+        const char *labels[1] = {label};
+        float widths[1] = {boundary.width};
+        size = ui_row_font_size(labels, widths, 1, size, UI_ROW_MIN_FONT_SIZE,
+                                ui_widgets_caption_measure_raylib, &measurement);
+    }
+    if (!(size > 0.0f)) return;
+
+    measurement.font_size = size;
+    char fitted[UI_ROW_LABEL_CAPACITY];
+    ui_row_truncate_label(label, boundary.width - UI_ROW_LABEL_PADDING,
+                          ui_widgets_caption_measure_raylib, &measurement,
+                          fitted, sizeof(fitted));
+    if (fitted[0] == '\0') return;
+
+    Vector2 measured = MeasureTextEx(font, fitted, size, 0.0f);
+    DrawTextEx(font, fitted,
+               (Vector2){boundary.x + (boundary.width - measured.x)*0.5f,
+                         boundary.y + (boundary.height - measured.y)*0.5f + press_offset},
+               size, 0.0f, color);
+}
+
+float ui_widgets_row_font_size(Font font, const char *const *labels,
+                               const float *widths, size_t count,
+                               float box_height)
+{
+    float base = ui_row_base_font_size(box_height);
+    Ui_Widgets_Caption_Measurement measurement = {font, base, 0.0f};
+    return ui_row_font_size(labels, widths, count, base, UI_ROW_MIN_FONT_SIZE,
+                            ui_widgets_caption_measure_raylib, &measurement);
+}
+
+int ui_widgets_styled_text_button_sized(uint64_t *active_button_id, Font font,
+                                        uint64_t id, Rectangle boundary,
+                                        const char *label, bool selected,
+                                        Button_Style style, float font_size)
 {
     int state = ui_widgets_button_with_id(active_button_id, id, boundary);
     Color signal = style == BUTTON_STYLE_DANGER ? COLOR_UI_DANGER :
@@ -178,38 +222,59 @@ int ui_widgets_styled_text_button(uint64_t *active_button_id, Font font,
                          selected ? signal :
                          style == BUTTON_STYLE_DANGER ? ColorAlpha(signal, 0.72f) :
                                                         COLOR_UI_RULE);
-    float font_size = fminf(boundary.height*0.52f, 22.0f);
-    Vector2 size = MeasureTextEx(font, label, font_size, 0.0f);
-    float available_width = boundary.width - 12.0f;
-    if (size.x > available_width && size.x > 0.0f) {
-        font_size *= available_width/size.x;
-        size = MeasureTextEx(font, label, font_size, 0.0f);
-    }
-    float press_offset = state & BS_PRESSED ? 1.0f : 0.0f;
-    DrawTextEx(font, label,
-               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
-                         boundary.y + (boundary.height - size.y)*0.5f + press_offset},
-               font_size, 0.0f, selected ? WHITE : COLOR_UI_INK);
+    ui_widgets_draw_button_label(font, boundary, label, font_size,
+                                 state & BS_PRESSED ? 1.0f : 0.0f,
+                                 selected ? WHITE : COLOR_UI_INK);
     return state;
+}
+
+int ui_widgets_styled_text_button(uint64_t *active_button_id, Font font,
+                                  uint64_t id, Rectangle boundary,
+                                  const char *label, bool selected,
+                                  Button_Style style)
+{
+    return ui_widgets_styled_text_button_sized(active_button_id, font, id, boundary,
+                                               label, selected, style, 0.0f);
+}
+
+int ui_widgets_text_button_sized(uint64_t *active_button_id, Font font,
+                                 uint64_t id, Rectangle boundary,
+                                 const char *label, bool selected,
+                                 float font_size)
+{
+    return ui_widgets_styled_text_button_sized(active_button_id, font, id, boundary,
+                                               label, selected,
+                                               BUTTON_STYLE_NEUTRAL, font_size);
 }
 
 int ui_widgets_text_button(uint64_t *active_button_id, Font font, uint64_t id,
                            Rectangle boundary, const char *label, bool selected)
 {
-    return ui_widgets_styled_text_button(active_button_id, font, id, boundary,
-                                         label, selected, BUTTON_STYLE_NEUTRAL);
+    return ui_widgets_text_button_sized(active_button_id, font, id, boundary,
+                                        label, selected, 0.0f);
+}
+
+int ui_widgets_danger_text_button_sized(uint64_t *active_button_id, Font font,
+                                        uint64_t id, Rectangle boundary,
+                                        const char *label, bool armed,
+                                        float font_size)
+{
+    return ui_widgets_styled_text_button_sized(active_button_id, font, id, boundary,
+                                               label, armed, BUTTON_STYLE_DANGER,
+                                               font_size);
 }
 
 int ui_widgets_danger_text_button(uint64_t *active_button_id, Font font,
                                   uint64_t id, Rectangle boundary,
                                   const char *label, bool armed)
 {
-    return ui_widgets_styled_text_button(active_button_id, font, id, boundary,
-                                         label, armed, BUTTON_STYLE_DANGER);
+    return ui_widgets_danger_text_button_sized(active_button_id, font, id, boundary,
+                                               label, armed, 0.0f);
 }
 
-void ui_widgets_disabled_text_button(Font font, Rectangle boundary,
-                                     const char *label, bool selected)
+void ui_widgets_disabled_text_button_sized(Font font, Rectangle boundary,
+                                           const char *label, bool selected,
+                                           float font_size)
 {
     Color background = selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.62f) :
                                   ColorAlpha(COLOR_TRACK_BUTTON_BACKGROUND, 0.72f);
@@ -218,17 +283,13 @@ void ui_widgets_disabled_text_button(Font font, Rectangle boundary,
     DrawRectangleLinesEx(boundary, 1.0f,
                          selected ? ColorAlpha(COLOR_TRACK_BUTTON_SELECTED, 0.7f) :
                                     ColorAlpha(COLOR_UI_RULE, 0.8f));
-    float font_size = fminf(boundary.height*0.52f, 22.0f);
-    Vector2 size = MeasureTextEx(font, label, font_size, 0.0f);
-    float available_width = boundary.width - 12.0f;
-    if (size.x > available_width && size.x > 0.0f) {
-        font_size *= available_width/size.x;
-        size = MeasureTextEx(font, label, font_size, 0.0f);
-    }
-    DrawTextEx(font, label,
-               (Vector2){boundary.x + (boundary.width - size.x)*0.5f,
-                         boundary.y + (boundary.height - size.y)*0.5f},
-               font_size, 0.0f, foreground);
+    ui_widgets_draw_button_label(font, boundary, label, font_size, 0.0f, foreground);
+}
+
+void ui_widgets_disabled_text_button(Font font, Rectangle boundary,
+                                     const char *label, bool selected)
+{
+    ui_widgets_disabled_text_button_sized(font, boundary, label, selected, 0.0f);
 }
 
 float ui_widgets_slider_get_value(float x, float lox, float hix)

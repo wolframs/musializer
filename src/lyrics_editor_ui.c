@@ -16,18 +16,29 @@
 // Local widget wrappers that route through the services vtable.
 static Font svc_font(const Lyric_Editor_Services *s) { return s->font(); }
 
-static int text_button(const Lyric_Editor_Services *s, uint64_t id,
-                       Rectangle boundary, const char *label, bool selected)
+static int text_button_sized(const Lyric_Editor_Services *s, uint64_t id,
+                             Rectangle boundary, const char *label, bool selected,
+                             float font_size)
 {
-    return ui_widgets_text_button(s->active_button_id, svc_font(s), id, boundary,
-                                  label, selected);
+    return ui_widgets_text_button_sized(s->active_button_id, svc_font(s), id,
+                                        boundary, label, selected, font_size);
 }
 
-static int danger_text_button(const Lyric_Editor_Services *s, uint64_t id,
-                              Rectangle boundary, const char *label, bool armed)
+static int danger_text_button_sized(const Lyric_Editor_Services *s, uint64_t id,
+                                    Rectangle boundary, const char *label,
+                                    bool armed, float font_size)
 {
-    return ui_widgets_danger_text_button(s->active_button_id, svc_font(s), id,
-                                         boundary, label, armed);
+    return ui_widgets_danger_text_button_sized(s->active_button_id, svc_font(s), id,
+                                               boundary, label, armed, font_size);
+}
+
+// Shared label size for a row of buttons that should agree, so a long label does
+// not leave its neighbours visibly larger than itself.
+static float row_font_size(const Lyric_Editor_Services *s,
+                           const char *const *labels, const float *widths,
+                           size_t count, float box_height)
+{
+    return ui_widgets_row_font_size(svc_font(s), labels, widths, count, box_height);
 }
 
 static int button_with_id(const Lyric_Editor_Services *s, uint64_t id,
@@ -183,9 +194,15 @@ static void lyric_time_row(const Lyric_Editor_Services *s, Rectangle boundary,
     Rectangle minus = {boundary.x + 154.0f, boundary.y, 42.0f, boundary.height};
     Rectangle plus = {minus.x + minus.width + gap, boundary.y, 42.0f, boundary.height};
     Rectangle set = {plus.x + plus.width + gap, boundary.y, 78.0f, boundary.height};
-    if (text_button(s, id_base, minus, "-0.1", false) & BS_CLICKED) *value -= 0.1;
-    if (text_button(s, id_base + 1, plus, "+0.1", false) & BS_CLICKED) *value += 0.1;
-    if (text_button(s, id_base + 2, set, "Set here", false) & BS_CLICKED) *value = playhead;
+    const char *nudge_labels[3] = {"-0.1", "+0.1", "Set here"};
+    const float nudge_widths[3] = {minus.width, plus.width, set.width};
+    float nudge_font = row_font_size(s, nudge_labels, nudge_widths, 3, boundary.height);
+    if (text_button_sized(s, id_base, minus, nudge_labels[0], false,
+                          nudge_font) & BS_CLICKED) *value -= 0.1;
+    if (text_button_sized(s, id_base + 1, plus, nudge_labels[1], false,
+                          nudge_font) & BS_CLICKED) *value += 0.1;
+    if (text_button_sized(s, id_base + 2, set, nudge_labels[2], false,
+                          nudge_font) & BS_CLICKED) *value = playhead;
     if (is_start) {
         if (*value < 0.0) *value = 0.0;
         if (*value > other - 0.001) *value = other - 0.001;
@@ -209,11 +226,6 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
         float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
         DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
                    1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
-        if (lane.height >= 28.0f && x + 72.0f < lane.x + lane.width) {
-            DrawTextEx(font, scene_stable_name((Scene_Id)cue->scene_index),
-                       (Vector2){x + 3.0f, lane.y + 7.0f}, 12.0f, 1.0f,
-                       COLOR_UI_MUTED);
-        }
     }
     for (size_t i = 0; i < track->lyrics.count; ++i) {
         const Lyric_Cue *cue = &track->lyrics.cues[i];
@@ -233,6 +245,27 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
                 lyric_editor_ui_select(editor, track, cue->id);
                 (void)editor_open_on_click;
             }
+        }
+    }
+
+    // Scene names are drawn last, on top of the lyric blocks. They used to be
+    // drawn first and were then painted over by every overlapping block, and
+    // they were gated on a lane at least 28 px high while the caller caps this
+    // lane at 22 px -- so in practice they never appeared at all. Ink rather
+    // than muted grey keeps them legible against the amber block as well as
+    // the bare lane.
+    if (lane.height >= 18.0f) {
+        for (size_t i = 0; i < track->scene_switches.count; ++i) {
+            const Scene_Switch_Cue *cue = &track->scene_switches.cues[i];
+            float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
+            const char *name = scene_stable_name((Scene_Id)cue->scene_index);
+            Vector2 size = MeasureTextEx(font, name, 11.0f, 1.0f);
+            if (x + size.x + 8.0f >= lane.x + lane.width) continue;
+            Vector2 position = {x + 4.0f, lane.y + (lane.height - size.y)*0.5f};
+            DrawRectangleRec((Rectangle){position.x - 2.0f, position.y - 1.0f,
+                                         size.x + 4.0f, size.y + 2.0f},
+                             ColorAlpha(COLOR_UI_RAISED, 0.88f));
+            DrawTextEx(font, name, position, 11.0f, 1.0f, COLOR_UI_INK);
         }
     }
 }
@@ -407,8 +440,13 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
     Rectangle add = {form.x + form.width - 92.0f, form.y - 3.0f, 92.0f, 34.0f};
     Rectangle import_button = {add.x - 83.0f, add.y, 77.0f, add.height};
     Rectangle export_button = {import_button.x - 83.0f, add.y, 77.0f, add.height};
-    if (text_button(services, UINT64_C(0x4C59524943494D50), import_button,
-                    "Import", false) & BS_CLICKED) {
+    const char *document_labels[3] = {"Export", "Import", "Add cue"};
+    const float document_widths[3] = {export_button.width, import_button.width,
+                                      add.width};
+    float document_font = row_font_size(services, document_labels, document_widths,
+                                        3, add.height);
+    if (text_button_sized(services, UINT64_C(0x4C59524943494D50), import_button,
+                          document_labels[1], false, document_font) & BS_CLICKED) {
         int imported = lyric_editor_ui_allow_context_change(editor, track, services) ?
                        import_lyrics_document(&track->lyrics) : 0;
         if (imported < 0) {
@@ -421,14 +459,15 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
             services->mark_project_dirty(track);
         }
     }
-    if (text_button(services, UINT64_C(0x4C59524943455850), export_button,
-                    "Export", false) & BS_CLICKED) {
+    if (text_button_sized(services, UINT64_C(0x4C59524943455850), export_button,
+                          document_labels[0], false, document_font) & BS_CLICKED) {
         if (!export_lyrics_document(&track->lyrics)) {
             services->notice_push(UI_NOTICE_ERROR, "Lyrics were not exported",
                         "Choose a writable destination and try again.", NULL, true);
         }
     }
-    if (text_button(services, UINT64_C(0x4C59524943414444), add, "Add cue", false) & BS_CLICKED) {
+    if (text_button_sized(services, UINT64_C(0x4C59524943414444), add,
+                          document_labels[2], false, document_font) & BS_CLICKED) {
         if (lyric_editor_ui_allow_context_change(editor, track, services)) lyric_editor_ui_begin_new(editor, track);
     }
 
@@ -474,21 +513,28 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
     lyric_editor_ui_text_input_update(editor);
 
     Rectangle apply = {form.x, form.y + 146.0f, 92.0f, UI_BUTTON_HEIGHT};
-    if (text_button(services, UINT64_C(0x4C59524943415050), apply, "Apply", false) & BS_CLICKED) {
-        lyric_editor_ui_apply(editor, track, services);
-    }
     Rectangle discard_button = {apply.x + apply.width + gap, apply.y, 104.0f, apply.height};
-    if (text_button(services, UINT64_C(0x4C59524943444953), discard_button,
-                    editor->draft_new ? "Cancel edit" : "Discard edit", false) &
-        BS_CLICKED) {
-        lyric_editor_ui_clear_draft(editor);
-    }
     Rectangle delete_button = {
         discard_button.x + discard_button.width + gap, apply.y, 92.0f, apply.height,
     };
+    const char *discard_label = editor->draft_new ? "Cancel edit" : "Discard edit";
+    const char *draft_labels[3] = {"Apply", discard_label, "Delete"};
+    const float draft_widths[3] = {apply.width, discard_button.width,
+                                   delete_button.width};
+    float draft_font = row_font_size(services, draft_labels, draft_widths, 3,
+                                     apply.height);
+    if (text_button_sized(services, UINT64_C(0x4C59524943415050), apply,
+                          draft_labels[0], false, draft_font) & BS_CLICKED) {
+        lyric_editor_ui_apply(editor, track, services);
+    }
+    if (text_button_sized(services, UINT64_C(0x4C59524943444953), discard_button,
+                          discard_label, false, draft_font) & BS_CLICKED) {
+        lyric_editor_ui_clear_draft(editor);
+    }
     if (!editor->draft_new &&
-        (danger_text_button(services, UINT64_C(0x4C5952494344454C), delete_button,
-                            "Delete", false) & BS_CLICKED)) {
+        (danger_text_button_sized(services, UINT64_C(0x4C5952494344454C),
+                                  delete_button, draft_labels[2], false,
+                                  draft_font) & BS_CLICKED)) {
         if (lyrics_delete(&track->lyrics, editor->selected_id) == LYRICS_OK) {
             lyric_editor_ui_clear_draft(editor);
             services->mark_project_dirty(track);

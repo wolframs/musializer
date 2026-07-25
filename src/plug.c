@@ -32,6 +32,7 @@
 #include "scene_switch.h"
 #include "sha256.h"
 #include "track_timeline.h"
+#include "track_identity.h"
 #include "track.h"
 #include "ui_notice.h"
 #include "ui_theme.h"
@@ -420,6 +421,17 @@ static Track *current_track(void)
         return &p->tracks.items[p->current_track];
     }
     return NULL;
+}
+
+// Human identity of a track, for anything a user reads. The policy lives in
+// track_identity.c so it can be exercised headlessly; that header records why
+// the audio path stops being a usable label once a project has been saved.
+static const char *track_display_name(const Track *track)
+{
+    if (track == NULL) return "";
+    return track_identity_display_name(
+        track->project_metadata_initialized ? track->project_metadata.title : NULL,
+        track->file_path);
 }
 
 static bool route_editor_dirty_for_active_track(void)
@@ -1234,22 +1246,58 @@ static bool stage_candidate_analysis_lanes(
     Musi_Analysis_Lane_Reference staged[MUSI_PROJECT_MAX_ANALYSIS_LANES],
     size_t *staged_count, char staged_audio_sha256[SHA256_HEX_SIZE]);
 
+static int text_button_sized(uint64_t id, Rectangle boundary, const char *label,
+                             bool selected, float font_size)
+{
+    return ui_widgets_text_button_sized(&p->active_button_id, ui_font(), id,
+                                        boundary, label, selected, font_size);
+}
+
 static int text_button(uint64_t id, Rectangle boundary, const char *label, bool selected)
 {
-    return ui_widgets_text_button(&p->active_button_id, ui_font(), id, boundary,
-                                  label, selected);
+    return text_button_sized(id, boundary, label, selected, 0.0f);
+}
+
+static int danger_text_button_sized(uint64_t id, Rectangle boundary,
+                                    const char *label, bool armed, float font_size)
+{
+    return ui_widgets_danger_text_button_sized(&p->active_button_id, ui_font(), id,
+                                               boundary, label, armed, font_size);
 }
 
 static int danger_text_button(uint64_t id, Rectangle boundary,
                               const char *label, bool armed)
 {
-    return ui_widgets_danger_text_button(&p->active_button_id, ui_font(), id,
-                                         boundary, label, armed);
+    return danger_text_button_sized(id, boundary, label, armed, 0.0f);
+}
+
+static void disabled_text_button_sized(Rectangle boundary, const char *label,
+                                       bool selected, float font_size)
+{
+    ui_widgets_disabled_text_button_sized(ui_font(), boundary, label, selected,
+                                          font_size);
 }
 
 static void disabled_text_button(Rectangle boundary, const char *label, bool selected)
 {
-    ui_widgets_disabled_text_button(ui_font(), boundary, label, selected);
+    disabled_text_button_sized(boundary, label, selected, 0.0f);
+}
+
+// Shared label size for a row of same-height buttons of the given widths.
+static float row_font_size(const char *const *labels, const float *widths,
+                           size_t count, float box_height)
+{
+    return ui_widgets_row_font_size(ui_font(), labels, widths, count, box_height);
+}
+
+// The common case: every button in the row is the same width.
+static float uniform_row_font_size(const char *const *labels, size_t count,
+                                   float box_width, float box_height)
+{
+    float widths[16];
+    if (count > NOB_ARRAY_LEN(widths)) count = NOB_ARRAY_LEN(widths);
+    for (size_t i = 0; i < count; ++i) widths[i] = box_width;
+    return row_font_size(labels, widths, count, box_height);
 }
 
 static Color event_type_color(uint32_t type)
@@ -1418,19 +1466,27 @@ static void draw_assist_artifact_actions(float x, float y, float gap)
         {"Copy folder", p->assist_output_dir, 98.0f,
          UINT64_C(0x4153534953544644)},
     };
+    const char *labels[NOB_ARRAY_LEN(actions)];
+    float widths[NOB_ARRAY_LEN(actions)];
+    for (size_t i = 0; i < NOB_ARRAY_LEN(actions); ++i) {
+        labels[i] = actions[i].label;
+        widths[i] = actions[i].width;
+    }
+    float font_size = row_font_size(labels, widths, NOB_ARRAY_LEN(actions),
+                                    UI_BUTTON_HEIGHT);
     for (size_t i = 0; i < NOB_ARRAY_LEN(actions); ++i) {
         const char *path = actions[i].path;
         bool available = path != NULL && path[0] != '\0' &&
             (i == 2 ? DirectoryExists(path) : FileExists(path));
         Rectangle button = {x, y, actions[i].width, UI_BUTTON_HEIGHT};
         if (available) {
-            if (text_button(actions[i].id, button, actions[i].label, false) &
-                BS_CLICKED) {
+            if (text_button_sized(actions[i].id, button, actions[i].label, false,
+                                  font_size) & BS_CLICKED) {
                 SetClipboardText(path);
             }
             tooltip(button, path, SIDE_BOTTOM, false);
         } else {
-            disabled_text_button(button, actions[i].label, false);
+            disabled_text_button_sized(button, actions[i].label, false, font_size);
             tooltip(button, "This job did not produce that artifact.",
                     SIDE_BOTTOM, false);
         }
@@ -1496,6 +1552,12 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         }
     }
 
+    const char *mode_labels[ASSIST_MODE_COUNT];
+    for (size_t i = 0; i < NOB_ARRAY_LEN(modes); ++i) {
+        mode_labels[i] = assist_mode_display_name(modes[i]);
+    }
+    float mode_font = uniform_row_font_size(mode_labels, NOB_ARRAY_LEN(modes),
+                                            button_width, UI_BUTTON_HEIGHT);
     for (size_t i = 0; i < NOB_ARRAY_LEN(modes); ++i) {
         size_t row = i/layout.mode_columns;
         size_t column = i%layout.mode_columns;
@@ -1512,12 +1574,12 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                      p->assist_mode == modes[i];
         int state = BS_NONE;
         if (start_block == ASSIST_START_ALLOWED) {
-            state = text_button(UINT64_C(0x4153534953540000) + i,
-                                button_boundary,
-                                assist_mode_display_name(modes[i]), selected);
+            state = text_button_sized(UINT64_C(0x4153534953540000) + i,
+                                      button_boundary, mode_labels[i], selected,
+                                      mode_font);
         } else {
-            disabled_text_button(button_boundary,
-                                 assist_mode_display_name(modes[i]), selected);
+            disabled_text_button_sized(button_boundary, mode_labels[i], selected,
+                                       mode_font);
             tooltip(button_boundary, assist_start_block_reason(start_block),
                     SIDE_BOTTOM, false);
         }
@@ -1537,7 +1599,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     char status[384];
     if (p->assist_candidate != NULL) {
         const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
-                                 GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
+                                 track_display_name(&p->tracks.items[p->assist_candidate_track_index]) :
                                  "missing track";
         snprintf(status, sizeof(status), "%s result  |  Validated  |  %s",
                  assist_mode_display_name(p->assist_candidate_mode), track_name);
@@ -1545,7 +1607,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                p->assist_job_state == ASSIST_JOB_TIMING_OUT ||
                p->assist_job_state == ASSIST_JOB_FAILING) {
         const char *track_name = p->assist_track_index < p->tracks.count ?
-                                 GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                                 track_display_name(&p->tracks.items[p->assist_track_index]) :
                                  "missing track";
         const char *action = p->assist_job_state == ASSIST_JOB_TIMING_OUT ?
                              "Stopping at the 40:00 job deadline" :
@@ -1556,7 +1618,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     } else if (p->assist_job_state == ASSIST_JOB_RUNNING) {
         double elapsed = fmax(0.0, GetTime() - p->assist_started_at);
         const char *track_name = p->assist_track_index < p->tracks.count ?
-                                 GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                                 track_display_name(&p->tracks.items[p->assist_track_index]) :
                                  "missing track";
         snprintf(status, sizeof(status), "%s  |  %s  |  %02u:%02u elapsed",
                  assist_mode_display_name(p->assist_mode), track_name,
@@ -1567,7 +1629,7 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
                                   "Review before starting";
         snprintf(status, sizeof(status), "%s  |  %s  |  %s%s",
                  assist_mode_display_name(p->assist_mode),
-                 GetFileName(track->file_path),
+                 track_display_name(track),
                  setup_state,
                  helpers_available ? "" : "  |  Helper unavailable");
     } else if (!helpers_available) {
@@ -1839,7 +1901,7 @@ static void draw_export_panel(Rectangle boundary, Track *track)
     char summary[320];
     snprintf(summary, sizeof(summary),
              "%s  |  %ux%u at %u fps  |  %s  |  est. %llu frames  |  %s",
-             GetFileName(track->file_path), p->render_config.width,
+             track_display_name(track), p->render_config.width,
              p->render_config.height, p->render_config.fps,
              render_export_quality_name(p->render_config.quality),
              (unsigned long long)approximate_frames,
@@ -1862,18 +1924,24 @@ static void draw_export_panel(Rectangle boundary, Track *track)
         boundary.y + boundary.height - 44.0f, 212.0f, UI_BUTTON_HEIGHT,
     };
     Rectangle close = {render.x - 98.0f - gap, render.y, 98.0f, render.height};
+    const char *render_label = ffmpeg_available() ? "Choose output and render" :
+                                                    "FFmpeg required";
+    const char *footer_labels[2] = {render_label, "Close"};
+    const float footer_widths[2] = {render.width, close.width};
+    float footer_font = row_font_size(footer_labels, footer_widths, 2, render.height);
     if (ffmpeg_available()) {
-        if (text_button(UINT64_C(0x4558504F5254474F), render,
-                        "Choose output and render", true) & BS_CLICKED) {
+        if (text_button_sized(UINT64_C(0x4558504F5254474F), render, render_label,
+                              true, footer_font) & BS_CLICKED) {
             start_rendering_track(track);
         }
     } else {
-        disabled_text_button(render, "FFmpeg required", false);
+        disabled_text_button_sized(render, render_label, false, footer_font);
         tooltip(render,
                 "Install FFmpeg, then run the product doctor with --require export",
                 SIDE_TOP, false);
     }
-    if (text_button(UINT64_C(0x4558504F5254434C), close, "Close", false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x4558504F5254434C), close, footer_labels[1],
+                          false, footer_font) & BS_CLICKED) {
         p->export_panel_open = false;
     }
 }
@@ -2002,13 +2070,22 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
         EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
     };
+    // These widths are hand-tuned to just clear their labels. Sizing the row as a
+    // whole means a future label change degrades evenly instead of leaving one
+    // button's text visibly smaller than its neighbours'.
+    float control_font = row_font_size(labels, control_widths, 6, controls.height);
     float control_x = controls.x;
     for (size_t i = 0; i < 6; ++i) {
         Rectangle boundary = {control_x, controls.y, control_widths[i], controls.height};
-        int state = text_button(UINT64_C(0x45564E5400000000) + i, boundary, labels[i],
-                                (i == 0 && p->lyrics_editor_open) ||
-                                (i == 1 && p->assist_panel_open) ||
-                                i == 2);
+        // Each panel opener reflects its own panel. Export previously passed a
+        // bare `i == 2`, so it rendered selected even while Lyrics or Assist
+        // owned the workspace and two buttons claimed the open panel at once.
+        int state = text_button_sized(UINT64_C(0x45564E5400000000) + i, boundary,
+                                      labels[i],
+                                      (i == 0 && p->lyrics_editor_open) ||
+                                      (i == 1 && p->assist_panel_open) ||
+                                      (i == 2 && p->export_panel_open),
+                                      control_font);
         Color category = i < 3 ? (Color){242, 190, 66, 255} :
                                  event_type_color(types[i]);
         DrawRectangle((int)boundary.x, (int)boundary.y, 4,
@@ -2165,9 +2242,21 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         if (seconds > 0.0 && waveform_lane.height >= 48.0f) {
             char tick_label[24];
             format_timestamp(seconds, tick_label, sizeof(tick_label));
-            DrawTextEx(ui_font(), tick_label,
-                       (Vector2){tick_x + 4.0f, waveform_lane.y + 4.0f},
-                       12.0f, 1.0f, COLOR_UI_MUTED);
+            Vector2 label_position = {tick_x + 4.0f, waveform_lane.y + 4.0f};
+            // The waveform is the background here, and it is not a constant:
+            // it runs from the raised surface in a silent passage to a dense
+            // accent blue at full amplitude. Muted ink on the loud case
+            // measures about 1.16:1, which is unreadable. An opaque plate
+            // makes the pairing fixed and legible regardless of the audio
+            // underneath.
+            Vector2 label_size = MeasureTextEx(ui_font(), tick_label, 12.0f, 1.0f);
+            DrawRectangleRec((Rectangle){label_position.x - 3.0f,
+                                         label_position.y - 2.0f,
+                                         label_size.x + 6.0f,
+                                         label_size.y + 4.0f},
+                             COLOR_UI_RAISED);
+            DrawTextEx(ui_font(), tick_label, label_position,
+                       12.0f, 1.0f, COLOR_UI_INK);
         }
     }
 
@@ -2704,7 +2793,7 @@ static bool apply_assist_candidate(void)
     char detail[UI_NOTICE_DETAIL_CAPACITY];
     snprintf(detail, sizeof(detail),
              "The selected validated lanes are now in %s.",
-             GetFileName(track->file_path));
+             track_display_name(track));
     notice_push(UI_NOTICE_SUCCESS, "Suggestions applied",
                 detail, NULL, false);
     return true;
@@ -2715,7 +2804,7 @@ static void discard_assist_candidate(void)
     if (p->assist_candidate == NULL) return;
     notice_dismiss(&p->assist_apply_notice_id);
     const char *track_name = p->assist_candidate_track_index < p->tracks.count ?
-                             GetFileName(p->tracks.items[p->assist_candidate_track_index].file_path) :
+                             track_display_name(&p->tracks.items[p->assist_candidate_track_index]) :
                              "the missing target track";
     char detail[UI_NOTICE_DETAIL_CAPACITY];
     snprintf(detail, sizeof(detail),
@@ -2877,7 +2966,7 @@ static void finish_assist_stop(Assist_Job_State stopping_state)
     p->assist_process = NOB_INVALID_PROC;
     p->assist_job_state = assist_stopped_state(stopping_state);
     const char *track_name = p->assist_track_index < p->tracks.count ?
-                             GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                             track_display_name(&p->tracks.items[p->assist_track_index]) :
                              "the missing target track";
     char detail[UI_NOTICE_DETAIL_CAPACITY];
     snprintf(detail, sizeof(detail),
@@ -3039,7 +3128,7 @@ static void poll_assist_job(void)
     p->assist_candidate_mode = p->assist_mode;
     p->assist_job_state = ASSIST_JOB_SUCCEEDED;
     const char *track_name = p->assist_track_index < p->tracks.count ?
-                             GetFileName(p->tracks.items[p->assist_track_index].file_path) :
+                             track_display_name(&p->tracks.items[p->assist_track_index]) :
                              "the missing target track";
     char detail[UI_NOTICE_DETAIL_CAPACITY];
     snprintf(detail, sizeof(detail),
@@ -3489,7 +3578,11 @@ static bool save_project_as(Track *track)
     if (track == NULL) return false;
     const char *filters[] = {"*.musi"};
     char suggested[PLUG_RELOAD_PATH_CAPACITY];
-    const char *name = track->file_path;
+    // A saved track's own project path is the right suggestion. By then
+    // file_path points into the content-addressed asset bundle, so deriving
+    // from it would propose a SHA-256 named project inside <stem>.assets/.
+    const char *name = track->project_path[0] != '\0' ? track->project_path
+                                                      : track->file_path;
     const char *dot = strrchr(name, '.');
     const char *slash = strrchr(name, '/');
     const char *backslash = strrchr(name, '\\');
@@ -3906,7 +3999,12 @@ void track_label(Font font, const char *text, Vector2 position, float fontSize, 
 static void tracks_panel_with_location(const char *file, int line, Rectangle panel_boundary)
 {
     DrawRectangleRec(panel_boundary, COLOR_TRACK_PANEL_BACKGROUND);
-    const float header_height = 96.0f;
+    // Two stacked action rows read far better than four crushed cells, but the
+    // panel is only tall enough for them once a track row still fits underneath.
+    // The smallest windows keep the single row rather than clipping into the
+    // scene browser below.
+    const bool stacked_actions = panel_boundary.height >= 168.0f;
+    const float header_height = stacked_actions ? 124.0f : 96.0f;
     DrawTextEx(ui_font(), "TRACK PROJECTS",
                (Vector2){panel_boundary.x + 10.0f, panel_boundary.y + 16.0f},
                18.0f, 1.0f, COLOR_UI_INK);
@@ -3925,30 +4023,42 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
                          panel_boundary.y + 18.0f},
                13.0f, 1.0f,
                workspace_dirty ? COLOR_ACCENT : COLOR_UI_MUTED);
+    // Four file actions across one 240-320px panel left every label ellipsized at
+    // the minimum readable size. Two rows of two fit them outright, paired by
+    // intent: bring content in on top, write the project out below.
     const float action_gap = 4.0f;
-    const float action_width = (panel_boundary.width - 20.0f - action_gap*3.0f)/4.0f;
+    const float action_columns = stacked_actions ? 2.0f : 4.0f;
+    const float action_width = (panel_boundary.width - 20.0f -
+                                action_gap*(action_columns - 1.0f))/action_columns;
+    const float action_height = stacked_actions ? 32.0f : 36.0f;
+    const float action_stride = action_width + action_gap;
     Rectangle open_project = {
-        panel_boundary.x + 10.0f, panel_boundary.y + 50.0f,
-        action_width, 36.0f,
-    };
-    Rectangle save_project_button = {
-        open_project.x + action_width + action_gap, open_project.y,
-        action_width, open_project.height,
+        panel_boundary.x + 10.0f, panel_boundary.y + (stacked_actions ? 46.0f : 50.0f),
+        action_width, action_height,
     };
     Rectangle add_track = {
-        save_project_button.x + action_width*2.0f + action_gap*2.0f, open_project.y,
-        action_width, open_project.height,
+        open_project.x + action_stride, open_project.y, action_width, action_height,
+    };
+    Rectangle save_project_button = {
+        stacked_actions ? open_project.x : open_project.x + action_stride*2.0f,
+        stacked_actions ? open_project.y + action_height + action_gap : open_project.y,
+        action_width, action_height,
     };
     Rectangle save_as_button = {
-        save_project_button.x + action_width + action_gap, open_project.y,
-        action_width, open_project.height,
+        stacked_actions ? add_track.x : open_project.x + action_stride*3.0f,
+        save_project_button.y, action_width, action_height,
     };
-    if (text_button(UINT64_C(0x545241434B4F504E), open_project,
-                    "Open project", false) & BS_CLICKED) {
+    static const char *const action_labels[] = {"Open project", "Add audio",
+                                                "Save", "Save As"};
+    float action_font = uniform_row_font_size(action_labels,
+                                              NOB_ARRAY_LEN(action_labels),
+                                              action_width, action_height);
+    if (text_button_sized(UINT64_C(0x545241434B4F504E), open_project,
+                          action_labels[0], false, action_font) & BS_CLICKED) {
         (void)open_project_dialog();
     }
-    if (text_button(UINT64_C(0x545241434B534156), save_project_button,
-                    "Save", false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x545241434B534156), save_project_button,
+                          action_labels[2], false, action_font) & BS_CLICKED) {
         Track *track = current_track();
         if (lyric_editor_has_unsaved_draft(track)) {
             notice_push(UI_NOTICE_WARNING, "Lyric draft is not saved yet",
@@ -3958,8 +4068,8 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             (void)save_project(track, true);
         }
     }
-    if (text_button(UINT64_C(0x545241434B534153), save_as_button,
-                    "Save As", false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x545241434B534153), save_as_button,
+                          action_labels[3], false, action_font) & BS_CLICKED) {
         Track *track = current_track();
         if (lyric_editor_has_unsaved_draft(track)) {
             notice_push(UI_NOTICE_WARNING, "Lyric draft is not saved yet",
@@ -3969,8 +4079,8 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             (void)save_project_as(track);
         }
     }
-    if (text_button(UINT64_C(0x545241434B414444), add_track,
-                    "Add audio", false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x545241434B414444), add_track,
+                          action_labels[1], false, action_font) & BS_CLICKED) {
         const char *filters[] = {"*.wav", "*.ogg", "*.mp3", "*.qoa",
                                  "*.xm", "*.mod", "*.flac"};
         char *path = tinyfd_openFileDialog("Add audio", "./",
@@ -4068,7 +4178,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
                              (int)i == p->current_track ? COLOR_ACCENT : COLOR_UI_RULE);
         Color label_color = (int)i == p->current_track ? WHITE : COLOR_UI_INK;
 
-        const char *text = GetFileName(p->tracks.items[i].file_path);
+        const char *text = track_display_name(&p->tracks.items[i]);
         float fontSize = item_boundary.height*0.5;
         float text_padding = item_boundary.width*0.05;
         Vector2 size = MeasureTextEx(ui_font(), text, fontSize, 0);
@@ -4589,30 +4699,33 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
                                action_width, 28.0f};
     Rectangle close_button = {area.x + (action_width + gap)*4.0f, cursor,
                               action_width, 28.0f};
-    if (text_button(UINT64_C(0x524F5554434C4D50), clamp_button, "Clamp",
-                    draft->clamp) & BS_CLICKED) {
+    bool dirty = route_editor_dirty(editor);
+    const char *apply_label = editor->has_committed ? "Applied" : "Apply";
+    const char *close_label = dirty ? "Discard" : "Close";
+    const char *route_labels[5] = {"Clamp", "Swap", apply_label, "Remove",
+                                   close_label};
+    float route_font = uniform_row_font_size(route_labels, 5, action_width, 28.0f);
+    if (text_button_sized(UINT64_C(0x524F5554434C4D50), clamp_button, route_labels[0],
+                          draft->clamp, route_font) & BS_CLICKED) {
         (void)route_editor_set_clamp(editor, !draft->clamp);
     }
     tooltip(clamp_button, "Outside the anchors, hold the edge value instead "
             "of extrapolating past it", SIDE_TOP, false);
-    if (text_button(UINT64_C(0x524F5554494E5656), invert_button, "Swap",
-                    false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x524F5554494E5656), invert_button, route_labels[1],
+                          false, route_font) & BS_CLICKED) {
         (void)route_editor_swap_output(editor);
     }
     tooltip(invert_button, "Swap the two output values so the response runs "
             "the other way", SIDE_TOP, false);
 
-    bool dirty = route_editor_dirty(editor);
     if (route_editor_can_apply(editor) && (dirty || !editor->has_committed)) {
-        if (text_button(UINT64_C(0x524F555441504C59), apply_button, "Apply",
-                        true) & BS_CLICKED &&
+        if (text_button_sized(UINT64_C(0x524F555441504C59), apply_button, "Apply",
+                              true, route_font) & BS_CLICKED &&
             route_editor_apply(editor, &track->scene_routes)) {
             mark_project_dirty(track);
         }
     } else {
-        disabled_text_button(apply_button,
-                             editor->has_committed ? "Applied" : "Apply",
-                             false);
+        disabled_text_button_sized(apply_button, apply_label, false, route_font);
     }
     tooltip(apply_button,
             draft->output_min == draft->output_max ?
@@ -4620,20 +4733,20 @@ static void scene_route_editor_panel(Rectangle area, Track *track,
                 "Commit this audio route to the project",
             SIDE_TOP, false);
     if (editor->has_committed) {
-        if (danger_text_button(UINT64_C(0x524F555452454D56), remove_button,
-                               "Remove", false) & BS_CLICKED &&
+        if (danger_text_button_sized(UINT64_C(0x524F555452454D56), remove_button,
+                                     route_labels[3], false, route_font) & BS_CLICKED &&
             route_editor_remove(editor, &track->scene_routes)) {
             mark_project_dirty(track);
             return;
         }
     } else {
-        disabled_text_button(remove_button, "Remove", false);
+        disabled_text_button_sized(remove_button, route_labels[3], false, route_font);
     }
     int close_state = dirty ?
-        danger_text_button(UINT64_C(0x524F5554434C5345), close_button,
-                           "Discard", false) :
-        text_button(UINT64_C(0x524F5554434C5345), close_button, "Close",
-                    false);
+        danger_text_button_sized(UINT64_C(0x524F5554434C5345), close_button,
+                                 close_label, false, route_font) :
+        text_button_sized(UINT64_C(0x524F5554434C5345), close_button, close_label,
+                          false, route_font);
     tooltip(close_button, dirty ?
             "Throw away the unapplied route changes" :
             "Close the route editor", SIDE_TOP, false);
@@ -4676,10 +4789,19 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                       button_width, UI_COMPACT_BUTTON_HEIGHT};
     const char *reset_label = p->scene_settings_reset_undo_available ? "Undo reset" :
                               p->scene_settings_reset_confirmation ? "Confirm" : "Reset";
+    bool can_expand = scene_settings_can_expand_window();
+    const char *expand_label = can_expand ? "Expand" :
+                               p->scene_settings_window_expanded ? "Expanded" : "Fit";
+    // All three labels change with state. Sizing them together stops the header
+    // from reflowing its typography every time Reset arms or the window expands.
+    const char *header_labels[3] = {reset_label, expand_label, "Hide"};
+    float header_font = uniform_row_font_size(header_labels, 3, button_width,
+                                              UI_COMPACT_BUTTON_HEIGHT);
     int reset_state = p->scene_settings_reset_confirmation ?
-        danger_text_button(UINT64_C(0x53455454494E4752), reset,
-                           reset_label, true) :
-        text_button(UINT64_C(0x53455454494E4752), reset, reset_label, false);
+        danger_text_button_sized(UINT64_C(0x53455454494E4752), reset,
+                                 reset_label, true, header_font) :
+        text_button_sized(UINT64_C(0x53455454494E4752), reset, reset_label, false,
+                          header_font);
     if (reset_state & BS_CLICKED) {
         if (p->scene_settings_reset_undo_available) {
             if (scene_settings_apply_snapshot(editable_settings, p->scene.id,
@@ -4713,23 +4835,22 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                 NULL, true);
         }
     }
-    if (scene_settings_can_expand_window()) {
-        if (text_button(UINT64_C(0x53455454494E4745), expand,
-                        "Expand", false) & BS_CLICKED) {
+    if (can_expand) {
+        if (text_button_sized(UINT64_C(0x53455454494E4745), expand,
+                              expand_label, false, header_font) & BS_CLICKED) {
             scene_settings_expand_window();
         }
         tooltip(expand, "Expand the application window for this inspector",
                 SIDE_BOTTOM, false);
     } else {
-        disabled_text_button(expand,
-                             p->scene_settings_window_expanded ? "Expanded" : "Fit", false);
+        disabled_text_button_sized(expand, expand_label, false, header_font);
         tooltip(expand, p->scene_settings_window_expanded ?
                 "The application window is already expanded" :
                 "The inspector is fitted inside the current window",
                 SIDE_BOTTOM, false);
     }
-    if (text_button(UINT64_C(0x53455454494E4748), hide,
-                    "Hide", false) & BS_CLICKED) {
+    if (text_button_sized(UINT64_C(0x53455454494E4748), hide,
+                          header_labels[2], false, header_font) & BS_CLICKED) {
         set_scene_settings_open(false);
     }
 
@@ -4794,28 +4915,32 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                          action_width, 30.0f};
     Rectangle remove = {replace.x + action_width + small_gap, action_y,
                         action_width, 30.0f};
+    const char *delete_label = p->scene_preset_delete_confirmation ?
+                               "Confirm" : "Delete";
+    const char *save_label = preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE ?
+                             "Full" : "Save new";
+    const char *preset_labels[4] = {"Load", save_label, "Update", delete_label};
+    float preset_font = uniform_row_font_size(preset_labels, 4, action_width, 30.0f);
     if (preset_count > 0) {
-        if ((text_button(UINT64_C(0x5052455345544150), apply,
-                         "Load", false) & BS_CLICKED) != 0 &&
+        if ((text_button_sized(UINT64_C(0x5052455345544150), apply,
+                               preset_labels[0], false, preset_font) & BS_CLICKED) != 0 &&
             scene_settings_preset_apply(&p->shared_presets, scene_index,
                                         *selected, editable_settings)) {
             commit_active_cue_settings(track, p->scene.id);
             mark_project_dirty(track);
         }
-        if ((text_button(UINT64_C(0x5052455345545250), replace,
-                         "Update", false) & BS_CLICKED) != 0 &&
+        if ((text_button_sized(UINT64_C(0x5052455345545250), replace,
+                               preset_labels[2], false, preset_font) & BS_CLICKED) != 0 &&
             shared_presets_editable() &&
             scene_settings_preset_replace(&p->shared_presets, scene_index,
                                           *selected, editable_settings)) {
             shared_presets_persist();
         }
-        const char *delete_label = p->scene_preset_delete_confirmation ?
-                                   "Confirm" : "Delete";
         int delete_state = p->scene_preset_delete_confirmation ?
-            danger_text_button(UINT64_C(0x505245534554444C), remove,
-                               delete_label, true) :
-            text_button(UINT64_C(0x505245534554444C), remove,
-                        delete_label, false);
+            danger_text_button_sized(UINT64_C(0x505245534554444C), remove,
+                                     delete_label, true, preset_font) :
+            text_button_sized(UINT64_C(0x505245534554444C), remove,
+                              delete_label, false, preset_font);
         if ((delete_state & BS_CLICKED) != 0) {
             if (!p->scene_preset_delete_confirmation) {
                 p->scene_preset_delete_confirmation = true;
@@ -4838,13 +4963,14 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                 "Click again to permanently remove this preset" :
                 "Remove the selected preset", SIDE_BOTTOM, false);
     } else {
-        disabled_text_button(apply, "Load", false);
-        disabled_text_button(replace, "Update", false);
-        disabled_text_button(remove, "Delete", false);
+        disabled_text_button_sized(apply, preset_labels[0], false, preset_font);
+        disabled_text_button_sized(replace, preset_labels[2], false, preset_font);
+        // No preset to confirm against, so this always reads as the plain action.
+        disabled_text_button_sized(remove, "Delete", false, preset_font);
     }
     if (preset_count < SCENE_SETTINGS_PRESETS_PER_SCENE &&
-        (text_button(UINT64_C(0x5052455345545341), save,
-                     "Save new", false) & BS_CLICKED) != 0 &&
+        (text_button_sized(UINT64_C(0x5052455345545341), save,
+                           save_label, false, preset_font) & BS_CLICKED) != 0 &&
         shared_presets_editable()) {
         char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
         snprintf(name, sizeof(name), "Preset %llu",
@@ -4854,7 +4980,7 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
             shared_presets_persist();
         }
     } else if (preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE) {
-        disabled_text_button(save, "Full", false);
+        disabled_text_button_sized(save, save_label, false, preset_font);
     }
 
     const float content_top = action_y + 42.0f;
@@ -5067,6 +5193,16 @@ static void scene_browser(Rectangle boundary)
     if (row_height > 38.0f) row_height = 38.0f;
     if (row_height < 24.0f) row_height = 24.0f;
     float column_width = (boundary.width - padding*2.0f - gap)/(float)columns;
+    // Scene names range from "Loom" to "Spectral Terrarium" in a grid of equal
+    // cells, so the whole grid agrees on the size the longest name needs.
+    const char *scene_labels[COUNT_SCENES];
+    float scene_widths[COUNT_SCENES];
+    for (Scene_Id id = 0; id < COUNT_SCENES; ++id) {
+        scene_labels[id] = scene_name(id);
+        scene_widths[id] = column_width;
+    }
+    float scene_font = row_font_size(scene_labels, scene_widths, COUNT_SCENES,
+                                     row_height);
     for (Scene_Id id = 0; id < COUNT_SCENES; ++id) {
         size_t column = (size_t)id%columns;
         size_t row_index = (size_t)id/columns;
@@ -5076,12 +5212,16 @@ static void scene_browser(Rectangle boundary)
             column_width,
             row_height,
         };
-        if (text_button(UINT64_C(0x5343454E45000000) + (uint64_t)id,
-                        row, scene_name(id), p->scene.id == id) & BS_CLICKED) {
+        if (text_button_sized(UINT64_C(0x5343454E45000000) + (uint64_t)id, row,
+                              scene_labels[id], p->scene.id == id,
+                              scene_font) & BS_CLICKED) {
             (void)select_base_scene(id);
         }
-        char shortcut[16];
-        snprintf(shortcut, sizeof(shortcut), "Scene [%u]", (unsigned)id + 1U);
+        // The narrowest panel cannot show the longest scene names in full, so the
+        // tooltip carries the name as well as the shortcut.
+        char shortcut[96];
+        snprintf(shortcut, sizeof(shortcut), "%s  -  Scene [%u]",
+                 scene_labels[id], (unsigned)id + 1U);
         tooltip(row, shortcut, SIDE_RIGHT, false);
     }
 
@@ -5456,11 +5596,23 @@ static void notice_tray(Rectangle preview_boundary)
         snprintf(hidden, sizeof(hidden), "+%zu more notice%s",
                  p->notices.count - visible_count,
                  p->notices.count - visible_count == 1 ? "" : "s");
-        DrawTextEx(ui_font(), hidden,
-                   (Vector2){preview_boundary.x + preview_boundary.width - width,
-                             preview_boundary.y + margin +
-                             visible_count*(height + gap)},
-                   UI_FONT_CAPTION, 1.0f, COLOR_UI_MUTED);
+        Vector2 hidden_position = {
+            preview_boundary.x + preview_boundary.width - width,
+            preview_boundary.y + margin + visible_count*(height + gap),
+        };
+        // Every other string in the tray sits on the notice card. This one was
+        // drawn straight onto the scene preview, so its contrast depended on
+        // whatever the scene happened to render: about 3.2:1 against the
+        // nominal background and arbitrary against a bright frame. Give it the
+        // same plate the cards use.
+        Vector2 hidden_size = MeasureTextEx(ui_font(), hidden, UI_FONT_CAPTION, 1.0f);
+        DrawRectangleRounded((Rectangle){hidden_position.x - 8.0f,
+                                         hidden_position.y - 4.0f,
+                                         hidden_size.x + 16.0f,
+                                         hidden_size.y + 8.0f},
+                             0.35f, 6, (Color){247, 247, 248, 248});
+        DrawTextEx(ui_font(), hidden, hidden_position,
+                   UI_FONT_CAPTION, 1.0f, (Color){70, 70, 72, 255});
     }
 }
 

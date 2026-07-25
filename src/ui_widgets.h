@@ -8,6 +8,7 @@
 #include <raylib.h>
 
 #include "caption_layout.h"
+#include "ui_row_typography.h"
 #include "ui_theme.h"
 
 // Side of an anchor rectangle on which a tooltip is aligned. Shared by the
@@ -59,17 +60,44 @@ void ui_widgets_tooltip(Ui_Widgets *widgets, Rectangle boundary,
 
 int ui_widgets_button_with_id(uint64_t *active_button_id, uint64_t id,
                               Rectangle boundary);
+
+// The _sized variants draw the label at a caller-supplied font size, so a row of
+// buttons can agree on one size instead of each shrinking to fit itself. Pass
+// 0.0f (what the plain variants do) to let a lone button fit itself. Either way
+// the label stops shrinking at UI_ROW_MIN_FONT_SIZE and ellipsizes below it; see
+// ui_row_typography.h.
+int ui_widgets_styled_text_button_sized(uint64_t *active_button_id, Font font,
+                                        uint64_t id, Rectangle boundary,
+                                        const char *label, bool selected,
+                                        Button_Style style, float font_size);
 int ui_widgets_styled_text_button(uint64_t *active_button_id, Font font,
                                   uint64_t id, Rectangle boundary,
                                   const char *label, bool selected,
                                   Button_Style style);
+int ui_widgets_text_button_sized(uint64_t *active_button_id, Font font,
+                                 uint64_t id, Rectangle boundary,
+                                 const char *label, bool selected,
+                                 float font_size);
 int ui_widgets_text_button(uint64_t *active_button_id, Font font, uint64_t id,
                            Rectangle boundary, const char *label, bool selected);
+int ui_widgets_danger_text_button_sized(uint64_t *active_button_id, Font font,
+                                        uint64_t id, Rectangle boundary,
+                                        const char *label, bool armed,
+                                        float font_size);
 int ui_widgets_danger_text_button(uint64_t *active_button_id, Font font,
                                   uint64_t id, Rectangle boundary,
                                   const char *label, bool armed);
+void ui_widgets_disabled_text_button_sized(Font font, Rectangle boundary,
+                                           const char *label, bool selected,
+                                           float font_size);
 void ui_widgets_disabled_text_button(Font font, Rectangle boundary,
                                      const char *label, bool selected);
+
+// Shared size for a row of buttons that should agree, measured with `font`.
+// widths are full box widths; box_height sets the size the row starts from.
+float ui_widgets_row_font_size(Font font, const char *const *labels,
+                               const float *widths, size_t count,
+                               float box_height);
 
 float ui_widgets_slider_get_value(float x, float lox, float hix);
 

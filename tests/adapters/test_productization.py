@@ -253,6 +253,22 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertLess(render.index("LoadWaveSamples(wave)"),
                         render.index("song_atlas_map_build("))
 
+    def test_button_rows_share_one_label_size(self):
+        widgets = (ROOT / "src/ui_widgets.c").read_text(encoding="utf-8")
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        # Every button used to fit its own label independently, with no floor and
+        # no truncation, so neighbours of equal size rendered at unequal sizes.
+        self.assertNotIn("font_size *= available_width/size.x", widgets)
+        self.assertEqual(widgets.count("ui_widgets_draw_button_label("), 3)
+        self.assertIn("ui_row_font_size(", widgets)
+        self.assertIn("ui_row_truncate_label(", widgets)
+
+        # The rows the audit found worst: equal cells, unequal label lengths.
+        for row in ("action_font", "scene_font", "preset_font", "header_font",
+                    "mode_font", "route_font", "control_font"):
+            self.assertIn(row, plug, f"{row} row no longer shares a label size")
+
     def test_ui_uses_bundled_readable_font_with_license(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
         plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
@@ -271,7 +287,10 @@ class DistributionManifestTests(unittest.TestCase):
         browser_end = plug.index("static const char *notice_severity_label", browser_start)
         browser = plug[browser_start:browser_end]
         self.assertNotIn("if (row_height < 30.0f) return", browser)
-        self.assertIn('"Scene [%u]"', browser)
+        # The narrowest panel ellipsizes the longest scene names, so the tooltip
+        # has to carry the full name as well as the keyboard shortcut.
+        self.assertIn('"%s  -  Scene [%u]"', browser)
+        self.assertIn("scene_labels[id], (unsigned)id + 1U", browser)
         self.assertIn("select_base_scene(id)", browser)
 
         self.assertIn("draw_notice_wrapped_text(", plug)
