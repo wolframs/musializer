@@ -227,7 +227,13 @@ class SceneQualityRegressionTests(unittest.TestCase):
         self.assertIn("semantic_lane_sample", loom)
         self.assertIn("frame->duration_seconds", loom)
         self.assertIn("p->scene.id != SCENE_CADENCE", plug)
-        self.assertIn("fminf(216.0f, sidebar_height)", plug)
+        # The sidebar split used to be inline arithmetic here, pinned by this
+        # test. It could allocate the tracks panel zero height while the panel
+        # still registered its action buttons over the scene grid, so it now
+        # lives in a pure module with headless coverage of that invariant.
+        self.assertIn("workspace_sidebar_layout(", plug)
+        workspace = (ROOT / "src/workspace_layout.h").read_text(encoding="utf-8")
+        self.assertIn("WORKSPACE_SCENES_MINIMUM 215.0f", workspace)
 
     def test_signature_scenes_are_registered_everywhere(self):
         scene_header = (ROOT / "src/scene.h").read_text(encoding="utf-8")

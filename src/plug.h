@@ -88,6 +88,9 @@ typedef struct {
     // frame-exact reproducible capture. Chrome and panel layout should be
     // captured parked.
     bool playing;
+    // Arm the Assist confirmation prompt, the two-click state that shrinks the
+    // sidebar far enough to collapse the tracks panel. UI state only.
+    bool assist_confirmation;
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

@@ -37,6 +37,7 @@
 #include "ui_notice.h"
 #include "ui_theme.h"
 #include "ui_widgets.h"
+#include "workspace_layout.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
 // #define NOB_WARN_DEPRECATED
@@ -2903,6 +2904,11 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
     case PLUG_UI_PANEL_ASSIST: p->assist_panel_open = true;    break;
     }
 
+    if (probe.assist_confirmation) {
+        if (probe.panel != PLUG_UI_PANEL_ASSIST) return false;
+        p->assist_confirmation_pending = true;
+    }
+
     if (probe.seek_requested) {
         if (!track->transport_seekable) return false;
         seek_track_to(track, probe.seek_seconds);
@@ -4020,8 +4026,10 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
     // panel is only tall enough for them once a track row still fits underneath.
     // The smallest windows keep the single row rather than clipping into the
     // scene browser below.
-    const bool stacked_actions = panel_boundary.height >= 168.0f;
-    const float header_height = stacked_actions ? 124.0f : 96.0f;
+    const bool stacked_actions =
+        panel_boundary.height >= WORKSPACE_TRACKS_STACKED_MINIMUM;
+    const float header_height = stacked_actions ? WORKSPACE_TRACKS_STACKED_HEADER :
+                                                  WORKSPACE_TRACKS_SINGLE_HEADER;
     DrawTextEx(ui_font(), "TRACK PROJECTS",
                (Vector2){panel_boundary.x + 10.0f, panel_boundary.y + 16.0f},
                18.0f, 1.0f, COLOR_UI_INK);
@@ -4043,14 +4051,17 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
     // Four file actions across one 240-320px panel left every label ellipsized at
     // the minimum readable size. Two rows of two fit them outright, paired by
     // intent: bring content in on top, write the project out below.
-    const float action_gap = 4.0f;
+    const float action_gap = WORKSPACE_TRACKS_ACTION_GAP;
     const float action_columns = stacked_actions ? 2.0f : 4.0f;
     const float action_width = (panel_boundary.width - 20.0f -
                                 action_gap*(action_columns - 1.0f))/action_columns;
-    const float action_height = stacked_actions ? 32.0f : 36.0f;
+    const float action_height = stacked_actions ? WORKSPACE_TRACKS_STACKED_ACTION_HEIGHT :
+                                                  WORKSPACE_TRACKS_SINGLE_ACTION_HEIGHT;
+    const float action_top = stacked_actions ? WORKSPACE_TRACKS_STACKED_ACTION_TOP :
+                                               WORKSPACE_TRACKS_SINGLE_ACTION_TOP;
     const float action_stride = action_width + action_gap;
     Rectangle open_project = {
-        panel_boundary.x + 10.0f, panel_boundary.y + (stacked_actions ? 46.0f : 50.0f),
+        panel_boundary.x + 10.0f, panel_boundary.y + action_top,
         action_width, action_height,
     };
     Rectangle add_track = {
@@ -4065,16 +4076,26 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
         stacked_actions ? add_track.x : open_project.x + action_stride*3.0f,
         save_project_button.y, action_width, action_height,
     };
+    // Defence in depth behind workspace_sidebar_layout: a control whose box is
+    // not fully inside the panel is neither drawn nor registered, so it can
+    // never take a press aimed at whatever is painted beneath it.
+    Ui_Rect panel_extent = {panel_boundary.x, panel_boundary.y,
+                            panel_boundary.width, panel_boundary.height};
+    bool actions_fit =
+        ui_rect_contains(panel_extent, (Ui_Rect){open_project.x, open_project.y,
+                                                 open_project.width, open_project.height}) &&
+        ui_rect_contains(panel_extent, (Ui_Rect){save_as_button.x, save_as_button.y,
+                                                 save_as_button.width, save_as_button.height});
     static const char *const action_labels[] = {"Open project", "Add audio",
                                                 "Save", "Save As"};
     float action_font = uniform_row_font_size(action_labels,
                                               NOB_ARRAY_LEN(action_labels),
                                               action_width, action_height);
-    if (text_button_sized(UINT64_C(0x545241434B4F504E), open_project,
+    if (actions_fit && text_button_sized(UINT64_C(0x545241434B4F504E), open_project,
                           action_labels[0], false, action_font) & BS_CLICKED) {
         (void)open_project_dialog();
     }
-    if (text_button_sized(UINT64_C(0x545241434B534156), save_project_button,
+    if (actions_fit && text_button_sized(UINT64_C(0x545241434B534156), save_project_button,
                           action_labels[2], false, action_font) & BS_CLICKED) {
         Track *track = current_track();
         if (lyric_editor_has_unsaved_draft(track)) {
@@ -4085,7 +4106,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             (void)save_project(track, true);
         }
     }
-    if (text_button_sized(UINT64_C(0x545241434B534153), save_as_button,
+    if (actions_fit && text_button_sized(UINT64_C(0x545241434B534153), save_as_button,
                           action_labels[3], false, action_font) & BS_CLICKED) {
         Track *track = current_track();
         if (lyric_editor_has_unsaved_draft(track)) {
@@ -4096,7 +4117,7 @@ static void tracks_panel_with_location(const char *file, int line, Rectangle pan
             (void)save_project_as(track);
         }
     }
-    if (text_button_sized(UINT64_C(0x545241434B414444), add_track,
+    if (actions_fit && text_button_sized(UINT64_C(0x545241434B414444), add_track,
                           action_labels[1], false, action_font) & BS_CLICKED) {
         const char *filters[] = {"*.wav", "*.ogg", "*.mp3", "*.qoa",
                                  "*.xm", "*.mod", "*.flac"};
@@ -6597,22 +6618,34 @@ static void preview_screen(void)
             notice_tray(preview_boundary);
             EndScissorMode();
 
+            // The split used to be inline arithmetic that could allocate the
+            // tracks panel zero height while it drew and registered its actions
+            // anyway, stealing scene-tile clicks. See workspace_layout.h.
             float sidebar_height = h - timeline_height;
-            float scene_panel_height = fminf(292.0f,
-                fmaxf(fminf(216.0f, sidebar_height), sidebar_height - 120.0f));
-            float tracks_panel_height = sidebar_height - scene_panel_height;
-            tracks_panel((CLITERAL(Rectangle) {
-                .x = 0,
-                .y = 0,
-                .width = tracks_panel_width,
-                .height = tracks_panel_height,
-            }));
+            Workspace_Sidebar sidebar;
+            if (!workspace_sidebar_layout(tracks_panel_width, sidebar_height,
+                                          &sidebar)) {
+                sidebar = (Workspace_Sidebar){
+                    .tracks = {0.0f, 0.0f, tracks_panel_width, 0.0f},
+                    .scenes = {0.0f, 0.0f, tracks_panel_width,
+                               fmaxf(0.0f, sidebar_height)},
+                    .tracks_mode = TRACKS_PANEL_HIDDEN,
+                };
+            }
+            if (sidebar.tracks_mode != TRACKS_PANEL_HIDDEN) {
+                tracks_panel((CLITERAL(Rectangle) {
+                    .x = sidebar.tracks.x,
+                    .y = sidebar.tracks.y,
+                    .width = sidebar.tracks.width,
+                    .height = sidebar.tracks.height,
+                }));
+            }
 
             scene_browser((CLITERAL(Rectangle) {
-                .x = 0,
-                .y = tracks_panel_height,
-                .width = tracks_panel_width,
-                .height = scene_panel_height,
+                .x = sidebar.scenes.x,
+                .y = sidebar.scenes.y,
+                .width = sidebar.scenes.width,
+                .height = sidebar.scenes.height,
             }));
 
             timeline(CLITERAL(Rectangle) {
