@@ -517,6 +517,10 @@ int main(int argc, char **argv)
         TraceLog(LOG_WARNING, "Could not save command-line project: %s", project_output);
         command_line_error = true;
     }
+    // Startup configuration is not an edit. Autosave would otherwise write every
+    // flag above straight into a project opened with --project, so a one-off
+    // `--resolution 2560x1440` preview permanently changed the saved output size.
+    plug_mark_command_line_state_clean();
     if (ui_probe_requested && !command_line_error) {
         // Geometry is the host's; the plug owns workspace state. GLFW clamps to
         // the minimum window size, so a deliberately tiny probe still captures

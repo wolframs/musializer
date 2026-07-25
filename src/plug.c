@@ -2917,6 +2917,23 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
     return true;
 }
 
+// Command-line arguments configure the session; they are not edits the operator
+// made to the project. Every state-setting flag routes through mark_project_dirty,
+// so without this the autosave poll commits startup configuration to the opened
+// .musi about a second and a half after launch, with no interaction at all:
+// `--project show.musi --scene loom` replaced the saved base scene and silently
+// disabled that project's automatic scene plan. Persisting startup state stays
+// opt-in through --save-project, which runs before this and is unconditional.
+MUSIALIZER_PLUG void plug_mark_command_line_state_clean(void)
+{
+    if (p == NULL) return;
+    for (size_t i = 0; i < p->tracks.count; ++i) {
+        Track *track = &p->tracks.items[i];
+        track->project_dirty = false;
+        track->project_dirty_since = 0.0;
+    }
+}
+
 MUSIALIZER_PLUG bool plug_set_auto_scenes(bool enabled)
 {
     Track *track = current_track();

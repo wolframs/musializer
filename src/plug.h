@@ -106,6 +106,7 @@ typedef struct {
     PLUG(plug_load_analysis_bridge, bool, const char*) \
     PLUG(plug_set_auto_scenes, bool, bool) \
     PLUG(plug_apply_ui_probe, bool, Plug_Ui_Probe) \
+    PLUG(plug_mark_command_line_state_clean, void, void) \
     PLUG(plug_configure_render, bool, uint32_t, uint32_t, uint32_t, const char*) \
     PLUG(plug_configure_render_window, bool, double, double) \
     PLUG(plug_start_render, bool, const char*) \

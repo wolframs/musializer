@@ -384,7 +384,15 @@ Built-in scene selectors are `spectrum`, `pulse`, `orbital`, `ascii`, `atlas`,
 `--event type:seconds:id:value`
 arguments accept `lyric`, `semantic`, `cue`, or `custom`. A positional `.musi`
 file is equivalent to `--project`. Command-line renders exit after FFmpeg
-finishes, making them suitable for scripts and smoke tests. `--mute` starts
+finishes, making them suitable for scripts and smoke tests.
+
+Startup arguments configure the session and never edit an opened project. A
+`.musi` file passed to `--project` is left byte-for-byte alone unless you save
+it in the workspace or ask for a save with `--save-project`, so previewing a
+project at a different scene, resolution, or frame rate cannot quietly replace
+what it had stored. `--save-project` writes whatever the startup arguments
+configured, so `--scene atlas --quality master --save-project show.musi`
+persists both. `--mute` starts
 the session with the output volume at zero — playback, analysis, and export
 behave identically, the speakers just stay quiet — which keeps scripted and
 test launches from being audible.
