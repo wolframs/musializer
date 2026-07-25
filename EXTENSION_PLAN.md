@@ -554,6 +554,83 @@ Each prototype graduates only after it has a deterministic seed, saveable
 parameters, bounded resource use, offline export support, and at least one
 failure-path test.
 
+## UI remediation backlog (2026-07-25 audit)
+
+A headless capture loop (`tools/UI_REVIEW.md`, `--ui-probe`) plus a multi-agent
+audit produced 34 candidate findings; 11 were killed by adversarial review and 23
+survived. Everything below is *verified mechanism* with citations, not a wish
+list. Landed items are struck from the ranking and recorded in the session log.
+
+**Landed.** Track identity (SHA-256 shown as a track name), per-button
+shrink-to-fit typography, timeline tick-label contrast, command-line flags
+silently rewriting the opened project, a collapsed tracks panel stealing scene
+clicks, and the lyric editor drawing its action row past the bottom of the
+window.
+
+### Remaining, safe to implement
+
+| # | Item | Mechanism | Notes |
+| --- | --- | --- | --- |
+| 3 | `scene_switch` remove / retime / retarget | `src/scene_switch.h:40-57` declares only init/reset/replace/update/cue_at; cues are create-only, and re-pressing "+ Scene" overwrites only within 0.001 s (`scene_switch.c:126`). No `MOUSE_BUTTON_RIGHT` exists anywhere in `src/`. | API + tests only; module already dual-listed and `tests/test_scene_switch.c` exists, so zero scaffolding. Stage into a local array and re-publish through `scene_switch_replace` so the sorted/contiguous/coverage checks re-run. Retarget must recapture or clear the settings snapshot: `scene_switch_replace` does not validate snapshots against the target scene but `scene_settings_apply_snapshot` does. |
+| 4 | Tell the truth about "+ Feel" | `rg 'frame->events' src/scene_*.c` returns exactly two consumers: `scene_loom.c:88` (routes via `semantic_lane_sample`, which needs 4 values and skips a 1-value manual event) and `scene_constellation.c:92-114`. `README.md:187` claims no coverage limit. | ~15 minutes, zero risk. README + the tooltip at `plug.c:2062-2064`. Do **not** change the payload shape: `semantic_lane.c`'s 4-value rule is contract-defined and pinned by `tests/test_semantic_lane.c:39`. |
+| 5 | Timeline control row / timecode collision | `controls.width` computes 592 while children extend to 628 (`plug.c:2052-2068,2125`) and is never read. Visible in `panel-tune-min.png`: the timecode prints through "+ Custom" and "Clear manual" below ~1125 px workspace width. | Extract a `timeline_ui_layout` taking a `Caption_Measure_Text`-style callback; parent-from-children by construction. |
+| 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
+| 7 | Tune inspector: collapse the empty PRESETS block | 214 px of chrome precedes the first slider; the empty block costs 98 px for one live control. | Skip the placeholder and the three disabled buttons when `preset_count == 0`. `tests/adapters/test_scene_quality.py:79/82/134` pin literal source strings -- preserve them or move the assertions in the same diff. |
+| 8 | Caption geometry, resolution independence | Caption size is `min(42*ps, max(20*ps, h*0.047))` (`plug.c:1072`) where `pixel_scale` is only the supersample factor, so the 42 px cap binds above 893 px and the same cue is typeset at 4.7% of frame height at 720p and 1.944% at 2160p. | Prerequisite for D1. Verify 720p output is byte-identical first as a canary. Keep `border = 1.0f * pixel_scale`. |
+| 9 | Lyric text field: caret, selection, paste | `lyrics_editor_ui.c:164-180` is the whole implementation -- backspace, escape, append. `GetClipboardText` appears nowhere in `src/`. | Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Paste must be refused whole when over-long, never cut mid-sequence: `validate_text` rejects truncated UTF-8. Bump `PLUG_STATE_VERSION`. |
+| 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |
+| 11 | Cadence timing | `hold = cadence_smooth((1-p)*9)` crosses 0.5 at `p = 17/18` (`scene_cadence.c:446`); `active && hold > 0.5f` at `:460` feeds the non-active arm a `focus < 0.5`, yielding 0, gated out at `:381`. Reachable when a ~12-word line ends in a short word. | **State the symptom precisely**: `wants_particles` is `focus < 0.985` with alpha 0.88, so the word still renders as a particle cloud -- it is never *legible type*, not never drawn. Changes exported pixels; needs a real render plus `ffprobe`. |
+
+### Decision gates -- do not start without an answer
+
+| ID | Question | Recommendation |
+| --- | --- | --- |
+| D1 | `.musi` caption typography (face, size, colour, box, anchor). Root required set is `mask & 0xff` (`project_io.c:215`) so an optional root member parses with no migration. Needs schema, codec, validation, fixtures, `musi_project_editor_support` rejection and compatibility notes together. Cadence bypasses the shared overlay entirely (`plug.c:1143`) and typesets at `height*0.20*scale`. | Ship item 8 first; take this as its own session. Sub-questions: is rejection by older builds acceptable and documented in `packaging/PRODUCT_READINESS.md`; bundled faces only or content-addressed fonts in `<stem>.assets/` with SHA-256 verify-before-use; does `CAPTION_LAYOUT_MAX_LINES 3` become runtime-selectable (it sizes `lines[]` and is baked into the documented ellipsis contract). |
+| D2 | 960x640 collapse policy. At 208 px against a 215 px scene-browser floor, something must disappear. | Current shipped behaviour hides the track list first and the tracks panel last. Surfacing Open/Add/Save from the toolbar in the hidden state is unimplemented. |
+| D4 | Scene-plan editing UI shape. | A dedicated row under the waveform, not hit-testing the 1-3 px markers. Item 10's lane drag wants the same press -- the two must agree on `active_button_id` ownership before either is written. |
+| D5 | "+ Feel" scene coverage. Widening it changes exported pixels in every scene it touches. | 3-4 scenes where a brief transient accent is defensible, documented, rather than wiring all ten into noise. `scene_constellation.c:104` uses `fabsf(event->values[0])`, so the existing 1.0f payload keeps today's flare strength. |
+| D6 | Tune `row_height` 76 -> 64 and an interactive inspector scrollbar. | Both real wins, both the most bug-prone edits in the backlog. `row_height` couples to a bare `- 35.0f` at `plug.c:4432` six hundred lines away with no headless test. The scrollbar handler must be hoisted **above** the row loop or `scene_setting_slider` claims `active_button_id` first and drives a value to max. |
+
+### Gaps a completeness critic found that no finding covered
+
+- **Picking a scene silently discards the scene plan.** `track_select_base_scene`
+  (`plug.c:832-843`) sets `scene_switches.enabled = false`, marks dirty, and
+  autosave commits 1.5 s later. The notice says only "Base scene changed". This
+  is a literal reading of the "setting scene changes is impractical" complaint
+  and is the same family as the command-line autosave defect already fixed.
+- **The landing screen was never reviewed.** Three of the reference captures are
+  landing states and no finding mentions them; at 1080p content occupies the
+  left ~66% x top ~50%.
+- **No keyboard operability at all.** No `KEY_TAB`, no focus index, no focus ring
+  anywhere in `src/`; every control is mouse-only.
+- **Lyric script coverage.** `caption_layout.c:12-30` loads Latin/Greek/Cyrillic
+  only. `.musi` will validate, persist and export a Japanese or Arabic cue that
+  renders as missing glyphs, with no warning. Per-codepoint drawing means no
+  shaping or bidi even with a bundled face. This is the part of the typography
+  complaint that blocks non-Latin users.
+- **Microphone capture and the export panel** are unopened subsystems: no
+  finding, no screenshot, no plan line.
+- **No undo for new destructive operations.** Item 3 adds persisted mutations
+  that autosave in 1.5 s; the only undo in the app is one bulk snapshot for
+  "Clear manual".
+- **The fixture is not a real project.** One track, eight cues, forty seconds, no
+  presets. The row-count arithmetic above is derived from that shape; a 200-cue,
+  multi-track, preset-populated project changes the character of the lyrics list,
+  the scene-cue lane and the tracks list.
+- **Panel exclusivity is never questioned.** Only one bottom panel can be open at
+  a time, so each is paid for out of the stage. That structural choice is
+  plausibly the root of the display-space complaint.
+- `CHANGELOG.txt` is still upstream tsoding's and has never been touched by this
+  fork.
+
+### Sequencing constraints
+
+Items 6 and any further panel-height work share one vertical budget with
+`workspace_sidebar_layout` and `lyric_editor_panel_height`; change them together.
+Items 3 and 10 both want the press inside the 22 px lane. Item 8 is a
+prerequisite for D1. Each new engine `.c` must appear in **both** lists in
+`src_build/nob_stage2.c`; test files are globbed and need no registration.
+
 ## Session log
 
 ### 2026-07-10 - Orientation and roadmap
@@ -1153,6 +1230,33 @@ failure-path test.
 - Explicitly deferred: Demucs stems, external forced aligners, online lyric
   lookup, word-level timing in the C model, CUDA whisper rebuild (the /tmp
   whisper.cpp build is CPU-only; a toolkit install is the user's call).
+
+### 2026-07-25 / 2026-07-26 - headless UI review loop and the defects it found
+
+- Built a non-disruptive UI review workflow: `--ui-probe` sets deterministic
+  workspace state, `tools/ui_capture.sh` renders the `tools/ui_states.txt`
+  catalogue (32 states) on a private Xvfb display with the operator's Wayland and
+  PulseAudio handles removed, each state against a throwaway fixture copy.
+  `tools/UI_REVIEW.md` documents the loop and its limits.
+- Fixed, each with headless regression coverage: track identity showing a
+  SHA-256 asset digest as a track name; per-button shrink-to-fit typography
+  (eight rows now share one size, `ui_row_typography.c`); timeline tick labels at
+  1.16:1 contrast; command-line flags rewriting the opened `.musi` through
+  autosave; a zero-height tracks panel registering hit boxes over the scene grid
+  (`workspace_layout.c`); the lyric editor drawing Apply/Discard/Delete past the
+  bottom of the framebuffer at every window size (`lyrics_editor_layout.c`).
+- Two findings were investigated and **refuted**, and are recorded so they are
+  not re-reported: Loom filling part of the stage is an intended reveal
+  proportional to elapsed track time; Cadence's final word is temporally
+  invisible, not truncated.
+- A 116-agent audit with adversarial verification produced the backlog above:
+  34 findings examined, 11 killed, 23 survived. Full synthesis and completeness
+  critique were session-scoped; everything durable is captured in the backlog
+  section.
+- Learned, the hard way: a capture that cannot reach a state cannot review it.
+  The two worst defects were invisible until `assist=confirm` and `lyric=N`
+  existed. And a test that terminates `xvfb-run` orphans the application beneath
+  it, which then spins a core headlessly forever.
 
 ## Milestones
 
