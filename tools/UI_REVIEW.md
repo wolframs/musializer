@@ -96,10 +96,19 @@ grabbed. See `Plug_Ui_Probe` in `src/plug.h`.
 | `time` | seconds | Requires a loaded, seekable track |
 | `play` | `0`, `1` | Default `0` |
 | `size` | `WIDTHxHEIGHT` | Clamped by `SetWindowMinSize` |
+| `lyric` | cue index, 1-based | Selects an existing cue; needs `panel=lyrics` |
+| `assist` | `confirm` | Arms the confirmation prompt; needs `panel=assist` |
 
 It applies the same state transition the corresponding button performs, rather
 than injecting synthetic mouse or keyboard events, and it never touches project
-data or marks a project dirty. An unknown key, a repeated key, an unparsable
+data or marks a project dirty. Selecting a cue copies the canonical values into
+the draft, so nothing becomes dirty and no unsaved-work guard is armed.
+
+Reaching a state matters more than it sounds. The two worst defects found so far
+-- action buttons registering hit boxes outside a collapsed panel, and an editing
+form drawn past the bottom of the screen -- were both invisible to capture until
+`assist=confirm` and `lyric=N` existed. If a surface cannot be photographed, it
+does not get reviewed. An unknown key, a repeated key, an unparsable
 value, or a panel requested without a track is an error, so a typo in a capture
 script cannot quietly photograph the wrong state.
 
