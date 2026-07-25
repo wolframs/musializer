@@ -143,6 +143,7 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
     bool seen_time = false;
     bool seen_play = false;
     bool seen_assist = false;
+    bool seen_lyric = false;
     char *cursor = buffer;
     while (cursor != NULL && *cursor != '\0') {
         char *comma = strchr(cursor, ',');
@@ -169,6 +170,17 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
                 return false;
             }
             seen_play = true;
+        } else if (strcmp(key, "lyric") == 0) {
+            unsigned long index = 0;
+            char *end = NULL;
+            errno = 0;
+            index = strtoul(value, &end, 10);
+            if (seen_lyric || end == value || *end != '\0' || errno != 0 ||
+                index == 0 || index > 4096) {
+                return false;
+            }
+            request->probe.lyric_selection = (unsigned)index;
+            seen_lyric = true;
         } else if (strcmp(key, "assist") == 0) {
             if (seen_assist || strcmp(value, "confirm") != 0) return false;
             request->probe.assist_confirmation = true;
@@ -235,6 +247,7 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          panel=none|tune|export|lyrics|assist,\n"
         "                          fullscreen=0|1, time=SECONDS, size=WIDTHxHEIGHT,\n"
         "                          assist=confirm arms the Assist confirmation\n"
+        "                          prompt, lyric=N selects the nth lyric cue\n"
         "                          prompt (needs panel=assist),\n"
         "                          play=0|1. The transport is parked unless\n"
         "                          play=1; audio-reactive scenes need play=1 but\n"

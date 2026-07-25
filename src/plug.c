@@ -37,6 +37,7 @@
 #include "ui_notice.h"
 #include "ui_theme.h"
 #include "ui_widgets.h"
+#include "lyrics_editor_layout.h"
 #include "workspace_layout.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
@@ -2902,6 +2903,13 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
     case PLUG_UI_PANEL_EXPORT: p->export_panel_open = true;    break;
     case PLUG_UI_PANEL_LYRICS: p->lyrics_editor_open = true;   break;
     case PLUG_UI_PANEL_ASSIST: p->assist_panel_open = true;    break;
+    }
+
+    if (probe.lyric_selection > 0) {
+        if (probe.panel != PLUG_UI_PANEL_LYRICS) return false;
+        if (track == NULL || probe.lyric_selection > track->lyrics.count) return false;
+        lyric_editor_ui_select(&p->lyric_editor, track,
+                               track->lyrics.cues[probe.lyric_selection - 1].id);
     }
 
     if (probe.assist_confirmation) {
@@ -6589,7 +6597,17 @@ static void preview_screen(void)
                     workspace_width - 12.0f, assist_content);
                 timeline_height = assist_timeline_height(
                     (float)h, toolbar_height, assist_layout.required_height);
-            } else if (p->lyrics_editor_open || p->export_panel_open) {
+            } else if (p->lyrics_editor_open) {
+                // The editor used to get a fixed 172 px panel out of a constant
+                // 330 px timeline, so its action row was drawn below the bottom
+                // of the window at every supported size. Ask for the height the
+                // content needs instead. See lyrics_editor_layout.h.
+                Track *lyric_track = current_track();
+                size_t cue_count = lyric_track != NULL ? lyric_track->lyrics.count : 0;
+                timeline_height = assist_timeline_height(
+                    (float)h, toolbar_height,
+                    lyric_editor_panel_height((float)h, cue_count));
+            } else if (p->export_panel_open) {
                 timeline_height = 330.0f;
                 if (timeline_height > h - toolbar_height - 180.0f) {
                     timeline_height = fmaxf(150.0f,

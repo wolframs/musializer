@@ -91,6 +91,11 @@ typedef struct {
     // Arm the Assist confirmation prompt, the two-click state that shrinks the
     // sidebar far enough to collapse the tracks panel. UI state only.
     bool assist_confirmation;
+    // Select the nth existing lyric cue (1-based; 0 selects none). Selecting
+    // copies the canonical cue into the draft, so nothing becomes dirty. Without
+    // it no capture can show the cue-editing form, which is where the panel's
+    // worst layout defects live.
+    unsigned lyric_selection;
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

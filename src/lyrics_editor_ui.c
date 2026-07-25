@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "lyrics_editor_layout.h"
 #include "scene.h"
 #include "thirdparty/tinyfiledialogs.h"
 
@@ -469,6 +470,14 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
     if (text_button_sized(services, UINT64_C(0x4C59524943414444), add,
                           document_labels[2], false, document_font) & BS_CLICKED) {
         if (lyric_editor_ui_allow_context_change(editor, track, services)) lyric_editor_ui_begin_new(editor, track);
+    }
+
+    // A panel too short for the form must show the list alone rather than draw
+    // Apply, Discard and Delete past its own bottom edge, which is what shipped.
+    if (!lyric_editor_form_fits(boundary.height)) {
+        DrawTextEx(svc_font(services), "Enlarge the window to edit a cue.",
+                   (Vector2){form.x, form.y}, 15.0f, 1.0f, COLOR_UI_MUTED);
+        return;
     }
 
     bool has_draft = editor->draft_new || editor->selected_id != 0;
