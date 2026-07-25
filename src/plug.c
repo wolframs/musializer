@@ -2768,6 +2768,66 @@ MUSIALIZER_PLUG bool plug_load_analysis_bridge(const char *file_path)
     return applied;
 }
 
+// Diagnostics-only workspace state for headless capture. See Plug_Ui_Probe in
+// plug.h: this mirrors the panel exclusivity the toolbar buttons enforce and
+// parks the transport so repeated runs render the same frame. It deliberately
+// leaves project state untouched, so it never marks the project dirty and
+// never participates in the unsaved-work guards.
+MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
+{
+    // Rendering owns the transport and the framebuffer; probing it would
+    // capture a half-published export rather than a UI state.
+    if (p == NULL || p->rendering) return false;
+    if (probe.seek_requested && !isfinite(probe.seek_seconds)) return false;
+
+    switch (probe.panel) {
+    case PLUG_UI_PANEL_NONE:
+    case PLUG_UI_PANEL_TUNE:
+    case PLUG_UI_PANEL_EXPORT:
+    case PLUG_UI_PANEL_LYRICS:
+    case PLUG_UI_PANEL_ASSIST:
+        break;
+    default:
+        return false;
+    }
+
+    Track *track = current_track();
+    // Every panel below is a per-track workspace surface. Without a track the
+    // landing page is drawn instead, so an accepted probe would silently
+    // capture the wrong screen.
+    if (track == NULL && (probe.panel != PLUG_UI_PANEL_NONE || probe.seek_requested)) {
+        return false;
+    }
+
+    p->export_panel_open = false;
+    p->lyrics_editor_open = false;
+    p->assist_panel_open = false;
+    p->scene_settings_open = false;
+    p->lyric_editor.text_active = false;
+    p->fullscreen = probe.fullscreen;
+
+    switch (probe.panel) {
+    case PLUG_UI_PANEL_NONE:   break;
+    case PLUG_UI_PANEL_TUNE:   p->scene_settings_open = true;  break;
+    case PLUG_UI_PANEL_EXPORT: p->export_panel_open = true;    break;
+    case PLUG_UI_PANEL_LYRICS: p->lyrics_editor_open = true;   break;
+    case PLUG_UI_PANEL_ASSIST: p->assist_panel_open = true;    break;
+    }
+
+    if (probe.seek_requested) {
+        if (!track->transport_seekable) return false;
+        seek_track_to(track, probe.seek_seconds);
+    }
+    // A running transport makes every capture a different frame. Park it after
+    // seeking, because seek_track_to resumes the stream to refill the decoder.
+    if (track != NULL) {
+        bool stream_playing = IsMusicStreamPlaying(track->music);
+        if (probe.playing && !stream_playing) ResumeMusicStream(track->music);
+        else if (!probe.playing && stream_playing) PauseMusicStream(track->music);
+    }
+    return true;
+}
+
 MUSIALIZER_PLUG bool plug_set_auto_scenes(bool enabled)
 {
     Track *track = current_track();

@@ -192,6 +192,7 @@ static const char *distribution_support_files[] = {
     "resources/fonts/SpaceGrotesk-OFL.txt",
     "tools/ANALYSIS_ADAPTERS.md",
     "tools/MEASURED_ANALYSIS.md",
+    "tools/UI_REVIEW.md",
     "tools/analysis_io.py",
     "tools/analyze_audio.py",
     "tools/external_analysis.py",

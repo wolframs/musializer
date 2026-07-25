@@ -1,0 +1,48 @@
+# UI capture catalogue for tools/ui_capture.sh.
+#
+# Format: name|WIDTHxHEIGHT|args
+# PROJECT is replaced by the fixture project from tools/ui_fixture.sh.
+#
+# Sizes cover the three that matter: 1280x720 (the default window), 1920x1080
+# (a typical real display), and 960x640 (SetWindowMinSize, the smallest layout
+# the application permits). Chrome and panels are captured with the transport
+# parked so repeated runs are comparable; scenes use play=1 because the
+# analyzer is fed by the audio callback and a parked transport decays every
+# audio-reactive scene toward its idle state.
+
+# --- entry state ---
+landing-720p|1280x720|--ui-probe size=1280x720
+landing-1080p|1920x1080|--ui-probe size=1920x1080
+landing-min|960x640|--ui-probe size=960x640
+
+# --- default workspace, playhead parked inside a lyric cue ---
+workspace-720p|1280x720|--project PROJECT --ui-probe panel=none,time=6,size=1280x720
+workspace-1080p|1920x1080|--project PROJECT --ui-probe panel=none,time=6,size=1920x1080
+workspace-min|960x640|--project PROJECT --ui-probe panel=none,time=6,size=960x640
+
+# --- expanded panels, including the sizes where they are known to overflow ---
+panel-lyrics-720p|1280x720|--project PROJECT --ui-probe panel=lyrics,time=6,size=1280x720
+panel-lyrics-1080p|1920x1080|--project PROJECT --ui-probe panel=lyrics,time=6,size=1920x1080
+panel-lyrics-min|960x640|--project PROJECT --ui-probe panel=lyrics,time=6,size=960x640
+panel-tune-720p|1280x720|--project PROJECT --ui-probe panel=tune,time=6,size=1280x720
+panel-tune-min|960x640|--project PROJECT --ui-probe panel=tune,time=6,size=960x640
+panel-export-720p|1280x720|--project PROJECT --ui-probe panel=export,time=6,size=1280x720
+panel-export-min|960x640|--project PROJECT --ui-probe panel=export,time=6,size=960x640
+panel-assist-720p|1280x720|--project PROJECT --ui-probe panel=assist,time=6,size=1280x720
+panel-assist-min|960x640|--project PROJECT --ui-probe panel=assist,time=6,size=960x640
+
+# --- fullscreen stage, where caption typography is judged against the frame ---
+fullscreen-720p|1280x720|--project PROJECT --ui-probe panel=none,fullscreen=1,time=6,play=1,size=1280x720
+fullscreen-1080p|1920x1080|--project PROJECT --ui-probe panel=none,fullscreen=1,time=6,play=1,size=1920x1080
+
+# --- scene framing sweep: one scene each, same playhead, transport running ---
+scene-spectrum|1280x720|--project PROJECT --scene spectrum --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-pulse|1280x720|--project PROJECT --scene pulse --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-orbital|1280x720|--project PROJECT --scene orbital --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-ascii|1280x720|--project PROJECT --scene ascii --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-atlas|1280x720|--project PROJECT --scene atlas --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-terrarium|1280x720|--project PROJECT --scene terrarium --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-constellation|1280x720|--project PROJECT --scene constellation --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-cadence|1280x720|--project PROJECT --scene cadence --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-loom|1280x720|--project PROJECT --scene loom --ui-probe panel=none,time=6,play=1,size=1280x720
+scene-pentagram|1280x720|--project PROJECT --scene pentagram --ui-probe panel=none,time=6,play=1,size=1280x720

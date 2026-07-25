@@ -99,6 +99,95 @@ static bool parse_resolution(const char *text, uint32_t *width, uint32_t *height
            parse_positive_u32(separator + 1, height);
 }
 
+// `--ui-probe` request: the workspace state handed to the plug plus the window
+// geometry, which is the host's to set. See Plug_Ui_Probe in plug.h.
+typedef struct {
+    Plug_Ui_Probe probe;
+    uint32_t width;
+    uint32_t height;
+    bool size_requested;
+} Command_Line_Ui_Probe;
+
+static bool parse_ui_probe_panel(const char *text, Plug_Ui_Panel *panel)
+{
+    if (strcmp(text, "none")   == 0) { *panel = PLUG_UI_PANEL_NONE;   return true; }
+    if (strcmp(text, "tune")   == 0) { *panel = PLUG_UI_PANEL_TUNE;   return true; }
+    if (strcmp(text, "export") == 0) { *panel = PLUG_UI_PANEL_EXPORT; return true; }
+    if (strcmp(text, "lyrics") == 0) { *panel = PLUG_UI_PANEL_LYRICS; return true; }
+    if (strcmp(text, "assist") == 0) { *panel = PLUG_UI_PANEL_ASSIST; return true; }
+    return false;
+}
+
+static bool parse_ui_probe_flag(const char *text, bool *value)
+{
+    if (strcmp(text, "1") == 0) { *value = true;  return true; }
+    if (strcmp(text, "0") == 0) { *value = false; return true; }
+    return false;
+}
+
+// Parses "key=value[,key=value...]". A repeated key, an unknown key, or an
+// unparsable value is an error rather than a silent default, so a typo in a
+// capture script cannot quietly photograph the wrong UI state.
+static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
+{
+    if (spec == NULL || request == NULL) return false;
+    *request = (Command_Line_Ui_Probe) {0};
+
+    char buffer[256];
+    size_t length = strlen(spec);
+    if (length == 0 || length >= sizeof(buffer)) return false;
+    memcpy(buffer, spec, length + 1);
+
+    bool seen_panel = false;
+    bool seen_fullscreen = false;
+    bool seen_time = false;
+    bool seen_play = false;
+    char *cursor = buffer;
+    while (cursor != NULL && *cursor != '\0') {
+        char *comma = strchr(cursor, ',');
+        if (comma != NULL) *comma++ = '\0';
+        char *equals = strchr(cursor, '=');
+        if (equals == NULL || equals == cursor || equals[1] == '\0') return false;
+        *equals = '\0';
+        const char *key = cursor;
+        const char *value = equals + 1;
+
+        if (strcmp(key, "panel") == 0) {
+            if (seen_panel || !parse_ui_probe_panel(value, &request->probe.panel)) {
+                return false;
+            }
+            seen_panel = true;
+        } else if (strcmp(key, "fullscreen") == 0) {
+            if (seen_fullscreen ||
+                !parse_ui_probe_flag(value, &request->probe.fullscreen)) {
+                return false;
+            }
+            seen_fullscreen = true;
+        } else if (strcmp(key, "play") == 0) {
+            if (seen_play || !parse_ui_probe_flag(value, &request->probe.playing)) {
+                return false;
+            }
+            seen_play = true;
+        } else if (strcmp(key, "time") == 0) {
+            if (seen_time || !parse_seconds(value, &request->probe.seek_seconds)) {
+                return false;
+            }
+            request->probe.seek_requested = true;
+            seen_time = true;
+        } else if (strcmp(key, "size") == 0) {
+            if (request->size_requested ||
+                !parse_resolution(value, &request->width, &request->height)) {
+                return false;
+            }
+            request->size_requested = true;
+        } else {
+            return false;
+        }
+        cursor = comma;
+    }
+    return true;
+}
+
 static void print_command_line_help(FILE *stream, const char *program)
 {
     fprintf(stream,
@@ -135,6 +224,15 @@ static void print_command_line_help(FILE *stream, const char *program)
         "Diagnostics:\n"
         "  --mute                  Start with the output volume at zero\n"
         "  --reload-once           Exercise one hot-reload handoff\n"
+        "  --ui-probe SPEC         Open a workspace panel and park the transport\n"
+        "                          for reproducible headless UI capture. SPEC is\n"
+        "                          comma-separated key=value pairs:\n"
+        "                          panel=none|tune|export|lyrics|assist,\n"
+        "                          fullscreen=0|1, time=SECONDS, size=WIDTHxHEIGHT,\n"
+        "                          play=0|1. The transport is parked unless\n"
+        "                          play=1; audio-reactive scenes need play=1 but\n"
+        "                          then capture a frame that is not reproducible.\n"
+        "                          Every panel except none needs a loaded track\n"
         "  -h, --help              Show this help without opening a window\n"
         "  --version               Show the version\n",
         program != NULL && program[0] != '\0' ? program : "musializer");
@@ -212,6 +310,8 @@ int main(int argc, char **argv)
     bool command_line_error = false;
     bool reload_once = false;
     bool auto_scenes = false;
+    bool ui_probe_requested = false;
+    Command_Line_Ui_Probe ui_probe = {0};
     uint32_t render_width = 0;
     uint32_t render_height = 0;
     uint32_t render_fps = 0;
@@ -356,6 +456,19 @@ int main(int argc, char **argv)
             reload_once = true;
             continue;
         }
+        if (strcmp(argv[i], "--ui-probe") == 0) {
+            if (i + 1 >= argc || !parse_ui_probe(argv[++i], &ui_probe)) {
+                TraceLog(LOG_WARNING,
+                         "Invalid --ui-probe spec; expected comma-separated "
+                         "panel=, fullscreen=, time=, or size= pairs");
+                command_line_error = true;
+            } else {
+                // Deferred until every input is loaded: a panel probe is only
+                // meaningful once its track exists.
+                ui_probe_requested = true;
+            }
+            continue;
+        }
         if (IsFileExtension(argv[i], ".musi") ?
             !plug_load_project(argv[i]) : !plug_load_track(argv[i])) {
             TraceLog(LOG_WARNING, "Could not load command-line track: %s", argv[i]);
@@ -403,6 +516,23 @@ int main(int argc, char **argv)
         (command_line_error || !plug_save_project(project_output))) {
         TraceLog(LOG_WARNING, "Could not save command-line project: %s", project_output);
         command_line_error = true;
+    }
+    if (ui_probe_requested && !command_line_error) {
+        // Geometry is the host's; the plug owns workspace state. GLFW clamps to
+        // the minimum window size, so a deliberately tiny probe still captures
+        // the smallest layout the application actually permits.
+        if (ui_probe.size_requested) {
+            SetWindowSize((int)ui_probe.width, (int)ui_probe.height);
+        }
+        // Park the window at the origin so a capture of a display sized to the
+        // window needs no guesswork about where the compositor placed it.
+        SetWindowPosition(0, 0);
+        if (!plug_apply_ui_probe(ui_probe.probe)) {
+            TraceLog(LOG_WARNING,
+                     "Could not apply --ui-probe state; a panel or seek probe "
+                     "needs a loaded, seekable track");
+            command_line_error = true;
+        }
     }
 
     bool exit_after_render = false;

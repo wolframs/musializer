@@ -59,6 +59,37 @@ typedef struct {
     Event_Record events[EVENT_TIMELINE_CAPACITY];
 } Plug_Reload_Handoff;
 
+// Deterministic workspace state for headless UI capture (`--ui-probe`).
+//
+// This is a diagnostics-only surface. It opens exactly one workspace panel and
+// parks the transport so a screenshot of a given state is reproducible across
+// runs; it never mutates project data and never marks a project dirty. It is
+// the state-transition equivalent of the button a user would click, so a probe
+// capture shows the same UI a real interaction produces -- it is deliberately
+// not synthetic mouse/keyboard injection.
+typedef enum {
+    PLUG_UI_PANEL_NONE = 0,
+    PLUG_UI_PANEL_TUNE,
+    PLUG_UI_PANEL_EXPORT,
+    PLUG_UI_PANEL_LYRICS,
+    PLUG_UI_PANEL_ASSIST,
+} Plug_Ui_Panel;
+
+typedef struct {
+    Plug_Ui_Panel panel;
+    bool fullscreen;
+    // Seeking needs a loaded, seekable track; the probe fails rather than
+    // silently capturing an unintended playhead.
+    bool seek_requested;
+    double seek_seconds;
+    // Leave the transport running. The spectrum analyzer is fed by the audio
+    // callback, so a parked transport decays audio-reactive scenes toward their
+    // idle state: judging scene visuals needs playback, at the cost of a
+    // frame-exact reproducible capture. Chrome and panel layout should be
+    // captured parked.
+    bool playing;
+} Plug_Ui_Probe;
+
 #define LIST_OF_PLUGS \
     PLUG(plug_init, void, void) \
     PLUG(plug_pre_reload, void*, void) \
@@ -74,6 +105,7 @@ typedef struct {
     PLUG(plug_add_scene_route, bool, const char*) \
     PLUG(plug_load_analysis_bridge, bool, const char*) \
     PLUG(plug_set_auto_scenes, bool, bool) \
+    PLUG(plug_apply_ui_probe, bool, Plug_Ui_Probe) \
     PLUG(plug_configure_render, bool, uint32_t, uint32_t, uint32_t, const char*) \
     PLUG(plug_configure_render_window, bool, double, double) \
     PLUG(plug_start_render, bool, const char*) \

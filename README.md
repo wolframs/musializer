@@ -455,6 +455,17 @@ Rebuild while the application is running, focus its window, and press
 <kbd>h</kbd> to load the new plug. `--reload-once` with a track or scripted
 render performs one automated handoff smoke.
 
+`--ui-probe` opens a chosen workspace panel and parks the transport so the
+interface can be photographed reproducibly on a headless display, for example
+`--ui-probe panel=lyrics,time=6,size=1280x720`. It is a diagnostics flag: it
+applies the same state transition the matching button performs, never mutates
+project data, and rejects an unknown key or a panel requested without a loaded
+track. `tools/ui_capture.sh` drives it over the catalogue in
+`tools/ui_states.txt` to render every supported UI state to PNGs on a private
+Xvfb display, leaving the operator's desktop session and audio server
+untouched. [tools/UI_REVIEW.md](tools/UI_REVIEW.md) describes the review loop
+and its limits. This has been exercised on Linux only.
+
 Coding agents should follow the checkout's local `AGENTS.md` when present. It
 records the project-format, rendering, privacy, UI-state, cross-platform, test,
 and packaging invariants that a local change must preserve. The durable roadmap
