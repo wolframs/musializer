@@ -38,6 +38,7 @@
 #include "ui_theme.h"
 #include "ui_widgets.h"
 #include "lyrics_editor_layout.h"
+#include "timeline_layout.h"
 #include "workspace_layout.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
@@ -2069,13 +2070,6 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     const float controls_height = 38.0f;
     const float transport_height = 32.0f;
     const float margin = 6.0f;
-    const float event_button_width = 74.0f;
-    Rectangle controls = {
-        timeline_boundary.x + margin,
-        timeline_boundary.y + margin,
-        event_button_width*6.0f + margin*6.0f + 112.0f,
-        controls_height,
-    };
     const char *labels[6] = {"Lyrics", "Assist", "Export", "+ Feel", "+ Scene", "+ Custom"};
     const char *control_tooltips[6] = {
         "Edit timed lyric content and synchronization",
@@ -2094,13 +2088,41 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_LYRIC, EVENT_TYPE_SEMANTIC,
         EVENT_TYPE_CUE, EVENT_TYPE_CUSTOM
     };
+    const char *clear_label = p->event_undo_available ? "Undo clear" :
+                              p->clear_events_confirmation ? "Confirm clear" :
+                              "Clear manual";
+
+    // The timecode has to be measured before the row is placed, because the two
+    // share this strip and the row is what gives way. Drawing it afterwards and
+    // hoping is what let it print through "+ Custom" on narrow windows.
+    char played_time[32];
+    char total_time[32];
+    char timecode[72];
+    format_timestamp(played, played_time, sizeof(played_time));
+    format_timestamp(len, total_time, sizeof(total_time));
+    snprintf(timecode, sizeof(timecode), "%s / %s", played_time, total_time);
+    Vector2 timecode_size = MeasureTextEx(ui_font(), timecode, 22.0f, 1.0f);
+
+    Timeline_Band band;
+    if (!timeline_band_layout(timeline_boundary.x, timeline_boundary.y + margin,
+                              timeline_boundary.width, controls_height, margin,
+                              control_widths, 6, 112.0f, timecode_size.x, &band)) {
+        return;
+    }
+    Rectangle controls = {
+        band.controls.x, band.controls.y, band.controls.width, band.controls.height,
+    };
+
+    float scaled_widths[6];
+    for (size_t i = 0; i < 6; ++i) scaled_widths[i] = control_widths[i]*band.scale;
+
     // These widths are hand-tuned to just clear their labels. Sizing the row as a
     // whole means a future label change degrades evenly instead of leaving one
     // button's text visibly smaller than its neighbours'.
-    float control_font = row_font_size(labels, control_widths, 6, controls.height);
+    float control_font = row_font_size(labels, scaled_widths, 6, controls.height);
     float control_x = controls.x;
     for (size_t i = 0; i < 6; ++i) {
-        Rectangle boundary = {control_x, controls.y, control_widths[i], controls.height};
+        Rectangle boundary = {control_x, controls.y, scaled_widths[i], controls.height};
         // Each panel opener reflects its own panel. Export previously passed a
         // bare `i == 2`, so it rendered selected even while Lyrics or Assist
         // owned the workspace and two buttons claimed the open panel at once.
@@ -2146,12 +2168,11 @@ static void timeline(Rectangle timeline_boundary, Track *track)
                 record_timeline_event(track, types[i]);
             }
         }
-        control_x += control_widths[i] + margin;
+        control_x += scaled_widths[i] + margin*band.scale;
     }
-    Rectangle clear_boundary = {control_x, controls.y, 112.0f, controls.height};
-    const char *clear_label = p->event_undo_available ? "Undo clear" :
-                              p->clear_events_confirmation ? "Confirm clear" :
-                              "Clear manual";
+    Rectangle clear_boundary = {
+        band.clear.x, band.clear.y, band.clear.width, band.clear.height,
+    };
     int clear_state = p->clear_events_confirmation ?
         danger_text_button(UINT64_C(0x45564E54FFFFFFFF), clear_boundary,
                            clear_label, true) :
@@ -2188,18 +2209,11 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         }
     }
 
-    char played_time[32];
-    char total_time[32];
-    char timecode[72];
-    format_timestamp(played, played_time, sizeof(played_time));
-    format_timestamp(len, total_time, sizeof(total_time));
-    snprintf(timecode, sizeof(timecode), "%s / %s", played_time, total_time);
-    Vector2 timecode_size = MeasureTextEx(ui_font(), timecode, 22.0f, 1.0f);
-    DrawTextEx(ui_font(), timecode,
-               (Vector2){timeline_boundary.x + timeline_boundary.width -
-                         timecode_size.x - margin,
-                         timeline_boundary.y + 13.0f},
-               22.0f, 1.0f, COLOR_ACCENT);
+    if (band.timecode_inline) {
+        DrawTextEx(ui_font(), timecode,
+                   (Vector2){band.timecode.x, timeline_boundary.y + 13.0f},
+                   22.0f, 1.0f, COLOR_ACCENT);
+    }
 
     Rectangle transport = {
         timeline_boundary.x + margin,
@@ -2225,11 +2239,23 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         }
         seek_x += width + margin;
     }
+    // When the control row could not seat the timecode, it lands here instead of
+    // being drawn over the buttons. The hint text then has to yield the space it
+    // occupies, or the collision would simply have moved down one row.
+    float transport_right = transport.x + transport.width;
+    if (!band.timecode_inline) {
+        DrawTextEx(ui_font(), timecode,
+                   (Vector2){transport_right - timecode_size.x,
+                             transport.y + (transport.height - timecode_size.y)*0.5f},
+                   22.0f, 1.0f, COLOR_ACCENT);
+        transport_right -= timecode_size.x + margin*2.0f;
+    }
+
     const char *shortcut = track->transport_seekable ?
         "Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s" :
         "Precise seeking is unavailable for module audio";
     Vector2 shortcut_size = MeasureTextEx(ui_font(), shortcut, 12.0f, 1.0f);
-    if (seek_x + margin + shortcut_size.x < transport.x + transport.width) {
+    if (seek_x + margin + shortcut_size.x < transport_right) {
         DrawTextEx(ui_font(), shortcut,
                    (Vector2){seek_x + margin,
                              transport.y + (transport.height - shortcut_size.y)*0.5f},

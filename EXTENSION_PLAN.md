@@ -588,12 +588,23 @@ while building it that the original entry got wrong:
   pins this limit; if it ever fails, the control tables diverged and that is
   good news.
 
+**Item 5 landed (2026-07-26).** `src/timeline_layout.c` places the control row,
+the clear button and the timecode as one band with the parent extent computed
+from the children, plus 7 headless tests including a 1 px sweep from 680 to
+4000 px. The row scales down to share the strip and, past the readability
+floor, the timecode relocates to the transport row (where the shortcut hint now
+yields the space) instead of printing over the buttons. Verified by capture:
+`panel-tune-min` at 960x640 with the inspector open went from the timecode
+overprinting "+ Custom" and "Clear manual" to a clean row, while `workspace-min`
+is pixel-identical -- the fix does nothing where there was no problem. Note the
+original estimate of "~1125 px workspace width" was loose; the real threshold is
+`content - timecode - 12 px < 628 px`, and the narrowest supported band is 680 px
+(a 960 px window with the inspector open).
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
-| 5 | Timeline control row / timecode collision | `controls.width` computes 592 while children extend to 628 (`plug.c:2052-2068,2125`) and is never read. Visible in `panel-tune-min.png`: the timecode prints through "+ Custom" and "Clear manual" below ~1125 px workspace width. | Extract a `timeline_ui_layout` taking a `Caption_Measure_Text`-style callback; parent-from-children by construction. |
-| 5 | Timeline control row / timecode collision | `controls.width` computes 592 while children extend to 628 (`plug.c:2052-2068,2125`) and is never read. Visible in `panel-tune-min.png`: the timecode prints through "+ Custom" and "Clear manual" below ~1125 px workspace width. | Extract a `timeline_ui_layout` taking a `Caption_Measure_Text`-style callback; parent-from-children by construction. |
 | 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
 | 7 | Tune inspector: collapse the empty PRESETS block | 214 px of chrome precedes the first slider; the empty block costs 98 px for one live control. | Skip the placeholder and the three disabled buttons when `preset_count == 0`. `tests/adapters/test_scene_quality.py:79/82/134` pin literal source strings -- preserve them or move the assertions in the same diff. |
 | 8 | Caption geometry, resolution independence | Caption size is `min(42*ps, max(20*ps, h*0.047))` (`plug.c:1072`) where `pixel_scale` is only the supersample factor, so the 42 px cap binds above 893 px and the same cue is typeset at 4.7% of frame height at 720p and 1.944% at 2160p. | Prerequisite for D1. Verify 720p output is byte-identical first as a canary. Keep `border = 1.0f * pixel_scale`. |
