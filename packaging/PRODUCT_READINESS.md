@@ -53,21 +53,40 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 - **Disabled text is a house rule, not a conformance claim.** WCAG exempts
   disabled controls; the palette holds them above 3:1 and strictly below the
   muted colour so "unavailable" and "secondary" stay distinguishable.
-- **Captions are restylable, within a fixed set of faces.** Face, backing,
+- **Captions are restylable, and a face can be imported.** Face, backing,
   placement, size, width, inset and colour are authored in the Lyrics panel and
-  persisted in `.musi`. Two bundled faces are selectable. Importing an arbitrary
-  font is **not implemented**: the format reserves `caption_style.font` and the
-  validator enforces that an imported face carries its asset, but nothing
-  publishes or verifies that asset yet, so `musi_project_editor_support` rejects
-  such a project rather than opening it in a substitute face and autosaving the
-  substitution. Colour is chosen from swatches, not a full picker.
+  persisted in `.musi`. Two faces are bundled; a third can be imported from
+  Google Fonts inside the application. Colour is chosen from swatches, not a
+  full picker. Only the regular weight is imported: bold and italic are not
+  offered, and a family's variable axes are not exposed.
+- **Font import is an opt-in network boundary, separate from MiMo.** It
+  contacts `fonts.google.com`, `fonts.gstatic.com` and
+  `raw.githubusercontent.com`. Only a family name is sent -- no audio, lyrics,
+  or project data. Consent is asked once per application run and is
+  deliberately not persisted. Playback, rendering, measured analysis, and
+  Whisper/Codex lyric work never require it. The host list is enforced before
+  each request and again against the response URL, so a redirect cannot move
+  the boundary.
+- **An imported face is bundled with the project, and so is its licence.**
+  Both are content-addressed in `<stem>.assets/fonts/` and re-verified against
+  their SHA-256 on every open; a mismatch refuses the project rather than
+  substituting a face and autosaving the substitution. The licence travels
+  because copying a face into a shareable project is redistribution. A face
+  whose licence could not be retrieved is refused at download time. **This has
+  only been exercised against Google Fonts on Linux.** The catalogue and
+  stylesheet endpoints are not a published, versioned API; if Google changes
+  them, import fails with a message and everything else keeps working.
 - **A project with an explicit caption style will not open in an older build.**
   The codec rejects unknown root members by design, so `caption_style` is a
   one-way step for any file the editor has saved since this build. That is the
   cost of the strict-JSON contract and is not going to change.
-- **Non-Latin lyrics render as missing glyphs.** The bundled atlas covers
-  Latin, Greek and Cyrillic. A Japanese or Arabic cue validates, persists and
-  exports without warning, and per-codepoint drawing means no shaping or
+- **Non-Latin lyrics render as missing glyphs.** The atlas covers Latin, Greek
+  and Cyrillic, and an imported face is rasterized over that same set, so
+  importing one adds no script the renderer could not already draw. The browser
+  shows each family's coverage so a face that would produce empty boxes is
+  visible as such before it is downloaded. A Japanese or Arabic cue validates,
+  persists and exports without warning, and per-codepoint drawing means no
+  shaping or
   bidirectional support even with a different face.
 - No screen-reader support of any kind, and none is planned while the UI is a
   single immediate-mode canvas.

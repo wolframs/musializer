@@ -186,14 +186,35 @@ The normal workflow is:
    selection yet: text is edited at the end of the field.
 
    **Style** in the same panel governs how every cue is rendered: face
-   (Alegreya or Space Grotesk), backing (none, drop shadow, or the rounded
-   plate), one of nine placements in the frame, size, maximum width, inset from
-   the edges, and ink and plate colour. Every measurement is a fraction of the
-   frame rather than a pixel count, so a caption typeset against the preview
-   window exports the same at 720p and at 2160p. The settings are saved in the
-   project; a `.musi` written before this existed opens with the values that
-   reproduce its original appearance, and a project that carries an explicit
-   style will not open in an older build.
+   (Alegreya, Space Grotesk, or a face imported from Google Fonts), backing
+   (none, drop shadow, or the rounded plate), one of nine placements in the
+   frame, size, maximum width, inset from the edges, and ink and plate colour.
+   Every measurement is a fraction of the frame rather than a pixel count, so a
+   caption typeset against the preview window exports the same at 720p and at
+   2160p. The settings are saved in the project; a `.musi` written before this
+   existed opens with the values that reproduce its original appearance, and a
+   project that carries an explicit style will not open in an older build.
+
+   **Import a face...** opens a browser over the Google Fonts catalogue. It
+   searches by family and shows each one's category and which of the scripts
+   this build can draw it covers, so a face that would render your lyrics as
+   empty boxes is visible as such before you download it. Choosing one
+   downloads the regular weight and the licence it is distributed under, and
+   makes it the caption face.
+
+   This is a network feature and it asks first. Musializer contacts
+   `fonts.google.com` and `fonts.gstatic.com` for the list and the face, and
+   `raw.githubusercontent.com` for the licence. Only a family name is sent: no
+   audio, no lyrics, and no project data. Consent is asked once per run and is
+   not remembered between runs. Nothing else in the application needs it.
+
+   The face and its licence are copied into the project's `.assets/` bundle and
+   verified against their SHA-256 every time the project is opened, so sharing
+   the project shares a face that can be checked and terms that travel with it.
+   A face whose bytes no longer match is refused rather than quietly replaced
+   with a substitute: opening it in a fallback and then autosaving that
+   substitution would overwrite your choice. Only the regular weight is
+   imported; bold and italic are not.
 
    Timing can also be edited directly in the cue lane under the waveform. A
    click selects a cue and binds the form to it; <kbd>Ctrl</kbd>+click adds or
@@ -250,12 +271,14 @@ show hidden queue depth, and let actionable Assist failures reopen the review
 step or copy the immutable artifact/log path.
 
 Timed lyrics use the same caption layer in preview and export. Long cues wrap
-to three centered lines with a visible ellipsis. Captions are sized as a fixed
+to three centered lines with a visible ellipsis. Captions are sized as a
 fraction of frame height, so a cue composed against the preview keeps its
-proportions at every export resolution; there is no way yet to choose the
-caption face, size, or colour per project. The bundled font atlas covers
-accented Latin, Greek, Cyrillic, punctuation, currency, and common symbols;
-CJK fallback, bidirectional text, and complex-script shaping are not yet
+proportions at every export resolution. Face, backing, placement, size, width,
+inset, and colour are per project and saved with it, and a face can be imported
+from Google Fonts. The atlas covers accented Latin, Greek, Cyrillic,
+punctuation, currency, and common symbols -- an imported face is rasterized
+over the same set, so it contributes only the scripts it actually carries. CJK
+fallback, bidirectional text, and complex-script shaping are not yet
 implemented, so a cue in those scripts validates and exports as missing
 glyphs.
 
@@ -552,3 +575,11 @@ this fork retains that license and attribution. The upstream source remains at
 The bundled Space Grotesk interface face and Alegreya caption face are released
 under the SIL Open Font License 1.1. Their copyright and license notices are in
 [`resources/fonts`](resources/fonts).
+
+A caption face imported from Google Fonts is not covered by either of the
+above. Musializer downloads the licence that family is distributed under
+(OFL 1.1, Apache 2.0, or the Ubuntu Font Licence), stores it beside the face in
+the project's `.assets/` bundle, and records which one it is. If you share the
+project, the terms go with it. Musializer refuses to import a face whose
+licence it could not retrieve, but it does not interpret those terms for you --
+what they permit is between you and the licence.

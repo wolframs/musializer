@@ -100,6 +100,7 @@ grabbed. See `Plug_Ui_Probe` in `src/plug.h`.
 | `assist` | `confirm` | Arms the confirmation prompt; needs `panel=assist` |
 | `zoom` | factor >= 1 | Zooms the timeline strip about the playhead; `1` is the whole track |
 | `style` | `caption` | Shows the caption typography pane; needs `panel=lyrics` |
+| `fonts` | `consent` or a path | Shows the caption face browser; a path loads that family list from disk. Needs `panel=lyrics` |
 
 It applies the same state transition the corresponding button performs, rather
 than injecting synthetic mouse or keyboard events, and it never touches project
@@ -115,6 +116,14 @@ a mouse wheel, so without it every capture would show the whole track and a
 zoomed strip would be unreviewable. An unknown key, a repeated key, an unparsable
 value, or a panel requested without a track is an error, so a typo in a capture
 script cannot quietly photograph the wrong state.
+
+`fonts` carries an extra rule beyond reachability: **a capture run must never
+be the thing that opens a network boundary.** `fonts=consent` shows the panel
+that asks, before any request exists. `fonts=PATH` reads a family list from
+disk and grants consent locally, so the browsing state is photographable
+without a single packet leaving the machine. `tools/ui_fixture.sh` writes
+`fonts.tsv` for exactly this. The probe never starts a job, so no probe spec
+can cause a download.
 
 Some states are reached by environment rather than by probe key. The Tune
 inspector's preset block, for instance, cannot be populated by clicking from a
@@ -132,6 +141,13 @@ direct manipulation is therefore covered by headless tests of
 `lyric_lane_edit.c` -- hit zones, selection rules, drag clamping -- while the
 wiring between those rules and the mouse is only exercised by hand. Do not
 describe a lane drag as verified on the strength of a capture.
+
+The same limit applies to the caption face browser. Its consent panel and its
+list are reachable; its in-flight, cancelling, and failed panels are not,
+because reaching them means pressing "Download and use". Those transitions are
+covered by headless tests of `font_import_state.c`, and the end-to-end path was
+verified by rendering a project that uses a downloaded face. Neither of those
+is a screenshot, and neither should be described as one.
 
 Build such a fixture with the real serializer rather than hand-authoring the
 JSON; the store is strict and a hand-written file that fails to load leaves the

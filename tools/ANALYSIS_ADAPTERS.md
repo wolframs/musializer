@@ -256,6 +256,46 @@ persisted schema records the cross-item rule as
 `x-musializer-coverage: contiguous-full-duration`. Incomplete model timelines
 are rejected rather than silently promoted to a complete creative score.
 
+## Google Fonts caption faces
+
+`tools/google_fonts.py` is not an analysis adapter -- it produces no lane and
+touches no project -- but it is the other optional network capability, so it
+follows the same rules and is documented beside them.
+
+```console
+python3 tools/google_fonts.py --dry-run fetch "Space Mono" /tmp/out
+python3 tools/google_fonts.py catalogue build/fonts/catalogue.json \
+    --index build/fonts/catalogue.tsv
+python3 tools/google_fonts.py fetch "Space Mono" build/fonts/job
+```
+
+`catalogue` fetches the family list, reduces it to what a picker shows, caches
+the JSON, and optionally writes a bounded TSV index for the application.
+Families with no Latin subset are dropped: the caption atlas could not draw
+them, so offering one would download a face that renders empty boxes.
+
+`fetch` resolves a family to its regular-weight TrueType file, downloads it,
+retrieves the licence it is distributed under, and writes both plus a manifest.
+The stylesheet endpoint is requested without advertising woff2 support, which
+is what makes it answer with a `.ttf`: raylib has no woff2 decompressor, so a
+woff2 URL would download perfectly and then fail to load.
+
+Four hosts are permitted -- `fonts.google.com`, `fonts.googleapis.com`,
+`fonts.gstatic.com`, `raw.githubusercontent.com` -- and the list is enforced
+before each request and again against the response URL. Payloads are bounded,
+and the downloaded file must carry an sfnt magic number before it is written,
+so a captive portal's login page cannot land on disk named `.ttf`.
+
+A face whose licence cannot be retrieved is refused rather than downloaded
+without it: the application copies the face into a project bundle that gets
+shared, which is redistribution.
+
+The manifest is described by `schemas/font-import-v1.schema.json` and mirrored
+as one TSV row in `import.tsv`, which is what the application reads. Its
+digests are claims: the application re-hashes both files itself before either
+is used. `--dry-run` prints the hosts a real run would contact and opens no
+connection.
+
 ## Schemas and tests
 
 JSON Schemas live in `schemas/`. Run the dependency-free offline suite with:
@@ -265,4 +305,4 @@ python3 -m unittest discover -s tests/adapters -v
 ```
 
 All HTTP behavior in the suite uses injected mock transports; tests never call
-OpenRouter.
+OpenRouter or Google Fonts.

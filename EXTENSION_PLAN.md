@@ -680,26 +680,53 @@ gestures possible at all; and they want caption typography.
   appearance byte-for-byte -- confirmed by a 720p canary, and note the plate
   alpha is **0xB7**, not 0xB8, because raylib truncates `255*0.72`.
 
-**Not implemented, and deliberately rejected rather than degraded:** importing
-an arbitrary font. The operator asked for "bundled + import from Google Fonts",
-read as importing a downloaded OFL `.ttf`/`.otf` from disk. The format reserves
-`caption_style.font`, validation enforces face/asset agreement, and
-`musi_project_editor_support` returns
-`MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT` so such a project cannot be opened in
-a substitute face and then autosaved over. What is left to build:
+**Shipped 2026-07-26: importing a caption face from Google Fonts, in the
+application.** The operator's answer to the follow-up question was explicit --
+an in-application download, not a file dialog over a face already on disk -- so
+the separate decision this section used to defer was made rather than assumed.
 
-| Step | Where | Note |
-| --- | --- | --- |
-| `MUSI_PROJECT_ASSET_FONT` category | `project_io.h/.c` | Four lines: the enum, the `"fonts"` directory name, and two `category !=` guards. The copy/verify/publish machinery is already generic. |
-| Bundle on save | `plug.c` `save_project_to_path` | Mirror the ASCII image path exactly: `musi_project_bundle_asset` before `musi_project_atomic_write`, `musi_project_reference_published_asset` for metadata autosaves. This is the transactional write path; do not improvise here. |
-| Verify on open | `plug.c` project load | `musi_project_resolve_bundled_asset_path` plus a SHA-256 match **before** the face is used. Never fall back to an unverified external path. |
-| Track + runtime handle | `track.h`, `plug.c` | `caption_font_path`/`caption_font_sha256` beside the ASCII image pair; a `p->caption_imported_font` reloaded when the path changes. |
-| Import control | `lyrics_editor_ui.c` style pane | A third face choice plus a file dialog. The face must not become `imported` until the bytes verify and the font loads. |
-| Drop the rejection | `project.c` | Remove `MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT` and its readiness note together. |
+What landed:
 
-An in-application download from fonts.google.com is a **separate** decision: it
-would be a new network boundary and needs the same explicit opt-in and privacy
-disclosure as MiMo/OpenRouter. It is not implied by "import from Google Fonts".
+| Piece | Where |
+| --- | --- |
+| `MUSI_PROJECT_ASSET_FONT` category, and one function mapping category to directory instead of a ternary that treated every non-audio category as an image | `project_io.h/.c` |
+| `licence_path`/`licence_sha256`/`licence_name` on `Musi_Font_Asset`, validated as one fact | `project.h`, `project.c`, codec, schema |
+| Bundle face and licence before publication; one `bundle_project_asset` replaces three reuse-then-copy call sites | `plug.c` `save_project_to_path` |
+| Resolve and re-hash both on open, refusing rather than substituting | `plug.c` project load |
+| `caption_font_path`/`caption_licence_path` on `Track`; `p->caption_imported_font` keyed by path so a track switch or hot reload re-establishes the atlas | `track.h`, `plug.c` |
+| The helper: catalogue, fetch, licence retrieval, host allowlist, bounded payloads, sfnt sniff, `--dry-run` | `tools/google_fonts.py` |
+| Bounded TSV readers for the family list and the download manifest | `font_catalogue.c` |
+| Consent gating, per-job deadlines, panel selection, nonce fencing | `font_import_state.c` |
+| The browser pane, third face choice, and Remove | `lyrics_editor_ui.c` |
+| `fonts=consent` and `fonts=PATH` probe keys | `plug.h`, `musializer.c` |
+
+`MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT` was not deleted -- it was narrowed. The
+editor now accepts an imported face, but only at a path it could itself have
+written into the bundle; an absolute or traversing path is still refused,
+because that is a project this build would resolve to the fallback face and
+then autosave the substitution over.
+
+Evidence: Space Mono fetched live, bundled, reopened and rendered into a 720p
+MP4 that is visibly monospaced. One byte changed in either the face or its
+licence makes the project refuse to open; restoring it opens again.
+
+Left undone, on purpose:
+
+- **Only the regular weight.** Bold, italic, and variable axes are not offered.
+  One caption face is drawn, so a second weight would need a second atlas and a
+  reason to pick between them.
+- **Consent is per run and not persisted.** Deliberate, and the conservative
+  choice; if it becomes annoying, the fix is a per-user config file, which this
+  build does not have and should not grow casually.
+- **The download cannot be photographed.** The probe applies state transitions
+  and cannot press a button. The consent panel and the browsing list are
+  reachable from `--ui-probe`; the in-flight, failed, and cancelling panels are
+  not, and `tools/ui_states.txt` says so rather than implying coverage.
+- **The endpoints are not a published API.** `fonts.google.com/metadata/fonts`
+  and the `css2` stylesheet are what the Google Fonts website itself uses. If
+  they change, import fails with a message and nothing else is affected. A
+  keyed Developer API would be a per-user credential for a browse feature,
+  which is a worse trade.
 
 ### Remaining, safe to implement
 
@@ -712,7 +739,7 @@ disclosure as MiMo/OpenRouter. It is not implied by "import from Google Fonts".
 
 | ID | Question | Recommendation |
 | --- | --- | --- |
-| ~~D1~~ | ~~`.musi` caption typography~~ | **Answered and landed 2026-07-26.** Bundled faces only for now; `CAPTION_LAYOUT_MAX_LINES` stayed at 3 and is still baked into the documented ellipsis contract; Cadence still bypasses the shared overlay and is recorded in `cadence-overhauls-2026-07-26.md`. |
+| ~~D1~~ | ~~`.musi` caption typography~~ | **Answered and landed 2026-07-26**, including in-application Google Fonts import, which the operator asked for explicitly rather than leaving to a file dialog. Regular weight only; `CAPTION_LAYOUT_MAX_LINES` stayed at 3 and is still baked into the documented ellipsis contract; Cadence still bypasses the shared overlay and is recorded in `cadence-overhauls-2026-07-26.md`. |
 | D2 | 960x640 collapse policy. At 208 px against a 215 px scene-browser floor, something must disappear. | Current shipped behaviour hides the track list first and the tracks panel last. Surfacing Open/Add/Save from the toolbar in the hidden state is unimplemented. |
 | D4 | Scene-plan editing UI shape. The engine side is done: `scene_switch_remove`/`retime`/`retarget` are implemented and tested. | **Partly answered.** The operator asked for lyric-lane manipulation, which shipped, so the ownership question is settled: the lane claims the press for the whole gesture and releases it unconditionally when the button is up. Scene cues still have no editing UI. Whatever shape it takes must share that press discipline, and retarget must capture a fresh snapshot from the target scene or pass NULL -- reusing the outgoing cue's snapshot is silently wrong between two 8-control scenes. |
 | D5 | "+ Feel" scene coverage. Widening it changes exported pixels in every scene it touches. | 3-4 scenes where a brief transient accent is defensible, documented, rather than wiring all ten into noise. `scene_constellation.c:104` uses `fabsf(event->values[0])`, so the existing 1.0f payload keeps today's flare strength. |
