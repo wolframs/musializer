@@ -147,6 +147,15 @@ typedef struct Musi_Font_Asset {
     // Display name only. It labels the control; the bytes are identified by
     // their digest, never by this string.
     char family[MUSI_PROJECT_NAME_CAPACITY];
+    // Copying a face into <stem>.assets/fonts/ and handing someone the project
+    // is redistribution, and the OFL asks that its text travel with the bytes.
+    // The copyright notice already rides inside the TTF name table; this is the
+    // licence itself. Empty for a face imported from the user's own disk, where
+    // we know nothing about the terms and must not invent them: licence_name is
+    // then the only record, and it is whatever the user was told, not a claim.
+    char licence_path[MUSI_PROJECT_PATH_CAPACITY];
+    char licence_sha256[MUSI_PROJECT_ID_CAPACITY];
+    char licence_name[MUSI_PROJECT_NAME_CAPACITY];
 } Musi_Font_Asset;
 
 typedef struct Musi_Caption_Style {

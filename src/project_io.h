@@ -54,7 +54,15 @@ typedef enum {
 typedef enum Musi_Project_Asset_Category {
     MUSI_PROJECT_ASSET_AUDIO = 0,
     MUSI_PROJECT_ASSET_IMAGE,
+    MUSI_PROJECT_ASSET_FONT,
 } Musi_Project_Asset_Category;
+
+// Every category the bundle machinery will publish into. Adding a category
+// without adding it here is a compile-time-silent, runtime-rejected mistake.
+bool musi_project_asset_category_valid(Musi_Project_Asset_Category category);
+// The <stem>.assets/ subdirectory a category is stored under.
+const char *musi_project_asset_category_directory(
+    Musi_Project_Asset_Category category);
 
 typedef enum Musi_Project_Bundle_Result {
     MUSI_PROJECT_BUNDLE_OK = 0,

@@ -164,12 +164,32 @@ Musi_Project_Validation musi_project_validate(const Musi_Project *project)
         (caption->face == MUSI_CAPTION_FACE_IMPORTED) != caption->font.present ||
         (!caption->font.present &&
          (caption->font.path[0] != '\0' || caption->font.sha256[0] != '\0' ||
-          caption->font.family[0] != '\0')) ||
+          caption->font.family[0] != '\0' ||
+          caption->font.licence_path[0] != '\0' ||
+          caption->font.licence_sha256[0] != '\0' ||
+          caption->font.licence_name[0] != '\0')) ||
         (caption->font.present &&
          (!bounded_string(caption->font.path, sizeof(caption->font.path), false) ||
           !sha256_string(caption->font.sha256) ||
           !bounded_string(caption->font.family, sizeof(caption->font.family), false)))) {
         return validation(MUSI_PROJECT_ERROR_CAPTION_STYLE, 0, 0);
+    }
+    if (caption->font.present) {
+        // A bundled licence is one fact in three fields. A path without a digest
+        // could not be verified before it is shown, a digest without a path
+        // describes nothing, and an unnamed licence file tells a recipient the
+        // terms exist without telling them which terms they are.
+        bool licence_bundled = caption->font.licence_path[0] != '\0';
+        if (licence_bundled != (caption->font.licence_sha256[0] != '\0') ||
+            (licence_bundled &&
+             (!bounded_string(caption->font.licence_path,
+                              sizeof(caption->font.licence_path), false) ||
+              !sha256_string(caption->font.licence_sha256) ||
+              caption->font.licence_name[0] == '\0')) ||
+            !bounded_string(caption->font.licence_name,
+                            sizeof(caption->font.licence_name), true)) {
+            return validation(MUSI_PROJECT_ERROR_CAPTION_STYLE, 0, 0);
+        }
     }
     if (project->output.width < 16 || project->output.width > 16384 ||
         project->output.height < 16 || project->output.height > 16384 ||
@@ -387,6 +407,31 @@ const char *musi_project_error_string(Musi_Project_Error error)
     return names[error];
 }
 
+// A path the sibling asset bundle could actually contain: relative, no drive
+// letter, no traversal, no empty or "." component. Deliberately stricter than
+// the resolver, because this answers "can the editor re-save this?" without a
+// filesystem to consult.
+static bool bundled_relative_path(const char *path)
+{
+    if (path == NULL || path[0] == '\0') return false;
+    if (path[0] == '/' || path[0] == '\\') return false;
+    if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':') {
+        return false;
+    }
+    const char *component = path;
+    for (const char *cursor = path;; ++cursor) {
+        if (*cursor != '\0' && *cursor != '/' && *cursor != '\\') continue;
+        size_t length = (size_t)(cursor - component);
+        if (length == 0) return false;
+        if (length == 1 && component[0] == '.') return false;
+        if (length == 2 && component[0] == '.' && component[1] == '.') return false;
+        if (*cursor == '\0') break;
+        component = cursor + 1;
+    }
+    return true;
+}
+
 Musi_Project_Editor_Support musi_project_editor_support(
     const Musi_Project *project)
 {
@@ -395,13 +440,17 @@ Musi_Project_Editor_Support musi_project_editor_support(
         project->audio.mode != MUSI_ASSET_IMPORTED) {
         return MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE;
     }
-    // An imported caption face names a file in the sibling asset bundle that
-    // this build cannot publish or verify yet. Opening such a project would
-    // typeset in the fallback face and then autosave that substitution over the
-    // author's choice, which is exactly the silent normalization the editor
-    // support check exists to prevent.
-    if (project->caption_style.face == MUSI_CAPTION_FACE_IMPORTED ||
-        project->caption_style.font.present) {
+    // The editor only ever writes an imported face into the sibling asset
+    // bundle, so it can only round-trip a project-relative descendant. An
+    // absolute or traversing path is a face this build would fail to resolve,
+    // typeset in the fallback, and then autosave over the author's choice --
+    // exactly the silent normalization this check exists to prevent.
+    if (project->caption_style.font.present &&
+        !bundled_relative_path(project->caption_style.font.path)) {
+        return MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT;
+    }
+    if (project->caption_style.font.licence_path[0] != '\0' &&
+        !bundled_relative_path(project->caption_style.font.licence_path)) {
         return MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT;
     }
     if (fabs(project->output.start_seconds) > 0.000001 ||

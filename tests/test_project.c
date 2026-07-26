@@ -4,6 +4,7 @@
 #include "test_support.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 static void fill_sha256(char value[MUSI_PROJECT_ID_CAPACITY], char digit)
@@ -147,6 +148,55 @@ TEST(project_editor_subset_rejects_every_lossy_normalization)
     project.audio.mode = MUSI_ASSET_MODE_COUNT;
     EXPECT_TRUE(musi_project_editor_support(&project) ==
                 MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE);
+}
+
+TEST(project_editor_subset_accepts_a_bundled_caption_font_but_not_an_external_one)
+{
+    Musi_Project project = valid_project();
+    project.audio.mode = MUSI_ASSET_REFERENCED;
+    project.cue_count = 0;
+    project.scenes[0].mapping_count = 0;
+    project.caption_style.face = MUSI_CAPTION_FACE_IMPORTED;
+    project.caption_style.font.present = true;
+    snprintf(project.caption_style.font.path,
+             sizeof(project.caption_style.font.path),
+             "show.assets/fonts/%s.ttf",
+             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    memset(project.caption_style.font.sha256, 'd',
+           sizeof(project.caption_style.font.sha256) - 1);
+    snprintf(project.caption_style.font.family,
+             sizeof(project.caption_style.font.family), "Inter");
+    EXPECT_TRUE(musi_project_editor_support(&project) ==
+                MUSI_PROJECT_EDITOR_SUPPORTED);
+
+    // Only a path the editor could itself have written into the sibling bundle
+    // can be re-saved. Anything else would resolve to the fallback face and
+    // then autosave that substitution over the author's choice.
+    static const char *unresolvable[] = {
+        "/usr/share/fonts/inter.ttf",
+        "C:\\windows\\fonts\\inter.ttf",
+        "show.assets/../../inter.ttf",
+        "show.assets/./fonts/inter.ttf",
+        "show.assets//fonts/inter.ttf",
+        "",
+    };
+    for (size_t i = 0; i < sizeof(unresolvable)/sizeof(unresolvable[0]); ++i) {
+        Musi_Project bad = project;
+        snprintf(bad.caption_style.font.path,
+                 sizeof(bad.caption_style.font.path), "%s", unresolvable[i]);
+        EXPECT_TRUE(musi_project_editor_support(&bad) ==
+                    MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT);
+
+        // An absent licence is "nothing was bundled", not an unresolvable path.
+        bad = project;
+        snprintf(bad.caption_style.font.licence_path,
+                 sizeof(bad.caption_style.font.licence_path), "%s",
+                 unresolvable[i]);
+        EXPECT_TRUE(musi_project_editor_support(&bad) ==
+                    (unresolvable[i][0] == '\0'
+                         ? MUSI_PROJECT_EDITOR_SUPPORTED
+                         : MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT));
+    }
 }
 
 TEST(project_editor_subset_accepts_canonical_scene_setting_presets)

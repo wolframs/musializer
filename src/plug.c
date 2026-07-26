@@ -106,7 +106,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 31
+#define PLUG_STATE_VERSION 32
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -148,6 +148,10 @@ typedef struct {
     // selectable caption face. Distinct from ui_font, which is the same family
     // restricted to the codepoints the interface uses.
     Font caption_alt_font;
+    // The project's imported face, if it has one. Keyed by the path it was
+    // loaded from so a project switch reloads it and a redraw does not.
+    Font caption_imported_font;
+    char caption_imported_font_path[PLUG_RELOAD_PATH_CAPACITY];
     Shader circle;
     int circle_radius_location;
     int circle_power_location;
@@ -329,10 +333,77 @@ static Font caption_face(const Musi_Caption_Style *style)
         IsFontValid(p->caption_alt_font)) {
         return p->caption_alt_font;
     }
+    if (style != NULL && style->face == MUSI_CAPTION_FACE_IMPORTED &&
+        IsFontValid(p->caption_imported_font)) {
+        return p->caption_imported_font;
+    }
     // Alegreya, which is the caption default and the fallback for a face this
     // build cannot load. Deliberately not GetFontDefault: raylib's bitmap face
     // has none of the curated glyph coverage and would silently drop accents.
     return p->font;
+}
+
+// Largest face this build will rasterize. Well above any Google Fonts family
+// (the biggest CJK entries are a few megabytes) and far below a size that would
+// make the atlas build a hang.
+#define CAPTION_IMPORTED_FONT_BYTE_LIMIT (32u*1024u*1024u)
+
+static void caption_imported_font_unload(void)
+{
+    if (IsFontValid(p->caption_imported_font)) {
+        UnloadFont(p->caption_imported_font);
+    }
+    memset(&p->caption_imported_font, 0, sizeof(p->caption_imported_font));
+    p->caption_imported_font_path[0] = '\0';
+}
+
+// Rasterizes an already-verified face. The caller owns the promise that these
+// bytes matched their recorded digest; this only decides whether raylib can
+// make an atlas out of them, and answers honestly when it cannot.
+static bool caption_imported_font_load(const char *path)
+{
+    if (path == NULL || path[0] == '\0') {
+        caption_imported_font_unload();
+        return false;
+    }
+    if (IsFontValid(p->caption_imported_font) &&
+        strcmp(p->caption_imported_font_path, path) == 0) {
+        return true;
+    }
+    caption_imported_font_unload();
+
+    int codepoints[CAPTION_FONT_CODEPOINT_LIMIT];
+    size_t codepoint_count = 0;
+    if (caption_font_codepoints(codepoints, NOB_ARRAY_LEN(codepoints),
+                                &codepoint_count) != CAPTION_FONT_OK ||
+        codepoint_count == 0 || codepoint_count > INT_MAX) {
+        return false;
+    }
+    int data_size = 0;
+    unsigned char *data = LoadFileData(path, &data_size);
+    if (data == NULL) return false;
+    if (data_size <= 0 || (unsigned)data_size > CAPTION_IMPORTED_FONT_BYTE_LIMIT) {
+        UnloadFileData(data);
+        TraceLog(LOG_WARNING, "FONT: imported caption face is not a usable size");
+        return false;
+    }
+    // The stored name is content-addressed, so the extension is the only thing
+    // that tells raylib which loader to use. A face that arrived without one is
+    // tried as a TrueType, which is what every path that writes here produces.
+    const char *extension = GetFileExtension(path);
+    p->caption_imported_font = LoadFontFromMemory(
+        extension != NULL && extension[0] != '\0' ? extension : ".ttf",
+        data, data_size, FONT_SIZE, codepoints, (int)codepoint_count);
+    UnloadFileData(data);
+    if (!IsFontValid(p->caption_imported_font)) {
+        memset(&p->caption_imported_font, 0, sizeof(p->caption_imported_font));
+        return false;
+    }
+    GenTextureMipmaps(&p->caption_imported_font.texture);
+    SetTextureFilter(p->caption_imported_font.texture, TEXTURE_FILTER_BILINEAR);
+    snprintf(p->caption_imported_font_path,
+             sizeof(p->caption_imported_font_path), "%s", path);
+    return true;
 }
 
 static bool ui_font_codepoint(int codepoint)
@@ -3645,6 +3716,8 @@ static void shared_presets_adopt(const Scene_Settings_Preset_Library *library)
 static bool build_project(Track *track, const char *project_path,
                           const char *stored_audio_path,
                           const char *stored_ascii_image_path,
+                          const char *stored_font_path,
+                          const char *stored_font_licence_path,
                           Musi_Project *project)
 {
     if (track == NULL || project_path == NULL || project_path[0] == '\0' ||
@@ -3721,6 +3794,28 @@ static bool build_project(Track *track, const char *project_path,
             &project->scenes[0].mapping_count)) return false;
 
     project->caption_style = track->caption_style;
+    if (project->caption_style.font.present) {
+        // The bundle decides where the face ended up; the track only knows the
+        // digest. Writing the track's own copy of the path would record where
+        // it was last saved, not where it is in this file.
+        if (stored_font_path == NULL || stored_font_path[0] == '\0' ||
+            snprintf(project->caption_style.font.path,
+                     sizeof(project->caption_style.font.path), "%s",
+                     stored_font_path) >=
+            (int)sizeof(project->caption_style.font.path)) return false;
+        const char *licence = stored_font_licence_path == NULL ?
+                              "" : stored_font_licence_path;
+        if (snprintf(project->caption_style.font.licence_path,
+                     sizeof(project->caption_style.font.licence_path), "%s",
+                     licence) >=
+            (int)sizeof(project->caption_style.font.licence_path)) return false;
+        // A licence path and its digest are one fact. If the licence did not
+        // travel, the digest and name must not claim that it did.
+        if (project->caption_style.font.licence_path[0] == '\0') {
+            project->caption_style.font.licence_sha256[0] = '\0';
+            project->caption_style.font.licence_name[0] = '\0';
+        }
+    }
     project->lyrics = track->lyrics;
     project->semantic_events = track->semantic_events;
     project->manual_events = track->manual_events;
@@ -3768,6 +3863,29 @@ static bool build_project(Track *track, const char *project_path,
     return musi_project_validate(project).error == MUSI_PROJECT_VALID;
 }
 
+// Publish one asset into the sibling bundle. Re-saving a project whose asset is
+// already published must not rewrite the file, so a reuse is attempted first
+// and a genuine copy only follows when the destination is not already the very
+// same bytes.
+static Musi_Project_Bundle_Result bundle_project_asset(
+    const char *path, Musi_Project_Asset_Category category,
+    const char *source_path, const char *sha256, bool reuse_published,
+    char *stored, size_t stored_capacity, char *runtime, size_t runtime_capacity)
+{
+    Musi_Project_Bundle_Result result = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
+    if (reuse_published) {
+        result = musi_project_reference_published_asset(
+            path, category, source_path, sha256,
+            stored, stored_capacity, runtime, runtime_capacity);
+    }
+    if (result != MUSI_PROJECT_BUNDLE_OK) {
+        result = musi_project_bundle_asset(
+            path, category, source_path, sha256,
+            stored, stored_capacity, runtime, runtime_capacity);
+    }
+    return result;
+}
+
 static bool save_project_to_path(Track *track, const char *path,
                                  bool show_success,
                                  bool reuse_published_assets)
@@ -3795,19 +3913,10 @@ static bool save_project_to_path(Track *track, const char *path,
         !sha256_file_hex(track->file_path, track->audio_sha256)) return false;
     char stored_audio[MUSI_PROJECT_PATH_CAPACITY];
     char bundled_audio[PLUG_RELOAD_PATH_CAPACITY];
-    Musi_Project_Bundle_Result audio_bundle = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
-    if (reuse_published_assets) {
-        audio_bundle = musi_project_reference_published_asset(
-            path, MUSI_PROJECT_ASSET_AUDIO, track->file_path,
-            track->audio_sha256, stored_audio, sizeof(stored_audio),
-            bundled_audio, sizeof(bundled_audio));
-    }
-    if (audio_bundle != MUSI_PROJECT_BUNDLE_OK) {
-        audio_bundle = musi_project_bundle_asset(
-            path, MUSI_PROJECT_ASSET_AUDIO, track->file_path,
-            track->audio_sha256, stored_audio, sizeof(stored_audio),
-            bundled_audio, sizeof(bundled_audio));
-    }
+    Musi_Project_Bundle_Result audio_bundle = bundle_project_asset(
+        path, MUSI_PROJECT_ASSET_AUDIO, track->file_path, track->audio_sha256,
+        reuse_published_assets, stored_audio, sizeof(stored_audio),
+        bundled_audio, sizeof(bundled_audio));
     if (audio_bundle != MUSI_PROJECT_BUNDLE_OK) {
         notice_push(UI_NOTICE_ERROR, "Project audio could not be bundled",
                     musi_project_bundle_result_string(audio_bundle), path, true);
@@ -3816,23 +3925,48 @@ static bool save_project_to_path(Track *track, const char *path,
     char stored_image[MUSI_PROJECT_PATH_CAPACITY] = {0};
     char bundled_image[PLUG_RELOAD_PATH_CAPACITY] = {0};
     if (ascii_art_grid_is_populated(track->ascii_columns, track->ascii_rows)) {
-        Musi_Project_Bundle_Result image_bundle = MUSI_PROJECT_BUNDLE_ERROR_SOURCE;
-        if (reuse_published_assets) {
-            image_bundle = musi_project_reference_published_asset(
-                path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
-                track->ascii_image_sha256, stored_image, sizeof(stored_image),
-                bundled_image, sizeof(bundled_image));
-        }
-        if (image_bundle != MUSI_PROJECT_BUNDLE_OK) {
-            image_bundle = musi_project_bundle_asset(
-                path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
-                track->ascii_image_sha256, stored_image, sizeof(stored_image),
-                bundled_image, sizeof(bundled_image));
-        }
+        Musi_Project_Bundle_Result image_bundle = bundle_project_asset(
+            path, MUSI_PROJECT_ASSET_IMAGE, track->ascii_image_path,
+            track->ascii_image_sha256, reuse_published_assets,
+            stored_image, sizeof(stored_image),
+            bundled_image, sizeof(bundled_image));
         if (image_bundle != MUSI_PROJECT_BUNDLE_OK) {
             notice_push(UI_NOTICE_ERROR, "ASCII image could not be bundled",
                         musi_project_bundle_result_string(image_bundle), path, true);
             return false;
+        }
+    }
+    char stored_font[MUSI_PROJECT_PATH_CAPACITY] = {0};
+    char bundled_font[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    char stored_licence[MUSI_PROJECT_PATH_CAPACITY] = {0};
+    char bundled_licence[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    if (track->caption_style.font.present) {
+        Musi_Project_Bundle_Result font_bundle = bundle_project_asset(
+            path, MUSI_PROJECT_ASSET_FONT, track->caption_font_path,
+            track->caption_style.font.sha256, reuse_published_assets,
+            stored_font, sizeof(stored_font),
+            bundled_font, sizeof(bundled_font));
+        if (font_bundle != MUSI_PROJECT_BUNDLE_OK) {
+            notice_push(UI_NOTICE_ERROR, "Caption font could not be bundled",
+                        musi_project_bundle_result_string(font_bundle), path, true);
+            return false;
+        }
+        // The licence is not decoration: handing someone the bundle without it
+        // is the part of redistribution the OFL actually asks us to get right.
+        // Losing it silently would be worse than refusing to save.
+        if (track->caption_licence_path[0] != '\0') {
+            Musi_Project_Bundle_Result licence_bundle = bundle_project_asset(
+                path, MUSI_PROJECT_ASSET_FONT, track->caption_licence_path,
+                track->caption_style.font.licence_sha256, reuse_published_assets,
+                stored_licence, sizeof(stored_licence),
+                bundled_licence, sizeof(bundled_licence));
+            if (licence_bundle != MUSI_PROJECT_BUNDLE_OK) {
+                notice_push(UI_NOTICE_ERROR,
+                            "Caption font licence could not be bundled",
+                            musi_project_bundle_result_string(licence_bundle),
+                            path, true);
+                return false;
+            }
         }
     }
     char *durable_audio_path = strdup(bundled_audio);
@@ -3842,7 +3976,8 @@ static bool save_project_to_path(Track *track, const char *path,
         free(durable_audio_path);
         return false;
     }
-    if (!build_project(track, path, stored_audio, stored_image, project)) {
+    if (!build_project(track, path, stored_audio, stored_image, stored_font,
+                       stored_licence, project)) {
         free(durable_audio_path);
         free(project);
         notice_push(UI_NOTICE_ERROR, "Project could not be built",
@@ -3901,6 +4036,16 @@ static bool save_project_to_path(Track *track, const char *path,
     if (bundled_image[0] != '\0') {
         snprintf(track->ascii_image_path, sizeof(track->ascii_image_path),
                  "%s", bundled_image);
+    }
+    // Adopt the published copies, so the next Save As re-bundles from inside
+    // this project rather than from wherever the face was first imported.
+    if (bundled_font[0] != '\0') {
+        snprintf(track->caption_font_path, sizeof(track->caption_font_path),
+                 "%s", bundled_font);
+    }
+    if (bundled_licence[0] != '\0') {
+        snprintf(track->caption_licence_path,
+                 sizeof(track->caption_licence_path), "%s", bundled_licence);
     }
     snprintf(track->project_path, sizeof(track->project_path), "%s", path);
     track->project_metadata = saved_metadata;
@@ -4166,6 +4311,41 @@ static bool open_project_path(const char *path)
         }
     }
 
+    char caption_font_path[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    char caption_licence_path[PLUG_RELOAD_PATH_CAPACITY] = {0};
+    if (project->caption_style.font.present) {
+        char font_hash[SHA256_HEX_SIZE] = {0};
+        if (musi_project_resolve_bundled_asset_path(
+                path, project->caption_style.font.path, caption_font_path,
+                sizeof(caption_font_path)) !=
+                MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE ||
+            !sha256_file_hex(caption_font_path, font_hash) ||
+            strcmp(font_hash, project->caption_style.font.sha256) != 0) {
+            notice_push(UI_NOTICE_ERROR, "Project caption font does not match",
+                        "The bundled face is missing, outside the project, or changed identity. Opening it would typeset the captions in a substitute face and then save that substitution over your choice.",
+                        project->caption_style.font.path, true);
+            free(project);
+            return false;
+        }
+        if (project->caption_style.font.licence_path[0] != '\0') {
+            char licence_hash[SHA256_HEX_SIZE] = {0};
+            if (musi_project_resolve_bundled_asset_path(
+                    path, project->caption_style.font.licence_path,
+                    caption_licence_path, sizeof(caption_licence_path)) !=
+                    MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE ||
+                !sha256_file_hex(caption_licence_path, licence_hash) ||
+                strcmp(licence_hash,
+                       project->caption_style.font.licence_sha256) != 0) {
+                notice_push(UI_NOTICE_ERROR,
+                            "Project caption font licence does not match",
+                            "The face is bundled but the licence recorded beside it is missing or changed. Saving would publish the font without the terms it was distributed under.",
+                            project->caption_style.font.licence_path, true);
+                free(project);
+                return false;
+            }
+        }
+    }
+
     Music metadata_probe = LoadMusicStream(audio_path);
     if (!IsMusicValid(metadata_probe)) {
         notice_push(UI_NOTICE_ERROR, "Project audio could not be inspected",
@@ -4237,6 +4417,26 @@ static bool open_project_path(const char *path)
     // musi_project_editor_support, so this cannot install a style the renderer
     // or the controls cannot represent.
     track->caption_style = project->caption_style;
+    // Rasterized here rather than during validation so that a project which
+    // fails a later check leaves no atlas behind. The bytes were verified
+    // against their digest above; this only asks whether raylib can use them,
+    // and a face it cannot use falls back to Alegreya with the reason said out
+    // loud instead of a caption that silently changes typeface.
+    track->caption_font_path[0] = '\0';
+    track->caption_licence_path[0] = '\0';
+    if (track->caption_style.font.present) {
+        snprintf(track->caption_font_path, sizeof(track->caption_font_path),
+                 "%s", caption_font_path);
+        snprintf(track->caption_licence_path,
+                 sizeof(track->caption_licence_path), "%s", caption_licence_path);
+        if (!caption_imported_font_load(caption_font_path)) {
+            notice_push(UI_NOTICE_WARNING, "Project caption font could not be read",
+                        "The bundled face is not one this build can rasterize. Captions use Alegreya until the face is replaced; the project still records the imported face.",
+                        caption_font_path, false);
+        }
+    } else {
+        caption_imported_font_unload();
+    }
     track->scene_switches = scene_switches;
     (void)event_timeline_replace(&track->semantic_events, &project->semantic_events);
     (void)event_timeline_replace(&track->manual_events, &project->manual_events);
@@ -7410,6 +7610,9 @@ static void unload_assets(void)
 {
     if (IsFontValid(p->ui_font)) UnloadFont(p->ui_font);
     if (IsFontValid(p->caption_alt_font)) UnloadFont(p->caption_alt_font);
+    if (IsFontValid(p->caption_imported_font)) {
+        UnloadFont(p->caption_imported_font);
+    }
     UnloadFont(p->font);
     UnloadShader(p->circle);
     for (UI_Icon icon = 0; icon < COUNT_UI_ICONS; ++icon) {
@@ -7418,6 +7621,8 @@ static void unload_assets(void)
     memset(&p->ui_font, 0, sizeof(p->ui_font));
     memset(&p->font, 0, sizeof(p->font));
     memset(&p->caption_alt_font, 0, sizeof(p->caption_alt_font));
+    memset(&p->caption_imported_font, 0, sizeof(p->caption_imported_font));
+    p->caption_imported_font_path[0] = '\0';
     memset(&p->circle, 0, sizeof(p->circle));
     memset(p->icon_textures, 0, sizeof(p->icon_textures));
 }
@@ -7853,6 +8058,19 @@ MUSIALIZER_PLUG void plug_shutdown(void)
 
 MUSIALIZER_PLUG void plug_update(void)
 {
+    // The imported face belongs to a track, but the atlas belongs to the GL
+    // context, so it has to be re-established after a track switch or a hot
+    // reload. Keyed by path, this is a string compare on every frame that does
+    // not need to do anything.
+    {
+        const Track *track = current_track();
+        if (track != NULL && track->caption_style.font.present &&
+            track->caption_font_path[0] != '\0') {
+            (void)caption_imported_font_load(track->caption_font_path);
+        } else if (p->caption_imported_font_path[0] != '\0') {
+            caption_imported_font_unload();
+        }
+    }
     BeginDrawing();
     ClearBackground(COLOR_BACKGROUND);
 

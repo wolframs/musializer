@@ -118,7 +118,7 @@ static void project_write(Writer*w,const Musi_Project*p)
     lit(w,",\"text_rgba\":");rgba(w,p->caption_style.text_rgba);
     lit(w,",\"box_rgba\":");rgba(w,p->caption_style.box_rgba);
     lit(w,",\"font\":");
-    if(p->caption_style.font.present){lit(w,"{\"path\":");string(w,p->caption_style.font.path);lit(w,",\"sha256\":");string(w,p->caption_style.font.sha256);lit(w,",\"family\":");string(w,p->caption_style.font.family);lit(w,"}");}else lit(w,"null");
+    if(p->caption_style.font.present){const Musi_Font_Asset*fa=&p->caption_style.font;lit(w,"{\"path\":");string(w,fa->path);lit(w,",\"sha256\":");string(w,fa->sha256);lit(w,",\"family\":");string(w,fa->family);lit(w,",\"licence_path\":");string(w,fa->licence_path);lit(w,",\"licence_sha256\":");string(w,fa->licence_sha256);lit(w,",\"licence_name\":");string(w,fa->licence_name);lit(w,"}");}else lit(w,"null");
     lit(w,"}");
     lit(w,",\"output\":{\"width\":");u64(w,p->output.width);lit(w,",\"height\":");u64(w,p->output.height);
     lit(w,",\"fps_numerator\":");u64(w,p->output.fps_numerator);lit(w,",\"fps_denominator\":");u64(w,p->output.fps_denominator);
@@ -255,14 +255,21 @@ static bool parse_font_asset(Parser*x,Musi_Font_Asset*a)
 {
     ws(x);
     if(x->p+4<=x->end&&memcmp(x->p,"null",4)==0){x->p+=4;memset(a,0,sizeof(*a));return true;}
-    static const char*names[]={"path","sha256","family"};uint64_t mask=0;bool first=true;char k[80];
+    static const char*names[]={"path","sha256","family",
+                               "licence_path","licence_sha256","licence_name"};
+    uint64_t mask=0;bool first=true;char k[80];
+    char*slots[6];size_t caps[6];
+    slots[0]=a->path;caps[0]=sizeof(a->path);
+    slots[1]=a->sha256;caps[1]=sizeof(a->sha256);
+    slots[2]=a->family;caps[2]=sizeof(a->family);
+    slots[3]=a->licence_path;caps[3]=sizeof(a->licence_path);
+    slots[4]=a->licence_sha256;caps[4]=sizeof(a->licence_sha256);
+    slots[5]=a->licence_name;caps[5]=sizeof(a->licence_name);
     if(!take(x,'{'))return false;
     while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;
-        int f=field_index(k,names,3);if(f<0)UNKNOWN();SEEN(f);
-        char*o=f==0?a->path:f==1?a->sha256:a->family;
-        size_t cap=f==0?sizeof(a->path):f==1?sizeof(a->sha256):sizeof(a->family);
-        if(!jstring(x,o,cap))return false;}
-    if(mask!=7){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}
+        int f=field_index(k,names,6);if(f<0)UNKNOWN();SEEN(f);
+        if(!jstring(x,slots[f],caps[f]))return false;}
+    if(mask!=UINT64_C(0x3f)){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}
     a->present=true;return true;
 }
 
@@ -1257,6 +1264,22 @@ static size_t project_safe_extension(const char *path, char output[18])
     return length;
 }
 
+bool musi_project_asset_category_valid(Musi_Project_Asset_Category category)
+{
+    return musi_project_asset_category_directory(category) != NULL;
+}
+
+const char *musi_project_asset_category_directory(
+    Musi_Project_Asset_Category category)
+{
+    switch (category) {
+    case MUSI_PROJECT_ASSET_AUDIO: return "audio";
+    case MUSI_PROJECT_ASSET_IMAGE: return "images";
+    case MUSI_PROJECT_ASSET_FONT:  return "fonts";
+    }
+    return NULL;
+}
+
 static bool project_bundle_paths(
     const char *project_path, Musi_Project_Asset_Category category,
     const char *source_path, const char *sha256,
@@ -1270,8 +1293,8 @@ static bool project_bundle_paths(
     if (dot == NULL || dot == filename) return false;
     size_t stem_length = (size_t)(dot - filename);
     if (stem_length > INT_MAX) return false;
-    const char *category_name = category == MUSI_PROJECT_ASSET_AUDIO ?
-                                "audio" : "images";
+    const char *category_name = musi_project_asset_category_directory(category);
+    if (category_name == NULL) return false;
     char extension[18] = {0};
     (void)project_safe_extension(source_path, extension);
     int stored_length = snprintf(
@@ -1482,8 +1505,7 @@ Musi_Project_Bundle_Result musi_project_bundle_asset(
         source_path == NULL || source_path[0] == '\0' ||
         !project_sha256_text_valid(expected_sha256) || stored_path == NULL ||
         stored_capacity == 0 || runtime_path == NULL || runtime_capacity == 0 ||
-        (category != MUSI_PROJECT_ASSET_AUDIO &&
-         category != MUSI_PROJECT_ASSET_IMAGE)) {
+        !musi_project_asset_category_valid(category)) {
         return MUSI_PROJECT_BUNDLE_ERROR_ARGUMENT;
     }
     if (!project_regular_file_exists(source_path) ||
@@ -1520,8 +1542,7 @@ Musi_Project_Bundle_Result musi_project_reference_published_asset(
         source_path == NULL || source_path[0] == '\0' ||
         !project_sha256_text_valid(expected_sha256) || stored_path == NULL ||
         stored_capacity == 0 || runtime_path == NULL || runtime_capacity == 0 ||
-        (category != MUSI_PROJECT_ASSET_AUDIO &&
-         category != MUSI_PROJECT_ASSET_IMAGE)) {
+        !musi_project_asset_category_valid(category)) {
         return MUSI_PROJECT_BUNDLE_ERROR_ARGUMENT;
     }
     char *root = NULL;

@@ -219,7 +219,10 @@
       "required": [
         "path",
         "sha256",
-        "family"
+        "family",
+        "licence_path",
+        "licence_sha256",
+        "licence_name"
       ],
       "properties": {
         "path": {
@@ -236,6 +239,21 @@
           "minLength": 1,
           "maxLength": 128,
           "description": "Display name for the control. Never used to locate the file."
+        },
+        "licence_path": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Project-relative path to the licence text bundled beside the face. Empty for a face imported from the user's own disk, whose terms this application cannot assert. Non-empty only together with licence_sha256 and licence_name."
+        },
+        "licence_sha256": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$",
+          "description": "Digest of the bundled licence text, verified before the text is shown. Empty exactly when licence_path is empty."
+        },
+        "licence_name": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Which terms these are, for example OFL-1.1. Required whenever a licence file is bundled: an unnamed licence tells a recipient that terms exist without telling them which."
         }
       }
     },

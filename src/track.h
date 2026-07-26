@@ -63,6 +63,12 @@ typedef struct {
     // Caption typography for this project's lyric overlay. Preview and export
     // read the same struct, so what the workspace shows is what renders.
     Musi_Caption_Style caption_style;
+    // Where the imported face and its licence live *now*, on this machine. The
+    // style itself carries the project-relative path that was last written, so
+    // these hold the verified source a Save As would re-bundle from. Both are
+    // empty unless caption_style.font.present.
+    char caption_font_path[PLUG_RELOAD_PATH_CAPACITY];
+    char caption_licence_path[PLUG_RELOAD_PATH_CAPACITY];
     char project_path[PLUG_RELOAD_PATH_CAPACITY];
     Musi_Project_Metadata project_metadata;
     bool project_metadata_initialized;

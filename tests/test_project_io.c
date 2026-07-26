@@ -39,6 +39,9 @@ static Musi_Project fixture(void)
     p.caption_style.text_rgba=0x1A2B3C4Du;p.caption_style.box_rgba=0xFFEEDDCCu;
     p.caption_style.font.present=true;strcpy(p.caption_style.font.path,"show.assets/fonts/inter.ttf");
     hash(p.caption_style.font.sha256,'d');strcpy(p.caption_style.font.family,"Inter");
+    strcpy(p.caption_style.font.licence_path,"show.assets/fonts/inter.licence.txt");
+    hash(p.caption_style.font.licence_sha256,'f');
+    strcpy(p.caption_style.font.licence_name,"OFL-1.1");
     p.lyrics.duration_seconds=10.5;
     p.output.width=1920;p.output.height=1080;p.output.fps_numerator=30000;p.output.fps_denominator=1001;
     /* validator currently caps numerator at 1000 */ p.output.fps_numerator=60;
@@ -647,6 +650,90 @@ TEST(project_io_bundles_content_addressed_assets_and_rejects_escape_or_collision
     (void)rmdir(root);
 }
 
+TEST(project_io_bundles_a_font_and_its_licence_under_the_fonts_category)
+{
+    EXPECT_TRUE(strcmp(musi_project_asset_category_directory(
+        MUSI_PROJECT_ASSET_AUDIO), "audio") == 0);
+    EXPECT_TRUE(strcmp(musi_project_asset_category_directory(
+        MUSI_PROJECT_ASSET_IMAGE), "images") == 0);
+    EXPECT_TRUE(strcmp(musi_project_asset_category_directory(
+        MUSI_PROJECT_ASSET_FONT), "fonts") == 0);
+    // A category the bundle machinery does not know must be refused, not
+    // published into a directory named by whatever the switch fell through to.
+    EXPECT_TRUE(musi_project_asset_category_directory(
+        (Musi_Project_Asset_Category)(MUSI_PROJECT_ASSET_FONT + 1)) == NULL);
+    EXPECT_TRUE(!musi_project_asset_category_valid(
+        (Musi_Project_Asset_Category)(MUSI_PROJECT_ASSET_FONT + 1)));
+
+    char root[256];
+    REQUIRE_TRUE(project_io_test_mkdir(root, sizeof(root)));
+    char project_directory[320];
+    char project_path[384];
+    char face[320];
+    char licence[320];
+    snprintf(project_directory, sizeof(project_directory), "%s/project", root);
+    snprintf(project_path, sizeof(project_path), "%s/show.musi", project_directory);
+    snprintf(face, sizeof(face), "%s/Inter-Regular.TTF", root);
+    snprintf(licence, sizeof(licence), "%s/OFL.txt", root);
+    REQUIRE_TRUE(mkdir(project_directory, 0700) == 0);
+    REQUIRE_TRUE(project_io_test_write(face, "\x00\x01\x00\x00 pretend sfnt"));
+    REQUIRE_TRUE(project_io_test_write(licence, "Copyright ... SIL Open Font License"));
+    char face_identity[SHA256_HEX_SIZE];
+    char licence_identity[SHA256_HEX_SIZE];
+    REQUIRE_TRUE(sha256_file_hex(face, face_identity));
+    REQUIRE_TRUE(sha256_file_hex(licence, licence_identity));
+
+    char stored[512];
+    char runtime[512];
+    char expected[512];
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_FONT, face, face_identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_OK);
+    snprintf(expected, sizeof(expected), "show.assets/fonts/%s.ttf", face_identity);
+    EXPECT_TRUE(strcmp(stored, expected) == 0);
+
+    // The licence travels beside the face under the same category, so a
+    // recipient who receives the bundle receives the terms with it.
+    char licence_stored[512];
+    char licence_runtime[512];
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_FONT, licence, licence_identity,
+        licence_stored, sizeof(licence_stored),
+        licence_runtime, sizeof(licence_runtime)) == MUSI_PROJECT_BUNDLE_OK);
+    snprintf(expected, sizeof(expected), "show.assets/fonts/%s.txt",
+             licence_identity);
+    EXPECT_TRUE(strcmp(licence_stored, expected) == 0);
+
+    char resolved[512];
+    EXPECT_TRUE(musi_project_resolve_bundled_asset_path(
+        project_path, stored, resolved, sizeof(resolved)) ==
+        MUSI_PROJECT_PATH_RESOLVED_PROJECT_RELATIVE);
+    EXPECT_TRUE(musi_project_existing_files_alias(resolved, runtime));
+
+    // Two different faces cannot collide, and the same face re-imported is a
+    // no-op rather than a rewrite.
+    EXPECT_TRUE(musi_project_bundle_asset(
+        project_path, MUSI_PROJECT_ASSET_FONT, face, licence_identity,
+        stored, sizeof(stored), runtime, sizeof(runtime)) ==
+        MUSI_PROJECT_BUNDLE_ERROR_SOURCE);
+
+    char category_directory[448];
+    char bundle_directory[416];
+    snprintf(category_directory, sizeof(category_directory),
+             "%s/show.assets/fonts", project_directory);
+    snprintf(bundle_directory, sizeof(bundle_directory),
+             "%s/show.assets", project_directory);
+    (void)unlink(runtime);
+    (void)unlink(licence_runtime);
+    (void)rmdir(category_directory);
+    (void)rmdir(bundle_directory);
+    (void)unlink(face);
+    (void)unlink(licence);
+    (void)rmdir(project_directory);
+    (void)rmdir(root);
+}
+
 TEST(project_io_transaction_paths_are_distinct_and_atomic_writes_are_owned)
 {
     EXPECT_TRUE(musi_project_process_id() > 0);
@@ -794,7 +881,13 @@ TEST(project_io_rejects_a_caption_style_out_of_range_or_disagreeing_with_its_fon
     Musi_Project p=fixture();
     p.caption_style.face=MUSI_CAPTION_FACE_ALEGREYA;p.caption_style.font.present=false;
     p.caption_style.font.path[0]=0;p.caption_style.font.sha256[0]=0;p.caption_style.font.family[0]=0;
+    p.caption_style.font.licence_path[0]=0;p.caption_style.font.licence_sha256[0]=0;
+    p.caption_style.font.licence_name[0]=0;
     REQUIRE_TRUE(musi_project_validate(&p).error==MUSI_PROJECT_VALID);
+
+    // A face with no asset must carry no residue of one, licence included.
+    Musi_Project residue=p;strcpy(residue.caption_style.font.licence_name,"OFL-1.1");
+    EXPECT_TRUE(musi_project_validate(&residue).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
 
     // An imported face with no asset, and an asset with no imported face, are
     // both a project whose captions cannot be reproduced from the file.
@@ -818,3 +911,28 @@ TEST(project_io_rejects_a_caption_style_out_of_range_or_disagreeing_with_its_fon
     bad=p;bad.caption_style.anchor=(Musi_Caption_Anchor)MUSI_CAPTION_ANCHOR_COUNT;
     EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
 }
+
+TEST(project_io_requires_a_bundled_font_licence_to_be_path_digest_and_name_together)
+{
+    Musi_Project p=fixture();
+    REQUIRE_TRUE(musi_project_validate(&p).error==MUSI_PROJECT_VALID);
+
+    // A licence with no digest cannot be verified before a recipient is shown
+    // it; a digest with no path describes nothing at all.
+    Musi_Project bad=p;bad.caption_style.font.licence_sha256[0]=0;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.font.licence_path[0]=0;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.font.licence_name[0]=0;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;memset(bad.caption_style.font.licence_sha256,'z',
+                 sizeof(bad.caption_style.font.licence_sha256)-1);
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+
+    // A face the user imported from their own disk carries no licence we could
+    // honestly assert, and that is a valid project, not a broken one.
+    Musi_Project own=p;own.caption_style.font.licence_path[0]=0;
+    own.caption_style.font.licence_sha256[0]=0;own.caption_style.font.licence_name[0]=0;
+    EXPECT_TRUE(musi_project_validate(&own).error==MUSI_PROJECT_VALID);
+}
+

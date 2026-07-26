@@ -147,19 +147,39 @@ class DistributionManifestTests(unittest.TestCase):
         )
         self.assertNotIn("track_set_analysis_lane", plug)
 
-    def test_project_save_bundles_audio_and_ascii_sources_before_publication(self):
+    def test_project_save_bundles_every_asset_source_before_publication(self):
         plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+
+        # One publish path for every category. Three call sites that each did
+        # their own reuse-then-copy dance is how one of them comes to skip the
+        # reuse and rewrite a file that was already published.
+        helper_start = plug.index("static Musi_Project_Bundle_Result bundle_project_asset(")
+        helper_end = plug.index("static bool save_project_to_path(", helper_start)
+        helper = plug[helper_start:helper_end]
+        self.assertLess(
+            helper.index("musi_project_reference_published_asset("),
+            helper.index("musi_project_bundle_asset("),
+        )
+        self.assertEqual(plug.count("musi_project_bundle_asset("), 1)
+        self.assertEqual(plug.count("musi_project_reference_published_asset("), 1)
+
         save_start = plug.index("static bool save_project_to_path(")
         save_end = plug.index("static bool save_project_as(", save_start)
         save = plug[save_start:save_end]
-        self.assertGreaterEqual(save.count("musi_project_bundle_asset("), 2)
-        self.assertGreaterEqual(
-            save.count("musi_project_reference_published_asset("), 2
-        )
-        self.assertLess(
-            save.index("musi_project_bundle_asset("),
-            save.index("musi_project_atomic_write("),
-        )
+        for category in (
+            "MUSI_PROJECT_ASSET_AUDIO",
+            "MUSI_PROJECT_ASSET_IMAGE",
+            "MUSI_PROJECT_ASSET_FONT",
+        ):
+            self.assertIn(category, save)
+            self.assertLess(
+                save.index(category), save.index("musi_project_atomic_write(")
+            )
+        # The face and the licence it was distributed under are published
+        # together or the save fails; a bundle carrying one without the other
+        # is what makes redistribution a problem rather than a formality.
+        self.assertEqual(save.count("MUSI_PROJECT_ASSET_FONT"), 2)
+        self.assertIn("Caption font licence could not be bundled", save)
         self.assertNotIn("not project-portable yet", save)
         self.assertIn("MUSI_ASSET_IMPORTED", plug)
         self.assertIn("musi_project_resolve_bundled_asset_path", plug)
