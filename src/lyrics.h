@@ -84,6 +84,32 @@ Lyrics_Result lyrics_delete(Lyrics_Document *document, uint64_t id);
 Lyrics_Result lyrics_nudge(Lyrics_Document *document, uint64_t id,
                            double delta_seconds);
 
+// Moves one cue's boundaries without touching its text. This is what dragging a
+// block's leading or trailing edge in the lane commits.
+Lyrics_Result lyrics_retime(Lyrics_Document *document, uint64_t id,
+                            double start_seconds, double end_seconds);
+
+// Moves every listed cue by the same delta, in full or not at all. Dragging a
+// multi-cue selection has to be one operation: applying it cue by cue would
+// leave the document half-moved at the first cue that hits zero or the end of
+// the track, and there is no undo to recover with.
+//
+// Repeated ids are collapsed rather than applied twice. An id that is not in
+// the document rejects the whole request, because a stale selection is a bug in
+// the caller and silently moving the rest would hide it.
+Lyrics_Result lyrics_shift_many(Lyrics_Document *document,
+                                const uint64_t *ids, size_t id_count,
+                                double delta_seconds);
+
+// The largest delta that lyrics_shift_many would accept for this selection, in
+// each direction, so a drag can be clamped as it happens instead of snapping
+// back on release. Both outputs are >= 0; either may be 0 when the selection is
+// already against that end of the track.
+Lyrics_Result lyrics_shift_headroom(const Lyrics_Document *document,
+                                    const uint64_t *ids, size_t id_count,
+                                    double *backward_seconds,
+                                    double *forward_seconds);
+
 // split keeps id on the left cue and allocates a new id for the right cue.
 Lyrics_Result lyrics_split(Lyrics_Document *document, uint64_t id,
                            double split_seconds, const char *left_text,

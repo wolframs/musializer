@@ -292,6 +292,127 @@ Lyrics_Result lyrics_nudge(Lyrics_Document *document, uint64_t id,
                          document->cues[index].text);
 }
 
+Lyrics_Result lyrics_retime(Lyrics_Document *document, uint64_t id,
+                            double start_seconds, double end_seconds)
+{
+    if (document == NULL) return LYRICS_ERROR_NULL;
+    size_t index = find_index(document, id);
+    if (index == SIZE_MAX) return LYRICS_ERROR_NOT_FOUND;
+    // lyrics_update copies the text into a staged cue before storing it, so
+    // passing the cue's own buffer as the source is safe.
+    return lyrics_update(document, id, start_seconds, end_seconds,
+                         document->cues[index].text);
+}
+
+// A selection marked over the fixed cue capacity. 128 bytes of bitmap is what
+// lets lyrics_shift_many validate the whole move before touching anything
+// without staging a second Lyrics_Document, which is half a megabyte and has no
+// business on a stack (AGENTS.md).
+typedef struct Lyrics_Selection_Mask {
+    unsigned char bits[(LYRICS_CUE_CAPACITY + 7u)/8u];
+} Lyrics_Selection_Mask;
+
+static bool selection_marked(const Lyrics_Selection_Mask *mask, size_t index)
+{
+    return (mask->bits[index/8u] & (unsigned char)(1u << (index%8u))) != 0;
+}
+
+static Lyrics_Result selection_resolve(const Lyrics_Document *document,
+                                       const uint64_t *ids, size_t id_count,
+                                       Lyrics_Selection_Mask *mask)
+{
+    memset(mask, 0, sizeof(*mask));
+    if (document == NULL || (ids == NULL && id_count > 0)) return LYRICS_ERROR_NULL;
+    if (document->schema_version != LYRICS_DOCUMENT_SCHEMA_VERSION) {
+        return LYRICS_ERROR_SCHEMA;
+    }
+    if (id_count == 0) return LYRICS_ERROR_NOT_FOUND;
+    for (size_t i = 0; i < id_count; ++i) {
+        size_t index = find_index(document, ids[i]);
+        if (index == SIZE_MAX) return LYRICS_ERROR_NOT_FOUND;
+        mask->bits[index/8u] |= (unsigned char)(1u << (index%8u));
+    }
+    return LYRICS_OK;
+}
+
+// Restores canonical order after a bulk edit. The array at that point is two
+// already-sorted runs interleaved, so this costs one pass plus the number of
+// cues that genuinely crossed each other. cue_compare breaks ties on the unique
+// id, so no two cues can compare equal and the sorted result is always strict.
+static void sort_cues(Lyrics_Document *document)
+{
+    for (size_t i = 1; i < document->count; ++i) {
+        size_t j = i;
+        while (j > 0 && cue_compare(&document->cues[j], &document->cues[j - 1]) < 0) {
+            Lyric_Cue temporary = document->cues[j - 1];
+            document->cues[j - 1] = document->cues[j];
+            document->cues[j] = temporary;
+            j -= 1;
+        }
+    }
+}
+
+Lyrics_Result lyrics_shift_many(Lyrics_Document *document,
+                                const uint64_t *ids, size_t id_count,
+                                double delta_seconds)
+{
+    if (!isfinite(delta_seconds)) return LYRICS_ERROR_INVALID_CUE;
+    Lyrics_Selection_Mask mask;
+    Lyrics_Result resolved = selection_resolve(document, ids, id_count, &mask);
+    if (resolved != LYRICS_OK) return resolved;
+
+    // Check every proposed cue first. Individual validity is the only thing that
+    // can fail: the selection keeps its internal order under a uniform shift,
+    // the unselected cues never move, and no two cues can compare equal, so the
+    // sort below always produces a strictly ordered document.
+    for (size_t i = 0; i < document->count; ++i) {
+        if (!selection_marked(&mask, i)) continue;
+        Lyric_Cue candidate = document->cues[i];
+        candidate.start_seconds += delta_seconds;
+        candidate.end_seconds += delta_seconds;
+        Lyrics_Result valid = validate_cue(document, &candidate);
+        if (valid != LYRICS_OK) return valid;
+    }
+
+    for (size_t i = 0; i < document->count; ++i) {
+        if (!selection_marked(&mask, i)) continue;
+        document->cues[i].start_seconds += delta_seconds;
+        document->cues[i].end_seconds += delta_seconds;
+    }
+    sort_cues(document);
+    bump_revision(document);
+    return LYRICS_OK;
+}
+
+Lyrics_Result lyrics_shift_headroom(const Lyrics_Document *document,
+                                    const uint64_t *ids, size_t id_count,
+                                    double *backward_seconds,
+                                    double *forward_seconds)
+{
+    if (backward_seconds != NULL) *backward_seconds = 0.0;
+    if (forward_seconds != NULL) *forward_seconds = 0.0;
+    if (backward_seconds == NULL || forward_seconds == NULL) return LYRICS_ERROR_NULL;
+    Lyrics_Selection_Mask mask;
+    Lyrics_Result resolved = selection_resolve(document, ids, id_count, &mask);
+    if (resolved != LYRICS_OK) return resolved;
+
+    double earliest_start = document->duration_seconds;
+    double latest_end = 0.0;
+    for (size_t i = 0; i < document->count; ++i) {
+        if (!selection_marked(&mask, i)) continue;
+        if (document->cues[i].start_seconds < earliest_start) {
+            earliest_start = document->cues[i].start_seconds;
+        }
+        if (document->cues[i].end_seconds > latest_end) {
+            latest_end = document->cues[i].end_seconds;
+        }
+    }
+    *backward_seconds = earliest_start > 0.0 ? earliest_start : 0.0;
+    double forward = document->duration_seconds - latest_end;
+    *forward_seconds = forward > 0.0 ? forward : 0.0;
+    return LYRICS_OK;
+}
+
 Lyrics_Result lyrics_split(Lyrics_Document *document, uint64_t id,
                            double split_seconds, const char *left_text,
                            const char *right_text, uint64_t *right_id)

@@ -328,3 +328,155 @@ TEST(lyrics_text_append_joins_halves_of_a_sequence_only_when_valid)
                 LYRICS_ERROR_INVALID_UTF8);
     EXPECT_EQ_SIZE(strlen(broken), 4);
 }
+
+// A four-cue document, evenly spaced, with room at both ends. Every bulk-move
+// test below starts from this shape so the numbers stay checkable by eye.
+static void build_shift_fixture(Lyrics_Document *document)
+{
+    REQUIRE_TRUE(lyrics_document_init(document, 40.0) == LYRICS_OK);
+    Lyric_Cue cues[4] = {
+        cue(0, 5.0, 6.0, "one"),
+        cue(0, 10.0, 11.0, "two"),
+        cue(0, 15.0, 16.0, "three"),
+        cue(0, 20.0, 21.0, "four"),
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        REQUIRE_TRUE(lyrics_insert(document, &cues[i], NULL) == LYRICS_OK);
+    }
+}
+
+TEST(lyrics_retime_moves_one_cue_and_keeps_its_text)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    REQUIRE_TRUE(lyrics_retime(&document, 2, 9.0, 12.5) == LYRICS_OK);
+    const Lyric_Cue *moved = lyrics_find(&document, 2);
+    REQUIRE_TRUE(moved != NULL);
+    EXPECT_NEAR(moved->start_seconds, 9.0, 1e-9);
+    EXPECT_NEAR(moved->end_seconds, 12.5, 1e-9);
+    EXPECT_TRUE(strcmp(moved->text, "two") == 0);
+    EXPECT_TRUE(lyrics_document_validate(&document).result == LYRICS_OK);
+
+    // A resize handle dragged past its opposite edge, or off the end of the
+    // track, must leave the cue exactly as it was.
+    EXPECT_TRUE(lyrics_retime(&document, 2, 12.5, 9.0) == LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(lyrics_retime(&document, 2, 39.0, 41.0) == LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(lyrics_retime(&document, 2, -1.0, 5.0) == LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(lyrics_retime(&document, 999, 1.0, 2.0) == LYRICS_ERROR_NOT_FOUND);
+    moved = lyrics_find(&document, 2);
+    EXPECT_NEAR(moved->start_seconds, 9.0, 1e-9);
+    EXPECT_NEAR(moved->end_seconds, 12.5, 1e-9);
+}
+
+TEST(lyrics_shift_many_moves_a_selection_together)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    const uint64_t selection[2] = {2, 4};
+    REQUIRE_TRUE(lyrics_shift_many(&document, selection, 2, 2.5) == LYRICS_OK);
+    EXPECT_NEAR(lyrics_find(&document, 1)->start_seconds, 5.0, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 2)->start_seconds, 12.5, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 2)->end_seconds, 13.5, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 3)->start_seconds, 15.0, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 4)->start_seconds, 22.5, 1e-9);
+    EXPECT_TRUE(lyrics_document_validate(&document).result == LYRICS_OK);
+    EXPECT_TRUE(strcmp(lyrics_find(&document, 2)->text, "two") == 0);
+}
+
+TEST(lyrics_shift_many_reorders_when_the_selection_crosses_a_fixed_cue)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    // Drag cue 1 (5-6 s) past cues 2 and 3 to land between 3 and 4. The stored
+    // array must come back canonically ordered, not merely legal in place --
+    // a document that is out of order fails validation on save.
+    const uint64_t selection[1] = {1};
+    REQUIRE_TRUE(lyrics_shift_many(&document, selection, 1, 12.0) == LYRICS_OK);
+    EXPECT_TRUE(lyrics_document_validate(&document).result == LYRICS_OK);
+    EXPECT_EQ_U64(document.cues[0].id, 2);
+    EXPECT_EQ_U64(document.cues[1].id, 3);
+    EXPECT_EQ_U64(document.cues[2].id, 1);
+    EXPECT_EQ_U64(document.cues[3].id, 4);
+    EXPECT_NEAR(document.cues[2].start_seconds, 17.0, 1e-9);
+}
+
+TEST(lyrics_shift_many_moves_everything_or_nothing)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    // Cue 4 ends at 21 s in a 40 s track, so it has 19 s of headroom; cue 1
+    // starts at 5 s, so the selection as a whole can only go back 5 s. Applying
+    // the move cue by cue would have shifted cue 4 and then failed on cue 1,
+    // leaving the document half-moved with no way back.
+    const uint64_t selection[2] = {1, 4};
+    EXPECT_TRUE(lyrics_shift_many(&document, selection, 2, -6.0) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_NEAR(lyrics_find(&document, 1)->start_seconds, 5.0, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 4)->start_seconds, 20.0, 1e-9);
+
+    EXPECT_TRUE(lyrics_shift_many(&document, selection, 2, 20.0) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_NEAR(lyrics_find(&document, 4)->end_seconds, 21.0, 1e-9);
+
+    // Exactly to the boundary is allowed: -5 s puts cue 1 at zero.
+    REQUIRE_TRUE(lyrics_shift_many(&document, selection, 2, -5.0) == LYRICS_OK);
+    EXPECT_NEAR(lyrics_find(&document, 1)->start_seconds, 0.0, 1e-9);
+    EXPECT_NEAR(lyrics_find(&document, 4)->start_seconds, 15.0, 1e-9);
+    EXPECT_TRUE(lyrics_document_validate(&document).result == LYRICS_OK);
+}
+
+TEST(lyrics_shift_many_collapses_repeats_and_rejects_a_stale_id)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    // The lane's selection is a list, and a double ctrl+click could put the
+    // same cue in it twice. Shifting it twice would be silently wrong.
+    const uint64_t repeated[3] = {2, 2, 2};
+    REQUIRE_TRUE(lyrics_shift_many(&document, repeated, 3, 1.0) == LYRICS_OK);
+    EXPECT_NEAR(lyrics_find(&document, 2)->start_seconds, 11.0, 1e-9);
+
+    uint64_t revision = document.revision;
+    const uint64_t stale[2] = {2, 77};
+    EXPECT_TRUE(lyrics_shift_many(&document, stale, 2, 1.0) == LYRICS_ERROR_NOT_FOUND);
+    EXPECT_NEAR(lyrics_find(&document, 2)->start_seconds, 11.0, 1e-9);
+    EXPECT_EQ_U64(document.revision, revision);
+
+    EXPECT_TRUE(lyrics_shift_many(&document, NULL, 0, 1.0) == LYRICS_ERROR_NOT_FOUND);
+    EXPECT_TRUE(lyrics_shift_many(&document, repeated, 3, NAN) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(lyrics_shift_many(&document, repeated, 3, INFINITY) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_EQ_U64(document.revision, revision);
+}
+
+TEST(lyrics_shift_headroom_matches_what_shift_many_accepts)
+{
+    Lyrics_Document document;
+    build_shift_fixture(&document);
+    const uint64_t selection[2] = {1, 4};
+    double backward = -1.0, forward = -1.0;
+    REQUIRE_TRUE(lyrics_shift_headroom(&document, selection, 2,
+                                       &backward, &forward) == LYRICS_OK);
+    EXPECT_NEAR(backward, 5.0, 1e-9);
+    EXPECT_NEAR(forward, 19.0, 1e-9);
+
+    // The contract that makes a live drag clamp correctly: the reported
+    // headroom is exactly the largest delta the commit will take. Verified in
+    // both directions on a fresh copy so the two probes do not interact.
+    Lyrics_Document probe = document;
+    EXPECT_TRUE(lyrics_shift_many(&probe, selection, 2, -backward) == LYRICS_OK);
+    probe = document;
+    EXPECT_TRUE(lyrics_shift_many(&probe, selection, 2, forward) == LYRICS_OK);
+    probe = document;
+    EXPECT_TRUE(lyrics_shift_many(&probe, selection, 2, -backward - 0.001) ==
+                LYRICS_ERROR_INVALID_CUE);
+    probe = document;
+    EXPECT_TRUE(lyrics_shift_many(&probe, selection, 2, forward + 0.001) ==
+                LYRICS_ERROR_INVALID_CUE);
+
+    // A selection already flush against the start reports no room to give.
+    REQUIRE_TRUE(lyrics_shift_many(&document, selection, 2, -5.0) == LYRICS_OK);
+    REQUIRE_TRUE(lyrics_shift_headroom(&document, selection, 2,
+                                       &backward, &forward) == LYRICS_OK);
+    EXPECT_NEAR(backward, 0.0, 1e-9);
+}
