@@ -93,6 +93,18 @@ bool lyric_editor_ui_allow_context_change(Lyric_Editor *editor, const Track *tra
     return false;
 }
 
+void lyric_editor_ui_select_single(Lyric_Editor *editor, Track *track, uint64_t id)
+{
+    if (lyrics_find(&track->lyrics, id) == NULL) return;
+    lyric_editor_ui_select(editor, track, id);
+    // Selecting from the cue list, or from the probe, has to agree with the
+    // lane about what is selected. Without this the lane draws the form's cue
+    // with its "bound to the form" outline and the pale unselected fill at the
+    // same time, and a drag would then move nothing.
+    (void)lyric_lane_selection_apply(&editor->lane_selection, &track->lyrics, id,
+                                     LYRIC_LANE_CLICK_REPLACE);
+}
+
 void lyric_editor_ui_select(Lyric_Editor *editor, Track *track, uint64_t id)
 {
     const Lyric_Cue *cue = lyrics_find(&track->lyrics, id);
@@ -130,7 +142,7 @@ bool lyric_editor_ui_apply(Lyric_Editor *editor, Track *track,
         snprintf(cue.text, sizeof(cue.text), "%s", editor->draft_text);
         uint64_t id = 0;
         result = lyrics_insert(&track->lyrics, &cue, &id);
-        if (result == LYRICS_OK) lyric_editor_ui_select(editor, track, id);
+        if (result == LYRICS_OK) lyric_editor_ui_select_single(editor, track, id);
     } else {
         result = lyrics_update(&track->lyrics, editor->selected_id,
                                 editor->draft_start, editor->draft_end,
@@ -237,12 +249,217 @@ static void lyric_time_row(const Lyric_Editor_Services *s, Rectangle boundary,
     }
 }
 
+// The lane owns the press for the whole gesture. It used to act on release
+// only, which meant the timeline scrubber -- whose hit region covers the lane --
+// claimed the press first and a drag inside the lane seeked the transport.
+static const uint64_t LYRIC_LANE_GESTURE_ID = UINT64_C(0x4C59524943444147);
+
+static Lyric_Lane_Click lane_click_mode(void)
+{
+    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) {
+        return LYRIC_LANE_CLICK_TOGGLE;
+    }
+    if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
+        return LYRIC_LANE_CLICK_EXTEND;
+    }
+    return LYRIC_LANE_CLICK_REPLACE;
+}
+
+static void lane_reset_drag(Lyric_Editor *editor)
+{
+    editor->lane_drag_zone = LYRIC_LANE_ZONE_NONE;
+    editor->lane_drag_id = 0;
+    editor->lane_drag_origin_seconds = 0.0;
+    editor->lane_drag_origin_x = 0.0f;
+    editor->lane_drag_delta_seconds = 0.0;
+    editor->lane_drag_edge_seconds = 0.0;
+    editor->lane_drag_moved = false;
+}
+
+void lyric_editor_ui_release_lane_claim(Lyric_Editor *editor,
+                                        const Lyric_Editor_Services *services)
+{
+    // The lane can only release during its own draw. A track unloaded, or a
+    // window shrunk until the timeline strip is gone, would otherwise leave the
+    // drag state set: plug.c's global fallback frees the id on mouse-up, but
+    // nothing clears lane_drag_moved, so every block in the selection would go
+    // on being drawn at its dragged offset for the rest of the session.
+    // Abandoning rather than committing is deliberate -- a drag whose result
+    // was never on screen must not be written to the project.
+    bool ours = *services->active_button_id == LYRIC_LANE_GESTURE_ID;
+    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && ours) return;
+    if (ours) *services->active_button_id = 0;
+    lane_reset_drag(editor);
+}
+
+// Where a cue should be drawn right now: its stored timing, unless the current
+// drag proposes something else. Preview and commit read the same clamped
+// numbers, so what the blocks show during a drag is what gets written.
+static void lane_preview_span(const Lyric_Editor *editor, const Lyric_Cue *cue,
+                              double *start, double *end)
+{
+    *start = cue->start_seconds;
+    *end = cue->end_seconds;
+    if (!editor->lane_drag_moved) return;
+    if (editor->lane_drag_zone == LYRIC_LANE_ZONE_BODY) {
+        if (!lyric_lane_selection_contains(&editor->lane_selection, cue->id)) return;
+        *start += editor->lane_drag_delta_seconds;
+        *end += editor->lane_drag_delta_seconds;
+    } else if (cue->id == editor->lane_drag_id) {
+        if (editor->lane_drag_zone == LYRIC_LANE_ZONE_START_EDGE) {
+            *start = editor->lane_drag_edge_seconds;
+        } else if (editor->lane_drag_zone == LYRIC_LANE_ZONE_END_EDGE) {
+            *end = editor->lane_drag_edge_seconds;
+        }
+    }
+}
+
+static void lane_commit_drag(Lyric_Editor *editor, Track *track,
+                             const Lyric_Editor_Services *services)
+{
+    Lyrics_Result result = LYRICS_OK;
+    if (editor->lane_drag_zone == LYRIC_LANE_ZONE_BODY) {
+        if (editor->lane_drag_delta_seconds == 0.0) return;
+        result = lyrics_shift_many(&track->lyrics, editor->lane_selection.ids,
+                                   editor->lane_selection.count,
+                                   editor->lane_drag_delta_seconds);
+    } else {
+        const Lyric_Cue *cue = lyrics_find(&track->lyrics, editor->lane_drag_id);
+        if (cue == NULL) return;
+        double start = cue->start_seconds;
+        double end = cue->end_seconds;
+        if (editor->lane_drag_zone == LYRIC_LANE_ZONE_START_EDGE) {
+            start = editor->lane_drag_edge_seconds;
+        } else {
+            end = editor->lane_drag_edge_seconds;
+        }
+        if (start == cue->start_seconds && end == cue->end_seconds) return;
+        result = lyrics_retime(&track->lyrics, editor->lane_drag_id, start, end);
+    }
+    if (result != LYRICS_OK) {
+        services->notice_push(UI_NOTICE_ERROR, "The cues were not moved",
+                              lyrics_result_string(result), NULL, false);
+        return;
+    }
+    // The editing form holds a copy of the cue it is bound to. Leaving it
+    // behind would make an untouched form read as a dirty draft and block
+    // every panel change until the user discarded an edit they never made.
+    if (editor->selected_id != 0) {
+        lyric_editor_ui_select(editor, track, editor->selected_id);
+    }
+    services->mark_project_dirty(track);
+}
+
+static void lane_gesture_update(Lyric_Editor *editor, Track *track,
+                                float track_length, const Timeline_View *view,
+                                Rectangle lane,
+                                const Lyric_Editor_Services *services)
+{
+    uint64_t *active = services->active_button_id;
+    Vector2 mouse = GetMousePosition();
+
+    if (*active == 0 && CheckCollisionPointRec(mouse, lane) &&
+        IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Lyric_Lane_Hit hit = lyric_lane_hit_test(&track->lyrics, view, lane.x,
+                                                 lane.width, mouse.x);
+        // Claim regardless of what was hit: an empty-lane press inside the lane
+        // must not fall through to the scrubber, or clearing a selection would
+        // also seek the transport.
+        *active = LYRIC_LANE_GESTURE_ID;
+        lane_reset_drag(editor);
+        editor->lane_drag_origin_x = mouse.x;
+        editor->lane_drag_origin_seconds = timeline_view_seconds_at(
+            view, mouse.x, lane.x, lane.width, (double)track_length);
+
+        if (hit.id == 0) {
+            lyric_lane_selection_clear(&editor->lane_selection);
+            return;
+        }
+        // A press that would rebind the editing form goes through the same
+        // unsaved-draft guard as every other context change.
+        if (hit.id != editor->selected_id &&
+            !lyric_editor_ui_allow_context_change(editor, track, services)) {
+            return;
+        }
+        editor->lane_drag_zone = hit.zone;
+        editor->lane_drag_id = hit.id;
+
+        Lyric_Lane_Click mode = lane_click_mode();
+        bool already = lyric_lane_selection_contains(&editor->lane_selection, hit.id);
+        // A plain press on a block that is already part of the selection keeps
+        // the selection so the whole set can be dragged; the collapse to one
+        // cue happens on release, and only if nothing was dragged.
+        if (!(mode == LYRIC_LANE_CLICK_REPLACE && already)) {
+            if (!lyric_lane_selection_apply(&editor->lane_selection, &track->lyrics,
+                                            hit.id, mode)) {
+                services->notice_push(UI_NOTICE_WARNING, "That range is too large",
+                                      "A lane selection holds at most 64 cues.",
+                                      NULL, false);
+                lane_reset_drag(editor);
+                return;
+            }
+        }
+        lyric_editor_ui_select(editor, track, hit.id);
+        return;
+    }
+
+    if (*active != LYRIC_LANE_GESTURE_ID) return;
+
+    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        if (editor->lane_drag_zone == LYRIC_LANE_ZONE_NONE) return;
+        if (fabsf(mouse.x - editor->lane_drag_origin_x) >=
+            (float)LYRIC_LANE_DRAG_THRESHOLD_PIXELS) {
+            editor->lane_drag_moved = true;
+        }
+        if (!editor->lane_drag_moved) return;
+        double pointer = timeline_view_seconds_at(view, mouse.x, lane.x, lane.width,
+                                                  (double)track_length);
+        if (editor->lane_drag_zone == LYRIC_LANE_ZONE_BODY) {
+            editor->lane_drag_delta_seconds = lyric_lane_clamp_move(
+                &track->lyrics, &editor->lane_selection,
+                pointer - editor->lane_drag_origin_seconds);
+        } else {
+            double start = 0.0;
+            double end = 0.0;
+            if (lyric_lane_clamp_resize(&track->lyrics, editor->lane_drag_id,
+                                        editor->lane_drag_zone ==
+                                            LYRIC_LANE_ZONE_START_EDGE,
+                                        pointer, &start, &end)) {
+                editor->lane_drag_edge_seconds =
+                    editor->lane_drag_zone == LYRIC_LANE_ZONE_START_EDGE ? start : end;
+            }
+        }
+        return;
+    }
+
+    // Released -- or the button was let go while the window was unfocused and
+    // no release edge ever arrived. Either way the claim is given back here,
+    // unconditionally: ui_widgets only frees an id through its owning widget,
+    // so a stranded claim freezes every button in the application (AGENTS.md).
+    if (editor->lane_drag_moved) {
+        lane_commit_drag(editor, track, services);
+    } else if (editor->lane_drag_id != 0 &&
+               lane_click_mode() == LYRIC_LANE_CLICK_REPLACE) {
+        (void)lyric_lane_selection_apply(&editor->lane_selection, &track->lyrics,
+                                         editor->lane_drag_id,
+                                         LYRIC_LANE_CLICK_REPLACE);
+    }
+    lane_reset_drag(editor);
+    *active = 0;
+}
+
 void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_length,
                             const Timeline_View *view,
                             Rectangle lane, Font font,
                             bool editor_open_on_click,
                             const Lyric_Editor_Services *services)
 {
+    // A cue deleted through the form leaves a stale id behind, and
+    // lyrics_shift_many rejects the whole move when it sees one -- correctly,
+    // but the user would only see dragging stop working.
+    lyric_lane_selection_prune(&editor->lane_selection, &track->lyrics);
+    lane_gesture_update(editor, track, track_length, view, lane, services);
+
     DrawRectangleRec(lane, COLOR_UI_RAISED);
     DrawLineEx((Vector2){lane.x, lane.y}, (Vector2){lane.x + lane.width, lane.y},
                1.0f, COLOR_UI_RULE);
@@ -254,16 +471,25 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
         DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
                    1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
     }
+    Lyric_Lane_Hit hover = *services->active_button_id == 0 ?
+        lyric_lane_hit_test(&track->lyrics, view, lane.x, lane.width,
+                            GetMousePosition().x) :
+        (Lyric_Lane_Hit){LYRIC_LANE_ZONE_NONE, 0};
+    (void)editor_open_on_click;
+
     for (size_t i = 0; i < track->lyrics.count; ++i) {
         const Lyric_Cue *cue = &track->lyrics.cues[i];
-        float left = (float)timeline_view_x_at(view, cue->start_seconds, lane.x, lane.width);
-        float right = (float)timeline_view_x_at(view, cue->end_seconds, lane.x, lane.width);
+        double preview_start = 0.0;
+        double preview_end = 0.0;
+        lane_preview_span(editor, cue, &preview_start, &preview_end);
+        float left = (float)timeline_view_x_at(view, preview_start, lane.x, lane.width);
+        float right = (float)timeline_view_x_at(view, preview_end, lane.x, lane.width);
         if (right < lane.x || left > lane.x + lane.width) continue;
         if (right - left < 3.0f) right = left + 3.0f;
-        // Clip the drawn block to the lane, but only after the hit test has the
-        // true edges: a block whose start scrolled off the left must not offer
-        // a start-edge grab handle at the window edge, which would be a handle
-        // for a boundary that is not there.
+        // Clip the drawn block to the lane. The hit test works from the true
+        // edges instead, so a block whose start scrolled off the left never
+        // offers a start-edge handle at the window border for a boundary that
+        // is not being shown.
         Rectangle block = {left, lane.y + 3.0f, right - left, lane.height - 6.0f};
         if (block.x < lane.x) {
             block.width -= lane.x - block.x;
@@ -273,18 +499,29 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
             block.width = lane.x + lane.width - block.x;
         }
         if (block.width < 1.0f) continue;
-        bool selected = cue->id == editor->selected_id;
-        Color fill = ColorAlpha(lyric_color, selected ? 0.82f : 0.38f);
-        if (CheckCollisionPointRec(GetMousePosition(), block)) fill = ColorAlpha(lyric_color, 0.68f);
+
+        bool in_selection = lyric_lane_selection_contains(&editor->lane_selection,
+                                                          cue->id);
+        bool hovered = hover.id == cue->id;
+        Color fill = ColorAlpha(lyric_color,
+                                in_selection ? 0.82f : hovered ? 0.68f : 0.38f);
         DrawRectangleRec(block, fill);
         DrawRectangleLinesEx(block, 1.0f, lyric_color);
-        if (CheckCollisionPointRec(GetMousePosition(), block) &&
-            IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            if (cue->id == editor->selected_id ||
-                lyric_editor_ui_allow_context_change(editor, track, services)) {
-                lyric_editor_ui_select(editor, track, cue->id);
-                (void)editor_open_on_click;
-            }
+        // The cue the editing form is bound to gets a second, inset outline.
+        // Selection and form target are different things now that a drag can
+        // move several cues at once, and one shade of amber cannot say both.
+        if (cue->id == editor->selected_id) {
+            DrawRectangleLinesEx((Rectangle){block.x + 1.0f, block.y + 1.0f,
+                                             block.width - 2.0f, block.height - 2.0f},
+                                 1.0f, COLOR_UI_INK);
+        }
+        // Show the grab handles only where a press would actually take them,
+        // so the affordance and the hit test cannot drift apart.
+        if (hovered && hover.zone != LYRIC_LANE_ZONE_BODY) {
+            float handle_x = hover.zone == LYRIC_LANE_ZONE_START_EDGE ?
+                block.x : block.x + block.width - 2.0f;
+            DrawRectangleRec((Rectangle){handle_x, block.y, 2.0f, block.height},
+                             COLOR_UI_INK);
         }
     }
 
@@ -461,7 +698,7 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
         if (state & BS_CLICKED) {
             if (cue->id == editor->selected_id ||
                 lyric_editor_ui_allow_context_change(editor, track, services)) {
-                lyric_editor_ui_select(editor, track, cue->id);
+                lyric_editor_ui_select_single(editor, track, cue->id);
             }
         }
     }

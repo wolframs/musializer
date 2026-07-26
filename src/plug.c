@@ -106,7 +106,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 29
+#define PLUG_STATE_VERSION 30
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -3101,8 +3101,8 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
     if (probe.lyric_selection > 0) {
         if (probe.panel != PLUG_UI_PANEL_LYRICS) return false;
         if (track == NULL || probe.lyric_selection > track->lyrics.count) return false;
-        lyric_editor_ui_select(&p->lyric_editor, track,
-                               track->lyrics.cues[probe.lyric_selection - 1].id);
+        lyric_editor_ui_select_single(&p->lyric_editor, track,
+                                      track->lyrics.cues[probe.lyric_selection - 1].id);
     }
 
     if (probe.assist_confirmation) {
@@ -7755,6 +7755,13 @@ MUSIALIZER_PLUG void plug_update(void)
     }
 
     end_tooltip_frame();
+
+    // The lyric lane holds its press for the length of a drag and can only give
+    // it back on a frame it is drawn. This abandons a drag whose lane went away.
+    {
+        Lyric_Editor_Services lane_services = lyric_editor_services();
+        lyric_editor_ui_release_lane_claim(&p->lyric_editor, &lane_services);
+    }
 
     // A pressed control can disappear before release (panel switch, expiring
     // notice, render transition). Individual controls get first chance to

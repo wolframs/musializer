@@ -42,8 +42,15 @@ The upstream demo below remains a lovely snapshot of where it began.
   color-aware glyph canvas with live spectral density, animated glyph waves,
   and compression-resilient CRT scanlines; author timeline events and edit
   timed lyrics in the application.
-- Navigate with a depth-shaded whole-track waveform, draggable capped hairline
-  playhead, one-second buttons, and exact tenth/one/ten-second keyboard steps.
+- Navigate with a depth-shaded waveform, draggable capped hairline playhead,
+  one-second buttons, and exact tenth/one/ten-second keyboard steps. The strip
+  zooms about the pointer with the mouse wheel and pans with shift+wheel or a
+  middle-button drag, down to a quarter-second window; a Fit button and a span
+  readout appear while zoomed.
+- Retime lyrics by hand in the cue lane: click to select, ctrl+click to add or
+  remove, shift+click to take a range, drag the selection to move every cue in
+  it together, and drag a block's leading or trailing edge to change one
+  boundary. A move is applied in full or not at all.
 - Generate local measured section suggestions and timed lyrics: lyrics already
   present in the track's metadata or a sibling text file are synchronized
   deterministically against Whisper word timing, and only tracks without
@@ -177,6 +184,18 @@ The normal workflow is:
    rather than landing a truncated cue; because a cue is a single line, pasted
    line breaks become spaces and the panel reports that. There is no caret or
    selection yet: text is edited at the end of the field.
+
+   Timing can also be edited directly in the cue lane under the waveform. A
+   click selects a cue and binds the form to it; <kbd>Ctrl</kbd>+click adds or
+   removes one cue; <kbd>Shift</kbd>+click takes everything between the anchor
+   and the cue you clicked. Dragging a block's body moves the whole selection
+   together, and dragging its leading or trailing edge moves that one boundary.
+   A multi-cue move is applied in full or not at all, so a selection that would
+   run off either end of the track does not move at all rather than moving
+   partway; the blocks stop under the pointer at the limit instead of snapping
+   back. Zoom in first when cues are close together: the lane's grab handles
+   only appear once a block is wide enough to aim at, and a lane selection
+   holds at most 64 cues.
 4. Open **Assist** for timed-lyric help, measured scene planning, semantic music
    interpretation, or the complete pipeline. Selecting a workflow first shows
    its local/remote data boundary. Results are validated and staged with a

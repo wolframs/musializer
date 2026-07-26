@@ -98,6 +98,7 @@ grabbed. See `Plug_Ui_Probe` in `src/plug.h`.
 | `size` | `WIDTHxHEIGHT` | Clamped by `SetWindowMinSize` |
 | `lyric` | cue index, 1-based | Selects an existing cue; needs `panel=lyrics` |
 | `assist` | `confirm` | Arms the confirmation prompt; needs `panel=assist` |
+| `zoom` | factor >= 1 | Zooms the timeline strip about the playhead; `1` is the whole track |
 
 It applies the same state transition the corresponding button performs, rather
 than injecting synthetic mouse or keyboard events, and it never touches project
@@ -108,7 +109,9 @@ Reaching a state matters more than it sounds. The two worst defects found so far
 -- action buttons registering hit boxes outside a collapsed panel, and an editing
 form drawn past the bottom of the screen -- were both invisible to capture until
 `assist=confirm` and `lyric=N` existed. If a surface cannot be photographed, it
-does not get reviewed. An unknown key, a repeated key, an unparsable
+does not get reviewed. `zoom` exists for the same reason: the probe cannot turn
+a mouse wheel, so without it every capture would show the whole track and a
+zoomed strip would be unreviewable. An unknown key, a repeated key, an unparsable
 value, or a panel requested without a track is an error, so a typo in a capture
 script cannot quietly photograph the wrong state.
 
@@ -120,6 +123,14 @@ store written by `preset_store_save` makes the populated block photographable:
 ```sh
 MUSIALIZER_PRESET_STORE=/tmp/presets.json tools/ui_capture.sh build/ui-review/shots
 ```
+
+**What the probe still cannot reach is anything that needs a held button.**
+It applies state, so it can show a selected cue but not a cue being dragged,
+a resize handle under the pointer, or a partially panned strip. Lyric lane
+direct manipulation is therefore covered by headless tests of
+`lyric_lane_edit.c` -- hit zones, selection rules, drag clamping -- while the
+wiring between those rules and the mouse is only exercised by hand. Do not
+describe a lane drag as verified on the strength of a capture.
 
 Build such a fixture with the real serializer rather than hand-authoring the
 JSON; the store is strict and a hand-written file that fails to load leaves the
