@@ -146,6 +146,7 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
     bool seen_lyric = false;
     bool seen_zoom = false;
     bool seen_style = false;
+    bool seen_fonts = false;
     char *cursor = buffer;
     while (cursor != NULL && *cursor != '\0') {
         char *comma = strchr(cursor, ',');
@@ -197,6 +198,22 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
             if (seen_style || strcmp(value, "caption") != 0) return false;
             request->probe.caption_style_pane = true;
             seen_style = true;
+        } else if (strcmp(key, "fonts") == 0) {
+            if (seen_fonts) return false;
+            request->probe.font_browser = true;
+            // "consent" photographs the panel that asks; a path photographs
+            // the list, loaded from disk so a capture run never becomes the
+            // thing that contacts Google.
+            if (strcmp(value, "consent") != 0) {
+                int written = snprintf(request->probe.font_catalogue_path,
+                                       sizeof(request->probe.font_catalogue_path),
+                                       "%s", value);
+                if (written <= 0 ||
+                    (size_t)written >= sizeof(request->probe.font_catalogue_path)) {
+                    return false;
+                }
+            }
+            seen_fonts = true;
         } else if (strcmp(key, "assist") == 0) {
             if (seen_assist || strcmp(value, "confirm") != 0) return false;
             request->probe.assist_confirmation = true;
@@ -269,6 +286,10 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          playhead (1 = whole track),\n"
         "                          style=caption shows the caption typography\n"
         "                          pane (needs panel=lyrics),\n"
+        "                          fonts=consent shows the face browser's network\n"
+        "                          consent panel; fonts=PATH loads a family list\n"
+        "                          from disk instead, so a capture never opens a\n"
+        "                          network connection (needs panel=lyrics),\n"
         "                          play=0|1. The transport is parked unless\n"
         "                          play=1; audio-reactive scenes need play=1 but\n"
         "                          then capture a frame that is not reproducible.\n"

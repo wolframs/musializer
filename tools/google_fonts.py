@@ -49,6 +49,10 @@ ALLOWED_HOSTS = frozenset(
 
 CATALOGUE_SCHEMA_VERSION = "musializer.font-catalogue/v1"
 MANIFEST_SCHEMA_VERSION = "musializer.font-import/v1"
+# Fixed name inside the job's own output directory. The application reads this
+# rather than the JSON manifest, for the same reason it reads the catalogue as
+# TSV: it has no JSON parser and this table does not justify one.
+MANIFEST_INDEX_NAME = "import.tsv"
 
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
@@ -354,7 +358,31 @@ def fetch_family(
         "licence_name": licence_name,
     }
     atomic_write_json(destination / f"{stem}.manifest.json", manifest)
+    write_manifest_index(manifest, destination / MANIFEST_INDEX_NAME)
     return manifest
+
+
+def write_manifest_index(manifest: dict[str, Any], path: Path) -> None:
+    """Emit the manifest as one bounded TSV row for the application.
+
+    Written last, and by rename, so its presence is what says the download
+    finished: a job killed halfway leaves no index and the result is discarded
+    rather than half-applied.
+    """
+    fields = [
+        manifest["family"],
+        manifest["font_path"],
+        manifest["font_sha256"],
+        manifest["licence_path"],
+        manifest["licence_sha256"],
+        manifest["licence_name"],
+    ]
+    if any("\t" in field or "\n" in field for field in fields):
+        raise AnalysisValidationError("manifest field contains a separator")
+    payload = f"{MANIFEST_SCHEMA_VERSION}\t1\n" + "\t".join(fields) + "\n"
+    temporary = path.with_name(path.name + ".partial")
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.replace(path)
 
 
 def dry_run_description(command: str, family: str | None) -> dict[str, Any]:

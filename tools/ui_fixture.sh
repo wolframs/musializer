@@ -76,4 +76,20 @@ wait "$xvfb_pid" 2>/dev/null || true
 [ -f "$OUT/demo.musi" ] || { echo "fixture project was not written; see $OUT/fixture.log" >&2; exit 1; }
 grep -c 'applied 8 lyrics, 3 scene sections' "$OUT/fixture.log" >/dev/null || {
     echo "bridge did not apply as expected; see $OUT/fixture.log" >&2; exit 1; }
+# A family list for the caption face browser. Written here rather than fetched,
+# because a capture run must never be the thing that contacts Google Fonts. The
+# entries are real families, so the coverage notes a review reads are the ones
+# the product would show.
+cat > "$OUT/fonts.tsv" <<'CATALOGUE'
+musializer.font-catalogue/v1	8
+Roboto	Sans Serif	cyrillic,cyrillic-ext,greek,greek-ext,latin,latin-ext,vietnamese
+Open Sans	Sans Serif	cyrillic,cyrillic-ext,greek,greek-ext,latin,latin-ext,vietnamese
+Inter	Sans Serif	cyrillic,cyrillic-ext,greek,greek-ext,latin,latin-ext,vietnamese
+Lato	Sans Serif	latin,latin-ext
+Playfair Display	Serif	cyrillic,latin,latin-ext,vietnamese
+EB Garamond	Serif	cyrillic,cyrillic-ext,greek,greek-ext,latin,latin-ext,vietnamese
+Space Mono	Monospace	latin,latin-ext,vietnamese
+Caveat	Handwriting	cyrillic,cyrillic-ext,latin,latin-ext
+CATALOGUE
+
 echo "fixture ready: $OUT/demo.musi"

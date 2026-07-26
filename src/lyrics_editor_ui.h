@@ -8,6 +8,8 @@
 #include <raylib.h>
 
 #include "editor_draft.h"
+#include "font_catalogue.h"
+#include "font_import_state.h"
 #include "lyric_lane_edit.h"
 #include "lyrics.h"
 #include "timeline_view.h"
@@ -53,7 +55,41 @@ typedef struct {
     double lane_drag_delta_seconds;
     double lane_drag_edge_seconds;
     bool lane_drag_moved;
+
+    // The caption font browser, which is a third whole-panel pane beside the
+    // cue editor and the style form. It takes the panel for the same reason
+    // the style form does: a searchable list of eighteen hundred families does
+    // not fit beside a cue list, and a control that does not fit must not be
+    // drawn.
+    bool font_pane;
+    char font_query[FONT_CATALOGUE_FAMILY_CAPACITY];
+    bool font_query_active;
+    size_t font_list_first;
+    // An index into the catalogue, meaningful only while font_selection_valid.
+    // A catalogue refresh can renumber every row, so the family name is
+    // re-resolved rather than the index being trusted across a reload.
+    size_t font_selected;
+    bool font_selection_valid;
 } Lyric_Editor;
+
+// What the browser needs from the host to talk to the network boundary. All of
+// it is optional: a build or a state without an importer leaves the pointer
+// NULL and the pane simply is not offered.
+typedef struct Font_Browser_Services {
+    const Font_Catalogue *(*catalogue)(void);
+    Font_Import_Panel (*panel)(void);
+    // The last thing that happened, for the failure and progress lines. Never
+    // NULL; empty when there is nothing to say.
+    const char *(*status)(void);
+    void (*allow_network)(void);
+    void (*browse)(void);
+    void (*fetch)(const char *family);
+    void (*cancel)(void);
+    // The family currently imported into this project, or NULL for none. This
+    // is what makes the third face choice appear at all.
+    const char *(*imported_family)(void);
+    void (*clear_import)(void);
+} Font_Browser_Services;
 
 // Services the editor needs from the host. The host implements these as thin
 // wrappers over its notice queue and project-dirty flag; the editor never
@@ -64,6 +100,9 @@ typedef struct {
     void (*mark_project_dirty)(Track *track);
     Font (*font)(void);
     uint64_t *active_button_id;
+    // NULL when this build cannot import a face, which is a supported state:
+    // the browser is simply not offered.
+    const Font_Browser_Services *fonts;
 } Lyric_Editor_Services;
 
 void lyric_editor_ui_init(Lyric_Editor *editor);

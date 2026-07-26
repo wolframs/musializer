@@ -106,7 +106,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 32
+#define PLUG_STATE_VERSION 33
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -152,6 +152,26 @@ typedef struct {
     // loaded from so a project switch reloads it and a redraw does not.
     Font caption_imported_font;
     char caption_imported_font_path[PLUG_RELOAD_PATH_CAPACITY];
+
+    // Caption face import. Allocated the first time the browser is opened,
+    // because a quarter of a megabyte of family names is not worth carrying in
+    // every session that never asks for one.
+    Font_Catalogue *font_catalogue;
+    bool font_catalogue_loaded;
+    // Deliberately not persisted. Consent to contact a third party is asked
+    // once per run, not remembered until someone thinks to withdraw it.
+    bool font_network_allowed;
+    Font_Import_Job font_job;
+    Font_Import_Job_State font_job_state;
+    uint64_t font_job_nonce;
+    double font_job_started_at;
+    double font_job_finished_at;
+    Nob_Proc font_process;
+    char font_job_directory[PLUG_RELOAD_PATH_CAPACITY];
+    char font_job_log[PLUG_RELOAD_PATH_CAPACITY];
+    char font_job_artifact[PLUG_RELOAD_PATH_CAPACITY];
+    char font_job_family[FONT_CATALOGUE_FAMILY_CAPACITY];
+    char font_job_status[UI_NOTICE_DETAIL_CAPACITY];
     Shader circle;
     int circle_radius_location;
     int circle_power_location;
@@ -1519,6 +1539,401 @@ static bool lyric_editor_has_unsaved_draft(const Track *track)
     return lyric_editor_ui_has_unsaved_draft(&p->lyric_editor, track);
 }
 
+// ---------------------------------------------------------------------------
+// Caption face import.
+//
+// The second network boundary in this application, and the narrower one. MiMo
+// sends the user's audio; this sends a family name. Both are opt-in, and this
+// one is asked again every run, because "I wanted a font earlier" is not
+// standing permission to contact anyone later.
+// ---------------------------------------------------------------------------
+
+static bool find_font_helper(char *path, size_t capacity)
+{
+    if (path == NULL || capacity == 0) return false;
+    const char *override = getenv("MUSIALIZER_FONT_HELPER");
+    if (override != NULL && override[0] != '\0') {
+        int length = snprintf(path, capacity, "%s", override);
+        return length > 0 && (size_t)length < capacity && FileExists(path);
+    }
+    const char *application = GetApplicationDirectory();
+    const char *patterns[] = {
+        "%s/tools/google_fonts.py",    // extracted distribution
+        "%s/../tools/google_fonts.py", // source build in ./build
+    };
+    for (size_t i = 0; i < NOB_ARRAY_LEN(patterns); ++i) {
+        int length = snprintf(path, capacity, patterns[i], application);
+        if (length > 0 && (size_t)length < capacity && FileExists(path)) return true;
+    }
+    int length = snprintf(path, capacity, "./tools/google_fonts.py");
+    return length > 0 && (size_t)length < capacity && FileExists(path);
+}
+
+static bool font_helper_available(void)
+{
+    char helper[PLUG_RELOAD_PATH_CAPACITY];
+    return find_font_helper(helper, sizeof(helper));
+}
+
+static void font_job_set_status(const char *detail)
+{
+    snprintf(p->font_job_status, sizeof(p->font_job_status), "%s",
+             detail == NULL ? "" : detail);
+}
+
+static void font_job_fail(const char *detail)
+{
+    p->font_job_state = FONT_IMPORT_FAILED;
+    p->font_job_finished_at = GetTime();
+    font_job_set_status(detail);
+}
+
+// Reads a helper artifact into memory with a hard ceiling. A worker that was
+// killed while writing leaves a short or absent file, which reads as a failed
+// job rather than a partial catalogue.
+static char *font_job_read_artifact(const char *path, size_t *size)
+{
+    *size = 0;
+    if (path == NULL || path[0] == '\0' || !FileExists(path)) return NULL;
+    int length = 0;
+    unsigned char *data = LoadFileData(path, &length);
+    if (data == NULL) return NULL;
+    if (length <= 0 || (size_t)length > FONT_CATALOGUE_MAX_BYTES) {
+        UnloadFileData(data);
+        return NULL;
+    }
+    char *copy = malloc((size_t)length + 1u);
+    if (copy == NULL) {
+        UnloadFileData(data);
+        return NULL;
+    }
+    memcpy(copy, data, (size_t)length);
+    copy[length] = '\0';
+    UnloadFileData(data);
+    *size = (size_t)length;
+    return copy;
+}
+
+static bool font_job_start(Font_Import_Job job, const char *family)
+{
+    if (font_import_job_is_active(p->font_job_state)) return false;
+    char helper[PLUG_RELOAD_PATH_CAPACITY];
+    if (!find_font_helper(helper, sizeof(helper))) {
+        font_job_fail("The font helper is missing from this installation.");
+        return false;
+    }
+    if (!nob_mkdir_if_not_exists("./build/fonts")) {
+        font_job_fail("The font workspace could not be created. Check directory permissions.");
+        return false;
+    }
+    // Every job writes into its own directory, keyed by the nonce it will be
+    // recognised by. A cancelled worker that keeps writing therefore writes
+    // somewhere nothing will ever read.
+    p->font_job_nonce = font_import_next_nonce(p->font_job_nonce);
+    int written = snprintf(p->font_job_directory, sizeof(p->font_job_directory),
+                           "./build/fonts/%016llx",
+                           (unsigned long long)p->font_job_nonce);
+    if (written <= 0 || (size_t)written >= sizeof(p->font_job_directory) ||
+        !nob_mkdir_if_not_exists(p->font_job_directory)) {
+        font_job_fail("A unique font workspace could not be reserved.");
+        return false;
+    }
+    // A truncated artifact path would have the job write one file and the
+    // reader look for another, which reads as "the helper produced nothing".
+    int log_length = snprintf(p->font_job_log, sizeof(p->font_job_log),
+                              "%s/job.log", p->font_job_directory);
+    int artifact_length;
+    if (job == FONT_IMPORT_JOB_CATALOGUE) {
+        artifact_length = snprintf(p->font_job_artifact,
+                                   sizeof(p->font_job_artifact),
+                                   "%s/catalogue.tsv", p->font_job_directory);
+        p->font_job_family[0] = '\0';
+    } else {
+        if (family == NULL || family[0] == '\0') return false;
+        artifact_length = snprintf(p->font_job_artifact,
+                                   sizeof(p->font_job_artifact), "%s/%s",
+                                   p->font_job_directory,
+                                   FONT_IMPORT_MANIFEST_INDEX_NAME);
+        snprintf(p->font_job_family, sizeof(p->font_job_family), "%s", family);
+    }
+    if (log_length <= 0 || (size_t)log_length >= sizeof(p->font_job_log) ||
+        artifact_length <= 0 ||
+        (size_t)artifact_length >= sizeof(p->font_job_artifact)) {
+        font_job_fail("The font workspace path is too long for this installation.");
+        return false;
+    }
+
+    Nob_Cmd command = {0};
+    Nob_Procs processes = {0};
+#ifdef _WIN32
+    nob_cmd_append(&command, "py", "-3");
+#else
+    nob_cmd_append(&command, "python3");
+#endif
+    nob_cmd_append(&command, helper);
+    if (job == FONT_IMPORT_JOB_CATALOGUE) {
+        char cache[PLUG_RELOAD_PATH_CAPACITY];
+        // The reduced JSON cache is shared across jobs so a second browse in
+        // the same week does not fetch three megabytes again; only the index
+        // is per-job.
+        snprintf(cache, sizeof(cache), "./build/fonts/catalogue.json");
+        nob_cmd_append(&command, "catalogue", cache, "--index", p->font_job_artifact);
+    } else {
+        nob_cmd_append(&command, "fetch", p->font_job_family, p->font_job_directory);
+    }
+    bool started = nob_cmd_run(&command, .async = &processes, .max_procs = 1,
+                               .stderr_path = p->font_job_log);
+    nob_cmd_free(command);
+    if (!started || processes.count != 1) {
+        nob_da_free(processes);
+        font_job_fail("Python could not launch the font helper. Review the job log for details.");
+        return false;
+    }
+    p->font_process = processes.items[0];
+    nob_da_free(processes);
+    p->font_job = job;
+    p->font_job_state = FONT_IMPORT_RUNNING;
+    p->font_job_started_at = GetTime();
+    font_job_set_status(job == FONT_IMPORT_JOB_CATALOGUE ?
+                        "Contacting fonts.google.com." : p->font_job_family);
+    return true;
+}
+
+static void font_job_finish_catalogue(void)
+{
+    size_t size = 0;
+    char *text = font_job_read_artifact(p->font_job_artifact, &size);
+    if (text == NULL) {
+        font_job_fail("The helper finished without writing a family list.");
+        return;
+    }
+    if (p->font_catalogue == NULL) {
+        p->font_catalogue = calloc(1, sizeof(*p->font_catalogue));
+    }
+    if (p->font_catalogue == NULL) {
+        free(text);
+        font_job_fail("There was not enough memory to hold the family list.");
+        return;
+    }
+    Font_Catalogue_Result parsed = font_catalogue_parse(p->font_catalogue, text, size);
+    free(text);
+    if (parsed != FONT_CATALOGUE_OK) {
+        font_job_fail(font_catalogue_result_string(parsed));
+        return;
+    }
+    p->font_catalogue_loaded = true;
+    p->font_job_state = FONT_IMPORT_SUCCEEDED;
+    p->font_job_finished_at = GetTime();
+    font_job_set_status("");
+}
+
+static void font_job_finish_fetch(void)
+{
+    Track *track = current_track();
+    if (track == NULL) {
+        font_job_fail("The track this face was for is no longer open.");
+        return;
+    }
+    size_t size = 0;
+    char *text = font_job_read_artifact(p->font_job_artifact, &size);
+    if (text == NULL) {
+        font_job_fail("The helper finished without writing a usable result.");
+        return;
+    }
+    Font_Import_Manifest manifest;
+    Font_Catalogue_Result parsed = font_import_manifest_parse(&manifest, text, size);
+    free(text);
+    if (parsed != FONT_CATALOGUE_OK) {
+        font_job_fail(font_catalogue_result_string(parsed));
+        return;
+    }
+    // The helper's digests are claims. Both files are re-hashed here, before
+    // anything is rasterized or written into a project, because everything
+    // downstream treats a recorded digest as the identity of the bytes.
+    char font_hash[SHA256_HEX_SIZE];
+    char licence_hash[SHA256_HEX_SIZE];
+    if (!sha256_file_hex(manifest.font_path, font_hash) ||
+        strcmp(font_hash, manifest.font_sha256) != 0 ||
+        !sha256_file_hex(manifest.licence_path, licence_hash) ||
+        strcmp(licence_hash, manifest.licence_sha256) != 0) {
+        font_job_fail("The downloaded face did not match the digest recorded for it.");
+        return;
+    }
+    if (!caption_imported_font_load(manifest.font_path)) {
+        font_job_fail("The downloaded face is not a font this build can rasterize.");
+        return;
+    }
+    // Only now does the project learn about it. The face becomes the selected
+    // one in the same step that records the asset, so the two cannot disagree.
+    Musi_Caption_Style *style = &track->caption_style;
+    style->font.present = true;
+    snprintf(style->font.family, sizeof(style->font.family), "%s", manifest.family);
+    snprintf(style->font.sha256, sizeof(style->font.sha256), "%s",
+             manifest.font_sha256);
+    snprintf(style->font.licence_sha256, sizeof(style->font.licence_sha256), "%s",
+             manifest.licence_sha256);
+    snprintf(style->font.licence_name, sizeof(style->font.licence_name), "%s",
+             manifest.licence_name);
+    // The stored paths are written by the save, which is what decides where
+    // inside the bundle they land. Until then they are empty.
+    style->font.path[0] = '\0';
+    style->font.licence_path[0] = '\0';
+    style->face = MUSI_CAPTION_FACE_IMPORTED;
+    snprintf(track->caption_font_path, sizeof(track->caption_font_path), "%s",
+             manifest.font_path);
+    snprintf(track->caption_licence_path, sizeof(track->caption_licence_path), "%s",
+             manifest.licence_path);
+    mark_project_dirty(track);
+
+    p->font_job_state = FONT_IMPORT_SUCCEEDED;
+    p->font_job_finished_at = GetTime();
+    font_job_set_status("");
+    char detail[UI_NOTICE_DETAIL_CAPACITY];
+    snprintf(detail, sizeof(detail),
+             "%s is now the caption face. It is licensed under %s, and both the "
+             "face and its licence are saved with the project.",
+             manifest.family, manifest.licence_name);
+    notice_push(UI_NOTICE_SUCCESS, "Caption face imported", detail, NULL, false);
+    TraceLog(LOG_INFO, "FONT: imported %s (%s)", manifest.family,
+             manifest.licence_name);
+}
+
+static void font_job_cancel(void)
+{
+    if (!font_import_job_is_active(p->font_job_state)) return;
+    p->font_job_state = FONT_IMPORT_CANCELLING;
+    font_job_set_status("Waiting for the helper to stop.");
+#ifndef _WIN32
+    if (p->font_process != NOB_INVALID_PROC) kill(p->font_process, SIGTERM);
+#endif
+}
+
+static void poll_font_job(void)
+{
+    if (!font_import_job_is_active(p->font_job_state)) {
+        if (font_import_outcome_expired(p->font_job_state, p->font_job_finished_at,
+                                        GetTime())) {
+            p->font_job_state = FONT_IMPORT_IDLE;
+            p->font_job = FONT_IMPORT_JOB_NONE;
+        }
+        return;
+    }
+    if (p->font_process == NOB_INVALID_PROC) {
+        // A job with no handle can never finish. Reporting it beats leaving a
+        // panel that says "downloading" until the application is restarted.
+        p->font_job_state = FONT_IMPORT_FAILED;
+        p->font_job_finished_at = GetTime();
+        font_job_set_status("The helper process handle was lost.");
+        return;
+    }
+    if (font_import_job_deadline_expired(p->font_job, p->font_job_state,
+                                         p->font_job_started_at, GetTime())) {
+#ifndef _WIN32
+        kill(p->font_process, SIGKILL);
+#endif
+        (void)nob__proc_wait_async(p->font_process, 0);
+        p->font_process = NOB_INVALID_PROC;
+        p->font_job_state = FONT_IMPORT_TIMED_OUT;
+        p->font_job_finished_at = GetTime();
+        font_job_set_status("The request took longer than this build will wait.");
+        return;
+    }
+    int status = nob__proc_wait_async(p->font_process, 0);
+    if (status == 0) return;
+    p->font_process = NOB_INVALID_PROC;
+    bool cancelled = p->font_job_state == FONT_IMPORT_CANCELLING;
+    if (cancelled) {
+        p->font_job_state = FONT_IMPORT_CANCELLED;
+        p->font_job_finished_at = GetTime();
+        font_job_set_status("");
+        return;
+    }
+    if (status < 0) {
+        p->font_job_state = FONT_IMPORT_FAILED;
+        p->font_job_finished_at = GetTime();
+        font_job_set_status("The helper could not complete the request. "
+                            "Check the network connection and the job log.");
+        TraceLog(LOG_WARNING, "FONT: helper failed; see %s", p->font_job_log);
+        return;
+    }
+    if (p->font_job == FONT_IMPORT_JOB_CATALOGUE) font_job_finish_catalogue();
+    else font_job_finish_fetch();
+}
+
+static const Font_Catalogue *font_service_catalogue(void)
+{
+    return p->font_catalogue_loaded ? p->font_catalogue : NULL;
+}
+
+static Font_Import_Panel font_service_panel(void)
+{
+    return font_import_panel(p->font_network_allowed, p->font_catalogue_loaded,
+                             p->font_job, p->font_job_state);
+}
+
+static const char *font_service_status(void)
+{
+    return p->font_job_status;
+}
+
+static void font_service_allow_network(void)
+{
+    p->font_network_allowed = true;
+}
+
+static void font_service_browse(void)
+{
+    Font_Import_Block block = font_import_browse_block(
+        font_helper_available(), p->font_network_allowed, p->font_job_state);
+    if (block != FONT_IMPORT_ALLOWED) {
+        font_job_fail(font_import_block_reason(block));
+        return;
+    }
+    (void)font_job_start(FONT_IMPORT_JOB_CATALOGUE, NULL);
+}
+
+static void font_service_fetch(const char *family)
+{
+    Font_Import_Block block = font_import_fetch_block(
+        font_helper_available(), p->font_network_allowed, p->font_job_state,
+        family != NULL && family[0] != '\0', current_track() != NULL);
+    if (block != FONT_IMPORT_ALLOWED) {
+        font_job_fail(font_import_block_reason(block));
+        return;
+    }
+    (void)font_job_start(FONT_IMPORT_JOB_FETCH, family);
+}
+
+static const char *font_service_imported_family(void)
+{
+    Track *track = current_track();
+    if (track == NULL || !track->caption_style.font.present) return NULL;
+    return track->caption_style.font.family;
+}
+
+static void font_service_clear_import(void)
+{
+    Track *track = current_track();
+    if (track == NULL) return;
+    memset(&track->caption_style.font, 0, sizeof(track->caption_style.font));
+    track->caption_font_path[0] = '\0';
+    track->caption_licence_path[0] = '\0';
+    caption_imported_font_unload();
+    mark_project_dirty(track);
+}
+
+static const Font_Browser_Services font_browser_services = {
+    .catalogue = font_service_catalogue,
+    .panel = font_service_panel,
+    .status = font_service_status,
+    .allow_network = font_service_allow_network,
+    .browse = font_service_browse,
+    .fetch = font_service_fetch,
+    .cancel = font_job_cancel,
+    .imported_family = font_service_imported_family,
+    .clear_import = font_service_clear_import,
+};
+
 static Lyric_Editor_Services lyric_editor_services(void)
 {
     return (Lyric_Editor_Services){
@@ -1526,6 +1941,7 @@ static Lyric_Editor_Services lyric_editor_services(void)
         .mark_project_dirty = mark_project_dirty,
         .font = ui_font,
         .active_button_id = &p->active_button_id,
+        .fonts = &font_browser_services,
     };
 }
 
@@ -3256,11 +3672,31 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
                                       track->lyrics.cues[probe.lyric_selection - 1].id);
     }
 
-    if (probe.caption_style_pane) {
+    if (probe.caption_style_pane || probe.font_browser) {
         if (probe.panel != PLUG_UI_PANEL_LYRICS) return false;
         p->lyric_editor.style_pane = true;
     } else {
         p->lyric_editor.style_pane = false;
+    }
+    p->lyric_editor.font_pane = probe.font_browser;
+    if (probe.font_catalogue_path[0] != '\0') {
+        if (!probe.font_browser) return false;
+        size_t size = 0;
+        char *text = font_job_read_artifact(probe.font_catalogue_path, &size);
+        if (text == NULL) return false;
+        if (p->font_catalogue == NULL) {
+            p->font_catalogue = calloc(1, sizeof(*p->font_catalogue));
+        }
+        Font_Catalogue_Result parsed = p->font_catalogue == NULL ?
+            FONT_CATALOGUE_ERROR_ARGUMENT :
+            font_catalogue_parse(p->font_catalogue, text, size);
+        free(text);
+        if (parsed != FONT_CATALOGUE_OK) return false;
+        // Loading a list from disk is not consent to fetch one. This grants it
+        // so the browsing state is reachable, and no request is made either
+        // way: the probe never starts a job.
+        p->font_catalogue_loaded = true;
+        p->font_network_allowed = true;
     }
 
     if (probe.assist_confirmation) {
@@ -6979,6 +7415,7 @@ static void preview_screen(void)
     if (early_track != NULL) UpdateMusicStream(early_track->music);
 
     poll_assist_job();
+    poll_font_job();
 
     if (IsFileDropped()) {
         FilePathList droppedFiles = LoadDroppedFiles();
@@ -7832,6 +8269,9 @@ MUSIALIZER_PLUG void plug_init(void)
     p->next_event_id = 1;
     p->assist_process = NOB_INVALID_PROC;
     p->assist_job_state = ASSIST_JOB_IDLE;
+    p->font_process = NOB_INVALID_PROC;
+    p->font_job_state = FONT_IMPORT_IDLE;
+    p->font_job = FONT_IMPORT_JOB_NONE;
     ui_notice_queue_init(&p->notices);
     p->lyric_editor.list_follow_selection = true;
     render_export_config_init(&p->render_config);
@@ -7876,7 +8316,10 @@ MUSIALIZER_PLUG void *plug_pre_reload(void)
 {
     if (p == NULL) return NULL;
 
-    const size_t allocation_count = 4 + p->tracks.count;
+    // p, tracks.items, one path per track, assist_candidate, font_catalogue,
+    // and the scene state. Every optional pointer still gets a slot: the
+    // inventory is sized for the worst case, not for what happens to be live.
+    const size_t allocation_count = 5 + p->tracks.count;
     Plug_Reload_Handoff *handoff = calloc(1, sizeof(*handoff));
     void **owned_allocations = calloc(allocation_count, sizeof(*owned_allocations));
     if (handoff != NULL && owned_allocations != NULL) {
@@ -7920,6 +8363,9 @@ MUSIALIZER_PLUG void *plug_pre_reload(void)
         }
         if (p->assist_candidate != NULL) {
             owned_allocations[handoff->owned_allocation_count++] = p->assist_candidate;
+        }
+        if (p->font_catalogue != NULL) {
+            owned_allocations[handoff->owned_allocation_count++] = p->font_catalogue;
         }
         const Scene_Descriptor *descriptor = scene_descriptor(p->scene.id);
         if (p->scene.state != NULL && (descriptor == NULL || descriptor->unload == NULL)) {
@@ -8049,6 +8495,7 @@ MUSIALIZER_PLUG void plug_shutdown(void)
     }
     free(p->tracks.items);
     free(p->assist_candidate);
+    free(p->font_catalogue);
     scene_instance_unload(&p->scene);
     if (IsRenderTextureValid(p->screen)) UnloadRenderTexture(p->screen);
     unload_assets();

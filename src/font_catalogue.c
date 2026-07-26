@@ -229,24 +229,103 @@ static bool contains_fold(const char *haystack, const char *needle)
     return false;
 }
 
+bool font_catalogue_entry_matches(const Font_Catalogue_Entry *entry,
+                                  const char *query)
+{
+    if (entry == NULL) return false;
+    return contains_fold(entry->family, query == NULL ? "" : query);
+}
+
 size_t font_catalogue_filter(const Font_Catalogue *catalogue, const char *query,
                              uint32_t required_scripts, size_t *indices,
                              size_t capacity, size_t *written)
 {
     if (written != NULL) *written = 0;
     if (catalogue == NULL) return 0;
-    const char *needle = query == NULL ? "" : query;
     size_t matched = 0;
     size_t stored = 0;
     for (size_t i = 0; i < catalogue->count; ++i) {
         const Font_Catalogue_Entry *entry = &catalogue->entries[i];
         if ((entry->scripts & required_scripts) != required_scripts) continue;
-        if (!contains_fold(entry->family, needle)) continue;
+        if (!font_catalogue_entry_matches(entry, query)) continue;
         ++matched;
         if (indices != NULL && stored < capacity) indices[stored++] = i;
     }
     if (written != NULL) *written = stored;
     return matched;
+}
+
+static bool sha256_hex(const char *text, size_t length)
+{
+    if (length != 64) return false;
+    for (size_t i = 0; i < length; ++i) {
+        char character = text[i];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) return false;
+    }
+    return true;
+}
+
+static bool copy_field(char *destination, size_t capacity, const char *text,
+                       size_t length)
+{
+    if (length == 0 || length >= capacity) return false;
+    memcpy(destination, text, length);
+    destination[length] = '\0';
+    return true;
+}
+
+Font_Catalogue_Result font_import_manifest_parse(Font_Import_Manifest *destination,
+                                                 const char *text, size_t size)
+{
+    if (destination == NULL || text == NULL) return FONT_CATALOGUE_ERROR_ARGUMENT;
+    if (size > FONT_CATALOGUE_MAX_BYTES) return FONT_CATALOGUE_ERROR_TOO_LARGE;
+
+    const char *end = text + size;
+    const char *newline = memchr(text, '\n', size);
+    if (newline == NULL) return FONT_CATALOGUE_ERROR_HEADER;
+    size_t header_length = (size_t)(newline - text);
+    const char *header_fields[2];
+    size_t header_lengths[2];
+    if (!split_row(text, header_length, header_fields, header_lengths, 2) ||
+        header_lengths[0] != strlen(FONT_IMPORT_MANIFEST_HEADER) ||
+        memcmp(header_fields[0], FONT_IMPORT_MANIFEST_HEADER,
+               header_lengths[0]) != 0) {
+        return FONT_CATALOGUE_ERROR_HEADER;
+    }
+    const char *row = newline + 1;
+    if (row >= end) return FONT_CATALOGUE_ERROR_EMPTY;
+    const char *row_end = memchr(row, '\n', (size_t)(end - row));
+    size_t row_length = row_end == NULL ? (size_t)(end - row)
+                                        : (size_t)(row_end - row);
+    const char *fields[6];
+    size_t lengths[6];
+    if (!split_row(row, row_length, fields, lengths, 6)) {
+        return FONT_CATALOGUE_ERROR_ROW;
+    }
+    if (!family_is_printable(fields[0], lengths[0])) {
+        return FONT_CATALOGUE_ERROR_FAMILY;
+    }
+    // Built into a local first, so a manifest that fails on its last field
+    // cannot leave the caller holding half of a previous import.
+    Font_Import_Manifest parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    if (!copy_field(parsed.family, sizeof(parsed.family), fields[0], lengths[0]) ||
+        !copy_field(parsed.font_path, sizeof(parsed.font_path), fields[1], lengths[1]) ||
+        !sha256_hex(fields[2], lengths[2]) ||
+        !copy_field(parsed.font_sha256, sizeof(parsed.font_sha256), fields[2],
+                    lengths[2]) ||
+        !copy_field(parsed.licence_path, sizeof(parsed.licence_path), fields[3],
+                    lengths[3]) ||
+        !sha256_hex(fields[4], lengths[4]) ||
+        !copy_field(parsed.licence_sha256, sizeof(parsed.licence_sha256), fields[4],
+                    lengths[4]) ||
+        !copy_field(parsed.licence_name, sizeof(parsed.licence_name), fields[5],
+                    lengths[5])) {
+        return FONT_CATALOGUE_ERROR_ROW;
+    }
+    *destination = parsed;
+    return FONT_CATALOGUE_OK;
 }
 
 bool font_catalogue_find(const Font_Catalogue *catalogue, const char *family,

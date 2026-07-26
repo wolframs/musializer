@@ -62,3 +62,10 @@ timeline-zoom-8x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom
 timeline-zoom-40x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom=40
 lyrics-caption-style|1600x900|--project PROJECT --ui-probe panel=lyrics,time=6,style=caption
 lyrics-caption-style-min|960x640|--project PROJECT --ui-probe panel=lyrics,time=6,style=caption,size=960x640
+# The face browser. fonts=consent is the panel that asks before any request is
+# made; fonts=PATH loads the fixture family list from disk, so neither capture
+# opens a network connection. The download itself cannot be photographed: the
+# probe applies state transitions and cannot press "Download and use".
+lyrics-font-consent|1600x900|--project PROJECT --ui-probe panel=lyrics,time=6,fonts=consent
+lyrics-font-browse|1600x900|--project PROJECT --ui-probe panel=lyrics,time=6,fonts=build/ui-review/fonts.tsv
+lyrics-font-browse-min|960x640|--project PROJECT --ui-probe panel=lyrics,time=6,fonts=build/ui-review/fonts.tsv,size=960x640

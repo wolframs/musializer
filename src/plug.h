@@ -75,6 +75,11 @@ typedef enum {
     PLUG_UI_PANEL_ASSIST,
 } Plug_Ui_Panel;
 
+// The probe crosses the plug boundary by value, so any path it carries is
+// copied rather than borrowed. Ample for a capture-script path and small
+// enough that the struct stays cheap to pass.
+#define PLUG_UI_PROBE_PATH_CAPACITY 512u
+
 typedef struct {
     Plug_Ui_Panel panel;
     bool fullscreen;
@@ -104,6 +109,17 @@ typedef struct {
     double timeline_zoom;
     // Show the caption-style pane instead of the cue form. Needs panel=lyrics.
     bool caption_style_pane;
+    // Show the caption face browser. Implies caption_style_pane.
+    bool font_browser;
+    // A family-list file to load straight into the browser, bypassing the
+    // network entirely. Without it the browser can only ever be photographed
+    // at its consent panel, and a capture run must not be the thing that
+    // contacts Google. Empty leaves consent ungranted.
+    //
+    // Owned by value rather than borrowed: the probe is parsed out of a buffer
+    // the parser owns and then handed across the plug boundary, so a pointer
+    // into that buffer would dangle by the time it is read.
+    char font_catalogue_path[PLUG_UI_PROBE_PATH_CAPACITY];
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

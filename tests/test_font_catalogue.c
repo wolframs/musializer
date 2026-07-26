@@ -188,6 +188,73 @@ TEST(font_catalogue_find_matches_a_family_exactly)
     free(catalogue);
 }
 
+#define MANIFEST_HEADER FONT_IMPORT_MANIFEST_HEADER "\t1\n"
+#define GOOD_DIGEST "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+TEST(font_import_manifest_reads_one_row_and_refuses_anything_else)
+{
+    Font_Import_Manifest manifest;
+    memset(&manifest, 0, sizeof(manifest));
+    static const char *const good =
+        MANIFEST_HEADER
+        "Space Mono\t/tmp/j/spacemono.ttf\t" GOOD_DIGEST
+        "\t/tmp/j/spacemono.licence.txt\t" GOOD_DIGEST "\tOFL-1.1\n";
+    REQUIRE_TRUE(font_import_manifest_parse(&manifest, good, strlen(good)) ==
+                 FONT_CATALOGUE_OK);
+    EXPECT_TRUE(strcmp(manifest.family, "Space Mono") == 0);
+    EXPECT_TRUE(strcmp(manifest.font_path, "/tmp/j/spacemono.ttf") == 0);
+    EXPECT_TRUE(strcmp(manifest.font_sha256, GOOD_DIGEST) == 0);
+    EXPECT_TRUE(strcmp(manifest.licence_name, "OFL-1.1") == 0);
+
+    static const char *const bad[] = {
+        "",
+        FONT_IMPORT_MANIFEST_HEADER,
+        MANIFEST_HEADER,
+        "musializer.font-import/v2\t1\nA\t/a\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\tOFL\n",
+        // Too few columns, and too many.
+        MANIFEST_HEADER "A\t/a\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\n",
+        MANIFEST_HEADER "A\t/a\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\tOFL\textra\n",
+        // A digest that is short, uppercase, or not hex at all. Accepting one
+        // would mean comparing it against a real hash and always failing, with
+        // the confusing message that the download did not match.
+        MANIFEST_HEADER "A\t/a\tabc\t/b\t" GOOD_DIGEST "\tOFL\n",
+        MANIFEST_HEADER "A\t/a\t" GOOD_DIGEST "\t/b\tZZZ" GOOD_DIGEST "\tOFL\n",
+        // Empty family, path, or licence name.
+        MANIFEST_HEADER "\t/a\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\tOFL\n",
+        MANIFEST_HEADER "A\t\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\tOFL\n",
+        MANIFEST_HEADER "A\t/a\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\t\n",
+    };
+    for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+        Font_Import_Manifest attempted = manifest;
+        EXPECT_TRUE(font_import_manifest_parse(&attempted, bad[i], strlen(bad[i])) !=
+                    FONT_CATALOGUE_OK);
+        // Whatever failed, the caller still holds the import it already had.
+        EXPECT_TRUE(memcmp(&attempted, &manifest, sizeof(manifest)) == 0);
+    }
+    EXPECT_TRUE(font_import_manifest_parse(NULL, good, strlen(good)) ==
+                FONT_CATALOGUE_ERROR_ARGUMENT);
+    EXPECT_TRUE(font_import_manifest_parse(&manifest, NULL, 0) ==
+                FONT_CATALOGUE_ERROR_ARGUMENT);
+}
+
+TEST(font_import_manifest_refuses_a_path_longer_than_it_can_hold)
+{
+    Font_Import_Manifest manifest;
+    char *text = malloc(FONT_IMPORT_PATH_CAPACITY + 512);
+    REQUIRE_TRUE(text != NULL);
+    char *path = malloc(FONT_IMPORT_PATH_CAPACITY + 8);
+    REQUIRE_TRUE(path != NULL);
+    memset(path, 'p', FONT_IMPORT_PATH_CAPACITY);
+    path[FONT_IMPORT_PATH_CAPACITY] = '\0';
+    snprintf(text, FONT_IMPORT_PATH_CAPACITY + 512,
+             MANIFEST_HEADER "A\t%s\t" GOOD_DIGEST "\t/b\t" GOOD_DIGEST "\tOFL\n",
+             path);
+    EXPECT_TRUE(font_import_manifest_parse(&manifest, text, strlen(text)) ==
+                FONT_CATALOGUE_ERROR_ROW);
+    free(path);
+    free(text);
+}
+
 TEST(font_scripts_describe_names_coverage_and_never_overruns)
 {
     char text[64];

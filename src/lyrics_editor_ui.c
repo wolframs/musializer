@@ -575,6 +575,261 @@ static void caption_swatch_row(const Lyric_Editor_Services *services, uint64_t i
     }
 }
 
+// Smallest pane that can hold a search field, three rows, and the action row.
+// Below this the browser is not drawn at all, because a list you cannot read is
+// worse than a sentence saying why. Measured against the panel the 960x640
+// minimum window actually produces, not guessed: the style form next door spent
+// a release refusing to draw at every size because its threshold was a guess.
+#define FONT_BROWSER_MIN_HEIGHT 150.0f
+#define FONT_BROWSER_MIN_WIDTH 420.0f
+#define FONT_BROWSER_ROW_HEIGHT 26.0f
+
+static void font_query_backspace(char *text)
+{
+    size_t length = strlen(text);
+    while (length > 0) {
+        --length;
+        // Step back over UTF-8 continuation bytes so one press deletes one
+        // character rather than half of one.
+        if (((unsigned char)text[length] & 0xC0) != 0x80) break;
+    }
+    text[length] = '\0';
+}
+
+static void font_query_input(Lyric_Editor *editor)
+{
+    if (!editor->font_query_active) return;
+    if (IsKeyPressed(KEY_BACKSPACE)) font_query_backspace(editor->font_query);
+    if (IsKeyPressed(KEY_ESCAPE)) editor->font_query_active = false;
+    bool chord = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
+        // A family name is ASCII by the helper's own validation, so anything
+        // else could never match and is simply not accepted into the query.
+        if (chord || codepoint < 0x20 || codepoint > 0x7E) continue;
+        size_t length = strlen(editor->font_query);
+        if (length + 1 < sizeof(editor->font_query)) {
+            editor->font_query[length] = (char)codepoint;
+            editor->font_query[length + 1] = '\0';
+        }
+    }
+}
+
+static void draw_font_consent(Rectangle form,
+                              const Lyric_Editor_Services *services)
+{
+    const Font_Browser_Services *fonts = services->fonts;
+    DrawTextEx(svc_font(services), "Import a caption face from Google Fonts",
+               (Vector2){form.x, form.y}, 16.0f, 1.0f, COLOR_UI_INK);
+    // The consequence, stated before the button that causes it. What is sent
+    // is genuinely small, and saying so is more useful than a vague warning.
+    static const char *const lines[] = {
+        "Musializer will contact fonts.google.com and fonts.gstatic.com to list",
+        "and download faces, and raw.githubusercontent.com for the licence each",
+        "face is distributed under.",
+        "",
+        "Only a family name is sent. No audio, lyrics, or project data leaves",
+        "this machine. Musializer asks again next time it starts.",
+    };
+    // The button is placed from the bottom and the explanation fills what is
+    // left above it. A consent panel that keeps its prose and loses its button
+    // is a question with no way to answer it.
+    Rectangle allow = {form.x, form.y + form.height - 30.0f, 200.0f, 30.0f};
+    for (size_t i = 0; i < sizeof(lines)/sizeof(lines[0]); ++i) {
+        float y = form.y + 26.0f + (float)i*17.0f;
+        if (y + 17.0f > allow.y - 6.0f) break;
+        DrawTextEx(svc_font(services), lines[i], (Vector2){form.x, y}, 13.0f, 1.0f,
+                   COLOR_UI_MUTED);
+    }
+    if (text_button_sized(services, UINT64_C(0x464F4E54434E5354), allow,
+                          "Allow and browse fonts", false, 14.0f) & BS_CLICKED) {
+        if (fonts->allow_network != NULL) fonts->allow_network();
+        if (fonts->browse != NULL) fonts->browse();
+    }
+}
+
+static void draw_font_browser(Lyric_Editor *editor, Rectangle form,
+                              const Lyric_Editor_Services *services)
+{
+    const Font_Browser_Services *fonts = services->fonts;
+    if (form.height < FONT_BROWSER_MIN_HEIGHT || form.width < FONT_BROWSER_MIN_WIDTH) {
+        DrawTextEx(svc_font(services), "Enlarge the window to browse caption faces.",
+                   (Vector2){form.x, form.y}, 15.0f, 1.0f, COLOR_UI_MUTED);
+        return;
+    }
+    Font_Import_Panel panel = fonts->panel != NULL ? fonts->panel()
+                                                   : FONT_IMPORT_PANEL_CONSENT;
+    const char *status = fonts->status != NULL ? fonts->status() : "";
+    if (panel == FONT_IMPORT_PANEL_CONSENT) {
+        draw_font_consent(form, services);
+        return;
+    }
+    if (panel == FONT_IMPORT_PANEL_LOADING || panel == FONT_IMPORT_PANEL_FETCHING ||
+        panel == FONT_IMPORT_PANEL_CANCELLING) {
+        static const char *const headings[] = {
+            [FONT_IMPORT_PANEL_LOADING]    = "Fetching the family list...",
+            [FONT_IMPORT_PANEL_FETCHING]   = "Downloading the face...",
+            [FONT_IMPORT_PANEL_CANCELLING] = "Stopping...",
+        };
+        DrawTextEx(svc_font(services), headings[panel],
+                   (Vector2){form.x, form.y}, 16.0f, 1.0f, COLOR_UI_INK);
+        if (status[0] != '\0') {
+            DrawTextEx(svc_font(services), status,
+                       (Vector2){form.x, form.y + 24.0f}, 13.0f, 1.0f, COLOR_UI_MUTED);
+        }
+        Rectangle cancel = {form.x, form.y + 52.0f, 110.0f, 30.0f};
+        // A cancel that is already in flight must not be offered again: the
+        // second press would claim the id and do nothing visible.
+        if (panel != FONT_IMPORT_PANEL_CANCELLING &&
+            cancel.y + cancel.height <= form.y + form.height &&
+            (text_button_sized(services, UINT64_C(0x464F4E5443414E43), cancel,
+                               "Cancel", false, 14.0f) & BS_CLICKED)) {
+            if (fonts->cancel != NULL) fonts->cancel();
+        }
+        return;
+    }
+    if (panel == FONT_IMPORT_PANEL_FAILED) {
+        DrawTextEx(svc_font(services), "The font request did not finish",
+                   (Vector2){form.x, form.y}, 16.0f, 1.0f, COLOR_UI_INK);
+        DrawTextEx(svc_font(services), status[0] != '\0' ? status :
+                   "No further detail was reported.",
+                   (Vector2){form.x, form.y + 24.0f}, 13.0f, 1.0f, COLOR_UI_MUTED);
+        Rectangle retry = {form.x, form.y + 52.0f, 110.0f, 30.0f};
+        if (retry.y + retry.height <= form.y + form.height &&
+            (text_button_sized(services, UINT64_C(0x464F4E5452455452), retry,
+                               "Try again", false, 14.0f) & BS_CLICKED)) {
+            if (fonts->browse != NULL) fonts->browse();
+        }
+        return;
+    }
+
+    const Font_Catalogue *catalogue = fonts->catalogue != NULL ? fonts->catalogue()
+                                                               : NULL;
+    if (catalogue == NULL || catalogue->count == 0) {
+        DrawTextEx(svc_font(services), "No families are loaded.",
+                   (Vector2){form.x, form.y}, 15.0f, 1.0f, COLOR_UI_MUTED);
+        return;
+    }
+
+    Rectangle search = {form.x, form.y, form.width - 160.0f, 28.0f};
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        editor->font_query_active =
+            CheckCollisionPointRec(GetMousePosition(), search);
+    }
+    DrawRectangleRec(search, COLOR_UI_RAISED);
+    DrawRectangleLinesEx(search, editor->font_query_active ? 2.0f : 1.0f,
+                         editor->font_query_active ? COLOR_ACCENT : COLOR_UI_RULE);
+    const char *shown = editor->font_query[0] != '\0' ? editor->font_query
+                                                      : "Search families";
+    DrawTextEx(svc_font(services), shown,
+               (Vector2){search.x + 8.0f, search.y + 6.0f}, 15.0f, 1.0f,
+               editor->font_query[0] != '\0' ? COLOR_UI_INK : COLOR_UI_MUTED);
+    font_query_input(editor);
+
+    size_t indices[64];
+    size_t written = 0;
+    size_t matched = font_catalogue_filter(catalogue, editor->font_query, 0,
+                                           NULL, 0, NULL);
+
+    // The list gets whatever is left after the search field and the action row.
+    float list_top = form.y + 36.0f;
+    float list_bottom = form.y + form.height - 38.0f;
+    size_t visible = list_bottom > list_top ?
+                     (size_t)((list_bottom - list_top)/FONT_BROWSER_ROW_HEIGHT) : 0;
+    if (visible > sizeof(indices)/sizeof(indices[0])) {
+        visible = sizeof(indices)/sizeof(indices[0]);
+    }
+    size_t first = editor->font_list_first;
+    if (CheckCollisionPointRec(GetMousePosition(),
+            (Rectangle){form.x, list_top, form.width, list_bottom - list_top})) {
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0.0f) {
+            int64_t moved = (int64_t)first - (int64_t)(wheel*3.0f);
+            first = moved < 0 ? 0 : (size_t)moved;
+        }
+    }
+    if (first + visible > matched) first = matched > visible ? matched - visible : 0;
+    editor->font_list_first = first;
+
+    // Only the visible window is collected, so scrolling a catalogue of
+    // eighteen hundred families never walks more than a screenful.
+    written = 0;
+    if (visible > 0) {
+        size_t skipped = 0;
+        size_t stored = 0;
+        for (size_t i = 0; i < catalogue->count && stored < visible; ++i) {
+            const Font_Catalogue_Entry *entry = &catalogue->entries[i];
+            if (!font_catalogue_entry_matches(entry, editor->font_query)) continue;
+            if (skipped < first) { ++skipped; continue; }
+            indices[stored++] = i;
+        }
+        written = stored;
+    }
+
+    for (size_t row = 0; row < written; ++row) {
+        const Font_Catalogue_Entry *entry = &catalogue->entries[indices[row]];
+        Rectangle row_boundary = {
+            form.x, list_top + (float)row*FONT_BROWSER_ROW_HEIGHT,
+            form.width, FONT_BROWSER_ROW_HEIGHT - 2.0f,
+        };
+        bool selected = editor->font_selection_valid &&
+                        editor->font_selected == indices[row];
+        int state = button_with_id(services,
+                                   UINT64_C(0x464F4E5452000000) + indices[row],
+                                   row_boundary);
+        Color background = selected ? GetColor(0xE7ECFAFF) : COLOR_UI_RAISED;
+        if (state & BS_HOVEROVER) background = COLOR_TRACK_BUTTON_HOVEROVER;
+        DrawRectangleRec(row_boundary, background);
+        DrawTextEx(svc_font(services), entry->family,
+                   (Vector2){row_boundary.x + 8.0f, row_boundary.y + 4.0f},
+                   15.0f, 1.0f, COLOR_UI_INK);
+        char coverage[64];
+        font_scripts_describe(entry->scripts, coverage, sizeof(coverage));
+        char note[128];
+        snprintf(note, sizeof(note), "%s  -  %s", font_category_name(entry->category),
+                 coverage);
+        Vector2 note_size = MeasureTextEx(svc_font(services), note, 12.0f, 1.0f);
+        // Drawn only where it fits, so a narrow pane loses the note rather
+        // than printing it through the family name.
+        float note_x = row_boundary.x + row_boundary.width - note_size.x - 8.0f;
+        if (note_x > row_boundary.x + 160.0f) {
+            DrawTextEx(svc_font(services), note,
+                       (Vector2){note_x, row_boundary.y + 6.0f}, 12.0f, 1.0f,
+                       COLOR_UI_MUTED);
+        }
+        if (state & BS_CLICKED) {
+            editor->font_selected = indices[row];
+            editor->font_selection_valid = true;
+        }
+    }
+
+    char count[64];
+    snprintf(count, sizeof(count), "%zu of %zu", written, matched);
+    Vector2 count_size = MeasureTextEx(svc_font(services), count, 13.0f, 1.0f);
+    DrawTextEx(svc_font(services), count,
+               (Vector2){form.x + form.width - count_size.x, form.y + 8.0f},
+               13.0f, 1.0f, COLOR_UI_MUTED);
+
+    Rectangle action = {form.x, form.y + form.height - 32.0f, 150.0f, 30.0f};
+    bool can_import = editor->font_selection_valid &&
+                      editor->font_selected < catalogue->count;
+    if (text_button_sized(services, UINT64_C(0x464F4E54494D5054), action,
+                          "Download and use", false, 14.0f) & BS_CLICKED) {
+        if (can_import && fonts->fetch != NULL) {
+            fonts->fetch(catalogue->entries[editor->font_selected].family);
+        }
+    }
+    if (!can_import) {
+        DrawTextEx(svc_font(services), "Choose a family first.",
+                   (Vector2){action.x + action.width + 10.0f, action.y + 8.0f},
+                   13.0f, 1.0f, COLOR_UI_MUTED);
+    } else {
+        DrawTextEx(svc_font(services),
+                   catalogue->entries[editor->font_selected].family,
+                   (Vector2){action.x + action.width + 10.0f, action.y + 8.0f},
+                   13.0f, 1.0f, COLOR_UI_INK);
+    }
+}
+
 static void draw_caption_style_form(Lyric_Editor *editor, Track *track,
                                     Rectangle form,
                                     const Lyric_Editor_Services *services)
@@ -598,11 +853,18 @@ static void draw_caption_style_form(Lyric_Editor *editor, Track *track,
     float right_width = column_width - label_width;
     bool changed = false;
 
-    static const char *const face_labels[2] = {"Alegreya", "Space Grotesk"};
+    // The imported face is offered only when the project actually carries one.
+    // A third choice that selects a face the file does not have would be a
+    // control whose only outcome is a validation failure on save.
+    const Font_Browser_Services *fonts = services->fonts;
+    const char *imported = fonts != NULL && fonts->imported_family != NULL ?
+                           fonts->imported_family() : NULL;
+    const char *face_labels[3] = {"Alegreya", "Space Grotesk", imported};
+    size_t face_choices = imported != NULL ? 3u : 2u;
     Rectangle face_row = {left_x, form.y, left_width, 26.0f};
     caption_label(services, "FACE", form.x, face_row.y, face_row.height);
     int face = caption_choice_row(services, UINT64_C(0x4341504641434500), face_row,
-                                  face_labels, 2, (int)style->face);
+                                  face_labels, face_choices, (int)style->face);
     if (face >= 0 && (Musi_Caption_Face)face != style->face) {
         style->face = (Musi_Caption_Face)face;
         changed = true;
@@ -641,6 +903,31 @@ static void draw_caption_style_form(Lyric_Editor *editor, Track *track,
     DrawTextEx(svc_font(services),
                "Sizes are fractions of the frame, so exports match the preview.",
                (Vector2){form.x, form.y + 140.0f}, 12.0f, 1.0f, COLOR_UI_MUTED);
+
+    // Reaching the browser from the face row is what makes the third choice
+    // obtainable. Offered only when the host can actually import one.
+    if (fonts != NULL) {
+        Rectangle import_face = {left_x, form.y + 158.0f, 132.0f, 26.0f};
+        Rectangle forget_face = {import_face.x + import_face.width + 6.0f,
+                                 import_face.y, 74.0f, 26.0f};
+        bool room = import_face.y + import_face.height <= form.y + form.height;
+        if (room && (text_button_sized(services, UINT64_C(0x464F4E544F50454E),
+                                       import_face, "Import a face...", false,
+                                       13.0f) & BS_CLICKED)) {
+            editor->font_pane = true;
+        }
+        if (room && imported != NULL &&
+            forget_face.x + forget_face.width <= form.x + column_width &&
+            (text_button_sized(services, UINT64_C(0x464F4E5446474554), forget_face,
+                               "Remove", false, 13.0f) & BS_CLICKED)) {
+            // Dropping the asset must drop the face that named it in the same
+            // step, or the project would validate as an imported face with
+            // nothing behind it.
+            style->face = MUSI_CAPTION_FACE_ALEGREYA;
+            if (fonts->clear_import != NULL) fonts->clear_import();
+            changed = true;
+        }
+    }
 
     const float readout_width = 44.0f;
     float slider_width = right_width - readout_width - 6.0f;
@@ -876,19 +1163,24 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
     // controls and the cue list is not part of the decision being made, so
     // hiding it is what makes the controls fit at all.
     if (editor->style_pane) {
+        bool browsing = editor->font_pane && services->fonts != NULL;
         Rectangle toggle = {list.x, list.y - 3.0f, 58.0f, 34.0f};
         if (text_button_sized(services, UINT64_C(0x43415053544C4500), toggle,
-                              "Cues", false, 14.0f) & BS_CLICKED) {
-            editor->style_pane = false;
+                              browsing ? "Back" : "Cues", false, 14.0f) & BS_CLICKED) {
+            // Back leaves the browser without leaving the style pane, which is
+            // where the face the browser just imported is chosen.
+            if (browsing) editor->font_pane = false;
+            else editor->style_pane = false;
         }
-        DrawTextEx(svc_font(services), "CAPTION STYLE",
+        DrawTextEx(svc_font(services), browsing ? "CAPTION FACE" : "CAPTION STYLE",
                    (Vector2){toggle.x + toggle.width + 8.0f, list.y},
                    18.0f, 1.0f, signal);
         Rectangle style_form = {
             boundary.x + padding, list.y + 38.0f,
             boundary.width - padding*2.0f, boundary.height - padding*2.0f - 38.0f,
         };
-        draw_caption_style_form(editor, track, style_form, services);
+        if (browsing) draw_font_browser(editor, style_form, services);
+        else draw_caption_style_form(editor, track, style_form, services);
         return;
     }
 
@@ -993,6 +1285,11 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
             }
         } else {
             editor->style_pane = false;
+            // Leaving typography behind closes the browser with it: coming
+            // back to a half-finished search nobody remembers starting is
+            // worse than coming back to the controls.
+            editor->font_pane = false;
+            editor->font_query_active = false;
         }
     }
     Rectangle add = {form.x + form.width - 92.0f, form.y - 3.0f, 92.0f, 34.0f};
