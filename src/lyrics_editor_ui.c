@@ -573,7 +573,7 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
             services->mark_project_dirty(track);
         }
     }
-    DrawTextEx(svc_font(services), "Ctrl+Enter applies the edit",
+    DrawTextEx(svc_font(services), "Ctrl+Enter applies the edit  |  Ctrl+V pastes",
                (Vector2){form.x, apply.y + apply.height + 7.0f}, 14.0f, 1.0f,
                COLOR_UI_MUTED);
     if (editor->text_active &&
