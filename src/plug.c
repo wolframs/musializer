@@ -4899,24 +4899,34 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         p->scene_settings_reset_track = p->current_track;
         notice_dismiss(&p->scene_settings_reset_notice_id);
     }
+    const char *reset_label = p->scene_settings_reset_undo_available ? "Undo reset" :
+                              p->scene_settings_reset_confirmation ? "Confirm" : "Reset";
+    bool can_expand = scene_settings_can_expand_window();
+    const char *expand_label = "Expand";
+
+    // The expand control appears only when it does something. It used to sit
+    // there disabled at every window that already fits the inspector -- which is
+    // the common case -- reading "Fit" or "Expanded" with a tooltip explaining
+    // why it was inert. A third of the header row spent saying "this button
+    // does nothing right now" is worse than the button not being there, and
+    // both inert states are already legible from the window itself.
     float button_y = boundary.y + 72.0f;
     const float header_gap = 6.0f;
-    float button_width = (boundary.width - padding*2.0f - header_gap*2.0f)/3.0f;
+    size_t header_count = can_expand ? 3u : 2u;
+    float button_width = (boundary.width - padding*2.0f -
+                          header_gap*(float)(header_count - 1u))/(float)header_count;
     Rectangle reset = {boundary.x + padding, button_y, button_width,
                        UI_COMPACT_BUTTON_HEIGHT};
     Rectangle expand = {reset.x + reset.width + header_gap, button_y,
                         button_width, UI_COMPACT_BUTTON_HEIGHT};
-    Rectangle hide = {expand.x + expand.width + header_gap, button_y,
-                      button_width, UI_COMPACT_BUTTON_HEIGHT};
-    const char *reset_label = p->scene_settings_reset_undo_available ? "Undo reset" :
-                              p->scene_settings_reset_confirmation ? "Confirm" : "Reset";
-    bool can_expand = scene_settings_can_expand_window();
-    const char *expand_label = can_expand ? "Expand" :
-                               p->scene_settings_window_expanded ? "Expanded" : "Fit";
-    // All three labels change with state. Sizing them together stops the header
-    // from reflowing its typography every time Reset arms or the window expands.
+    Rectangle hide = {(can_expand ? expand.x + expand.width : reset.x + reset.width) +
+                      header_gap, button_y, button_width, UI_COMPACT_BUTTON_HEIGHT};
+    // Labels change with state. Sizing them together stops the header from
+    // reflowing its typography every time Reset arms or the window expands.
     const char *header_labels[3] = {reset_label, expand_label, "Hide"};
-    float header_font = uniform_row_font_size(header_labels, 3, button_width,
+    if (!can_expand) header_labels[1] = "Hide";
+    float header_font = uniform_row_font_size(header_labels, header_count,
+                                              button_width,
                                               UI_COMPACT_BUTTON_HEIGHT);
     int reset_state = p->scene_settings_reset_confirmation ?
         danger_text_button_sized(UINT64_C(0x53455454494E4752), reset,
@@ -4963,15 +4973,9 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         }
         tooltip(expand, "Expand the application window for this inspector",
                 SIDE_BOTTOM, false);
-    } else {
-        disabled_text_button_sized(expand, expand_label, false, header_font);
-        tooltip(expand, p->scene_settings_window_expanded ?
-                "The application window is already expanded" :
-                "The inspector is fitted inside the current window",
-                SIDE_BOTTOM, false);
     }
     if (text_button_sized(UINT64_C(0x53455454494E4748), hide,
-                          header_labels[2], false, header_font) & BS_CLICKED) {
+                          "Hide", false, header_font) & BS_CLICKED) {
         set_scene_settings_open(false);
     }
 
