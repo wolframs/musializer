@@ -1313,6 +1313,34 @@ prerequisite for D1. Each new engine `.c` must appear in **both** lists in
   lookup, word-level timing in the C model, CUDA whisper rebuild (the /tmp
   whisper.cpp build is CPU-only; a toolkit install is the user's call).
 
+### 2026-07-26 (later) - clearing the non-gated backlog
+
+- **Palette contrast is now checked, not assumed.** Colours moved to a
+  raylib-free `ui_palette.h` so the headless suite can read the same numbers the
+  app draws with (the test binary links only `-lm`, so `GetColor` was never
+  callable from a test). Two real failures fixed: the warning colour was 3.96:1
+  as live notice text, and disabled text was 2.89:1 on one background and 3.09:1
+  on the other. One failure deliberately not fixed and recorded as **gate D7**:
+  an enabled button's border is 1.41:1 against a near-white panel, and darkening
+  `COLOR_UI_RULE` would change every divider in the workspace.
+- **Tune header** drops the expand button when it cannot expand. The panel's own
+  Hide is kept despite the toolbar duplicate, because a close control on the
+  panel is what people reach for.
+- **Cadence** keeps the word being sung legible; timing extracted to
+  `scene_cadence_timing.c`.
+- **Sidebar elasticity inverted** (item 6): the tracks panel is content-fit and
+  the browser takes the remainder, with both caps raised together.
+
+Two false negatives worth remembering, both from sampling the wrong moment:
+rendering 5.1-5.4 s of the demo fixture photographs the *gap* between cues (cue 1
+ends at 5.2, cue 2 starts at 5.4), where Cadence draws an ambient particle field
+that resembles the bug closely enough to be mistaken for a null result. Read the
+cue bounds out of the `.musi` before choosing a render window.
+
+Left alone on purpose: gates D1-D7, and backlog item 10 (lyric lane dragging),
+which needs D4 answered first because it wants the same press as scene-cue
+editing and the two must agree on `active_button_id` ownership.
+
 ### 2026-07-26 - working the UI backlog
 
 Five backlog items and one completeness-critic gap, each verified in the running
