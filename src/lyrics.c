@@ -78,6 +78,57 @@ static Lyrics_Result validate_cue(const Lyrics_Document *document, const Lyric_C
     return validate_text(cue->text);
 }
 
+Lyrics_Result lyrics_text_append(char *text, size_t capacity,
+                                 const char *addition, bool *flattened)
+{
+    if (flattened != NULL) *flattened = false;
+    if (text == NULL || addition == NULL || capacity == 0) return LYRICS_ERROR_NULL;
+    // validate_text only ever inspects the first LYRICS_TEXT_CAPACITY bytes, so
+    // a larger buffer cannot hold a longer valid cue anyway.
+    if (capacity > LYRICS_TEXT_CAPACITY) capacity = LYRICS_TEXT_CAPACITY;
+
+    size_t length = 0;
+    while (length < capacity && text[length] != 0) length += 1;
+    if (length == capacity) return LYRICS_ERROR_TEXT_TOO_LONG;
+
+    // Stage the addition before touching the draft: everything below can still
+    // reject, and a rejection must leave the caller's buffer untouched.
+    char staged[LYRICS_TEXT_CAPACITY];
+    size_t staged_length = 0;
+    bool collapsed = false;
+    for (const unsigned char *cursor = (const unsigned char *)addition;
+         *cursor != 0; ++cursor) {
+        unsigned char byte = *cursor;
+        if (byte == '\n' || byte == '\r' || byte == '\t') {
+            byte = ' ';
+            collapsed = true;
+        } else if (byte < 0x20 || byte == 0x7F) {
+            return LYRICS_ERROR_INVALID_CUE;
+        }
+        // These replacements are all single-byte ASCII, so they can never land
+        // inside a multi-byte sequence.
+        if (staged_length + 1 >= sizeof(staged)) return LYRICS_ERROR_TEXT_TOO_LONG;
+        staged[staged_length++] = (char)byte;
+    }
+    staged[staged_length] = '\0';
+    if (staged_length == 0) return LYRICS_ERROR_INVALID_CUE;
+    if (length + staged_length >= capacity) return LYRICS_ERROR_TEXT_TOO_LONG;
+
+    // The joined text has to satisfy exactly the contract a stored cue does,
+    // which is what catches a paste that splices two halves of a sequence.
+    char combined[LYRICS_TEXT_CAPACITY];
+    memcpy(combined, text, length);
+    memcpy(combined + length, staged, staged_length);
+    combined[length + staged_length] = '\0';
+    Lyrics_Result valid = validate_text(combined);
+    if (valid != LYRICS_OK) return valid;
+
+    memcpy(text + length, staged, staged_length);
+    text[length + staged_length] = '\0';
+    if (flattened != NULL) *flattened = collapsed;
+    return LYRICS_OK;
+}
+
 static size_t find_index(const Lyrics_Document *document, uint64_t id)
 {
     if (document == NULL || id == 0 || document->count > LYRICS_CUE_CAPACITY) {

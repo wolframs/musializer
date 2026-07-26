@@ -203,3 +203,128 @@ TEST(lyrics_bridge_rejects_timing_that_cannot_round_trip_in_milliseconds)
     EXPECT_TRUE(lyrics_bridge_export(&document, NULL, 0, &required) ==
                 LYRICS_ERROR_INVALID_CUE);
 }
+
+// --- Pasting into a draft ---------------------------------------------------
+//
+// The draft field is append-only, so a paste lands at the end. What matters is
+// that it lands whole or not at all: truncating to fit would cut a multi-byte
+// sequence and produce a draft that can never be applied.
+
+TEST(lyrics_text_append_adds_to_the_end_of_a_draft)
+{
+    char text[LYRICS_TEXT_CAPACITY] = "We were carving ";
+    bool flattened = true;
+    REQUIRE_TRUE(lyrics_text_append(text, sizeof(text), "light out of the quiet",
+                                    &flattened) == LYRICS_OK);
+    EXPECT_TRUE(strcmp(text, "We were carving light out of the quiet") == 0);
+    EXPECT_FALSE(flattened);
+
+    // Appending to an empty draft is the ordinary first paste.
+    char empty[LYRICS_TEXT_CAPACITY] = "";
+    REQUIRE_TRUE(lyrics_text_append(empty, sizeof(empty), "First line", NULL) ==
+                 LYRICS_OK);
+    EXPECT_TRUE(strcmp(empty, "First line") == 0);
+}
+
+TEST(lyrics_text_append_flattens_line_breaks_and_says_so)
+{
+    // Copying two lines from a lyrics sheet is the common case. A cue is one
+    // line by contract, so the breaks collapse rather than the paste failing.
+    char text[LYRICS_TEXT_CAPACITY] = "";
+    bool flattened = false;
+    REQUIRE_TRUE(lyrics_text_append(text, sizeof(text), "one\r\ntwo\tthree\n",
+                                    &flattened) == LYRICS_OK);
+    EXPECT_TRUE(strcmp(text, "one  two three ") == 0);
+    EXPECT_TRUE(flattened);
+}
+
+TEST(lyrics_text_append_refuses_an_over_long_paste_whole)
+{
+    char text[LYRICS_TEXT_CAPACITY];
+    memset(text, 'a', sizeof(text) - 1);
+    text[sizeof(text) - 1] = '\0';
+
+    char before[LYRICS_TEXT_CAPACITY];
+    memcpy(before, text, sizeof(before));
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "more", NULL) ==
+                LYRICS_ERROR_TEXT_TOO_LONG);
+    // Byte-for-byte untouched: no partial write, no truncation to fit.
+    EXPECT_TRUE(memcmp(text, before, sizeof(before)) == 0);
+
+    // A paste larger than the whole buffer is refused the same way.
+    char room[LYRICS_TEXT_CAPACITY] = "short";
+    char huge[LYRICS_TEXT_CAPACITY*2];
+    memset(huge, 'b', sizeof(huge) - 1);
+    huge[sizeof(huge) - 1] = '\0';
+    EXPECT_TRUE(lyrics_text_append(room, sizeof(room), huge, NULL) ==
+                LYRICS_ERROR_TEXT_TOO_LONG);
+    EXPECT_TRUE(strcmp(room, "short") == 0);
+}
+
+TEST(lyrics_text_append_never_splits_a_multi_byte_sequence)
+{
+    // Fill the draft so only a few bytes remain, then paste a 3-byte codepoint
+    // that does not fit. Truncating to the remaining room would leave a
+    // continuation byte dangling and the draft could never be applied.
+    char text[LYRICS_TEXT_CAPACITY];
+    size_t filled = sizeof(text) - 3;
+    memset(text, 'a', filled);
+    text[filled] = '\0';
+
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "\xE6\xBC\xA2", NULL) ==
+                LYRICS_ERROR_TEXT_TOO_LONG);
+    EXPECT_EQ_SIZE(strlen(text), filled);
+    // Still valid on its own terms after the refusal.
+    Lyric_Cue cue = {.start_seconds = 0.0, .end_seconds = 1.0};
+    memcpy(cue.text, text, filled + 1);
+    Lyrics_Document document;
+    REQUIRE_TRUE(lyrics_document_init(&document, 10.0) == LYRICS_OK);
+    EXPECT_TRUE(lyrics_insert(&document, &cue, NULL) == LYRICS_OK);
+}
+
+TEST(lyrics_text_append_rejects_bytes_the_user_could_not_see)
+{
+    char text[LYRICS_TEXT_CAPACITY] = "keep";
+
+    // A control character is refused outright rather than stripped, so the cue
+    // never silently differs from what was copied.
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "bad\x01here", NULL) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(strcmp(text, "keep") == 0);
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "del\x7F", NULL) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(strcmp(text, "keep") == 0);
+
+    // Malformed UTF-8 fails the same validation a stored cue faces.
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "\xE6\xBC", NULL) ==
+                LYRICS_ERROR_INVALID_UTF8);
+    EXPECT_TRUE(strcmp(text, "keep") == 0);
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "\xFF", NULL) ==
+                LYRICS_ERROR_INVALID_UTF8);
+    EXPECT_TRUE(strcmp(text, "keep") == 0);
+
+    // An empty clipboard is not an edit.
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), "", NULL) ==
+                LYRICS_ERROR_INVALID_CUE);
+    EXPECT_TRUE(strcmp(text, "keep") == 0);
+
+    EXPECT_TRUE(lyrics_text_append(NULL, sizeof(text), "x", NULL) == LYRICS_ERROR_NULL);
+    EXPECT_TRUE(lyrics_text_append(text, sizeof(text), NULL, NULL) == LYRICS_ERROR_NULL);
+    EXPECT_TRUE(lyrics_text_append(text, 0, "x", NULL) == LYRICS_ERROR_NULL);
+}
+
+TEST(lyrics_text_append_joins_halves_of_a_sequence_only_when_valid)
+{
+    // A draft ending mid-sequence is not reachable through the UI, but the
+    // combined text is validated rather than assumed, so splicing the second
+    // half produces a whole codepoint instead of two broken ones.
+    char text[LYRICS_TEXT_CAPACITY] = {'h', 'i', (char)0xE6, (char)0xBC, '\0'};
+    REQUIRE_TRUE(lyrics_text_append(text, sizeof(text), "\xA2", NULL) == LYRICS_OK);
+    EXPECT_TRUE(strcmp(text, "hi\xE6\xBC\xA2") == 0);
+
+    // The same splice with a wrong continuation byte is refused whole.
+    char broken[LYRICS_TEXT_CAPACITY] = {'h', 'i', (char)0xE6, (char)0xBC, '\0'};
+    EXPECT_TRUE(lyrics_text_append(broken, sizeof(broken), "z", NULL) ==
+                LYRICS_ERROR_INVALID_UTF8);
+    EXPECT_EQ_SIZE(strlen(broken), 4);
+}

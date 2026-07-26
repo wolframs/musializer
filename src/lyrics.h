@@ -61,6 +61,18 @@ Lyrics_Result lyrics_document_init(Lyrics_Document *document, double duration_se
 Lyrics_Validation lyrics_document_validate(const Lyrics_Document *document);
 const char *lyrics_result_string(Lyrics_Result result);
 
+// Appends `addition` to the NUL-terminated `text` buffer in full or not at all,
+// so a rejected paste leaves the draft byte-for-byte as it was. Truncating to
+// fit is specifically not allowed: it would cut a multi-byte sequence in half
+// and the result would fail the same validation every stored cue must pass.
+//
+// A cue is a single line by contract, so line breaks and tabs in the addition
+// collapse to single spaces and *flattened reports it, letting the caller say
+// what it did. Any other control character rejects the whole paste rather than
+// being stripped, so what lands in the cue is always what the user can see.
+Lyrics_Result lyrics_text_append(char *text, size_t capacity,
+                                 const char *addition, bool *flattened);
+
 // Passing cue.id == 0 allocates a deterministic, never-reused stable id.
 // Explicit nonzero ids support import and persistence round-trips.
 Lyrics_Result lyrics_insert(Lyrics_Document *document, const Lyric_Cue *cue,

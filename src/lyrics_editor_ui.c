@@ -162,13 +162,37 @@ static void lyric_text_backspace(char *text)
     text[length] = '\0';
 }
 
-void lyric_editor_ui_text_input_update(Lyric_Editor *editor)
+void lyric_editor_ui_text_input_update(Lyric_Editor *editor,
+                                       const Lyric_Editor_Services *services)
 {
     if (!editor->text_active) return;
     if (IsKeyPressed(KEY_BACKSPACE)) lyric_text_backspace(editor->draft_text);
     if (IsKeyPressed(KEY_ESCAPE)) editor->text_active = false;
+    if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) &&
+        IsKeyPressed(KEY_V)) {
+        const char *clipboard = GetClipboardText();
+        // Appending is all-or-nothing, so a clipboard that is too long or holds
+        // control characters leaves the draft exactly as it was and says why,
+        // rather than silently landing a truncated or stripped version.
+        bool flattened = false;
+        Lyrics_Result pasted = clipboard != NULL ?
+            lyrics_text_append(editor->draft_text, sizeof(editor->draft_text),
+                               clipboard, &flattened) :
+            LYRICS_ERROR_NULL;
+        if (pasted != LYRICS_OK && services != NULL && services->notice_push != NULL) {
+            services->notice_push(UI_NOTICE_WARNING, "Nothing was pasted",
+                                  lyrics_result_string(pasted), NULL, false);
+        } else if (flattened && services != NULL && services->notice_push != NULL) {
+            services->notice_push(UI_NOTICE_INFO, "Pasted as one line",
+                                  "A cue is a single line, so line breaks became "
+                                  "spaces.", NULL, false);
+        }
+    }
+    // A shortcut must not also type its own letter. Characters are drained
+    // either way so a chord cannot leave one queued for the next frame.
+    bool chord = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
-        if (codepoint < 0x20 || codepoint == 0x7F) continue;
+        if (chord || codepoint < 0x20 || codepoint == 0x7F) continue;
         int encoded_size = 0;
         const char *encoded = CodepointToUTF8(codepoint, &encoded_size);
         size_t length = strlen(editor->draft_text);
@@ -519,7 +543,7 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
                    1.0f, signal);
     }
     EndScissorMode();
-    lyric_editor_ui_text_input_update(editor);
+    lyric_editor_ui_text_input_update(editor, services);
 
     Rectangle apply = {form.x, form.y + 146.0f, 92.0f, UI_BUTTON_HEIGHT};
     Rectangle discard_button = {apply.x + apply.width + gap, apply.y, 104.0f, apply.height};

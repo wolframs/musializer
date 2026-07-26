@@ -171,7 +171,12 @@ The normal workflow is:
    already have into the shared library. A store file this build cannot
    accept is left untouched and read-only rather than overwritten.
 3. Open **Lyrics** to write or import lyric cues and adjust their start/end
-   times against the playhead.
+   times against the playhead. The text field takes typing, backspace, and
+   <kbd>Ctrl</kbd>+<kbd>V</kbd>. A paste is applied whole or not at all, so an
+   over-long or malformed clipboard leaves the draft untouched and says why
+   rather than landing a truncated cue; because a cue is a single line, pasted
+   line breaks become spaces and the panel reports that. There is no caret or
+   selection yet: text is edited at the end of the field.
 4. Open **Assist** for timed-lyric help, measured scene planning, semantic music
    interpretation, or the complete pipeline. Selecting a workflow first shows
    its local/remote data boundary. Results are validated and staged with a

@@ -48,7 +48,8 @@ void lyric_editor_ui_select(Lyric_Editor *editor, Track *track, uint64_t id);
 void lyric_editor_ui_begin_new(Lyric_Editor *editor, Track *track);
 bool lyric_editor_ui_apply(Lyric_Editor *editor, Track *track,
                            const Lyric_Editor_Services *services);
-void lyric_editor_ui_text_input_update(Lyric_Editor *editor);
+void lyric_editor_ui_text_input_update(Lyric_Editor *editor,
+                                       const Lyric_Editor_Services *services);
 
 void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_length,
                                Rectangle lane, Font font,
