@@ -1072,8 +1072,18 @@ static void draw_scene_lyric_overlay(Rectangle boundary,
     if (lyric == NULL || lyric->text[0] == '\0' ||
         pixel_scale <= 0.0f || boundary.width < 240.0f*pixel_scale ||
         boundary.height < 160.0f*pixel_scale) return;
-    float font_size = fminf(42.0f*pixel_scale,
-                            fmaxf(20.0f*pixel_scale, boundary.height*0.047f));
+    // Captions are 4.7% of frame height, so a cue typeset against the preview
+    // survives an export at any resolution. There used to be a 42 px ceiling
+    // here as well, which bound above 893 px of frame height and made the same
+    // cue occupy 4.7% of a 720p frame but only 1.94% of a 2160p one: the higher
+    // the export resolution, the smaller the subtitles got.
+    //
+    // The remaining floor is a readability accommodation for small preview
+    // windows and binds only below ~425 px of frame height. It is expressed in
+    // logical pixels, hence the pixel_scale factor -- pixel_scale is the
+    // supersample factor, so boundary.height is already logical height times
+    // pixel_scale and the fraction is scale-invariant on its own.
+    float font_size = fmaxf(20.0f*pixel_scale, boundary.height*0.047f);
     float spacing = 1.0f*pixel_scale;
     float horizontal_padding = font_size*0.7f;
     float vertical_padding = font_size*0.34f;

@@ -209,10 +209,14 @@ show hidden queue depth, and let actionable Assist failures reopen the review
 step or copy the immutable artifact/log path.
 
 Timed lyrics use the same caption layer in preview and export. Long cues wrap
-to three centered lines with a visible ellipsis. The bundled font atlas covers
+to three centered lines with a visible ellipsis. Captions are sized as a fixed
+fraction of frame height, so a cue composed against the preview keeps its
+proportions at every export resolution; there is no way yet to choose the
+caption face, size, or colour per project. The bundled font atlas covers
 accented Latin, Greek, Cyrillic, punctuation, currency, and common symbols;
 CJK fallback, bidirectional text, and complex-script shaping are not yet
-implemented.
+implemented, so a cue in those scripts validates and exports as missing
+glyphs.
 
 ### Assisted analysis and privacy
 

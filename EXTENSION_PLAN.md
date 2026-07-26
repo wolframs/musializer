@@ -612,12 +612,22 @@ ellipsized to "Save ne…" in a quarter-width cell and is now "Save"; the
 collapsed state keeps "Save new" because it has the room and is the onboarding
 moment.
 
+**Item 8 landed (2026-07-26), unblocking D1.** The 42 px ceiling is gone;
+captions are `max(20*ps, height*0.047)`, i.e. a flat 4.7% of frame height with a
+readability floor that binds only below ~425 px. The canary worked exactly as
+predicted: a 720p render is **byte-identical** before and after
+(`59555de725418e4e…`) because the ceiling never bound there, while 1080p
+changed. Verified across 720p/1080p/2160p that the caption box holds ~35% of
+frame width at every resolution (it was 29% at 1080p and would have been far
+less at 2160p), and that two 1080p renders of the same input are still
+byte-identical. Note 2160p renders are slow -- a 3 s window exceeded two
+minutes; use `--render-window` with about 1 s when spot-checking 4K.
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
 | 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
-| 8 | Caption geometry, resolution independence | Caption size is `min(42*ps, max(20*ps, h*0.047))` (`plug.c:1072`) where `pixel_scale` is only the supersample factor, so the 42 px cap binds above 893 px and the same cue is typeset at 4.7% of frame height at 720p and 1.944% at 2160p. | Prerequisite for D1. Verify 720p output is byte-identical first as a canary. Keep `border = 1.0f * pixel_scale`. |
 | 9 | Lyric text field: caret, selection, paste | `lyrics_editor_ui.c:164-180` is the whole implementation -- backspace, escape, append. `GetClipboardText` appears nowhere in `src/`. | Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Paste must be refused whole when over-long, never cut mid-sequence: `validate_text` rejects truncated UTF-8. Bump `PLUG_STATE_VERSION`. |
 | 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |
 | 11 | Cadence timing | `hold = cadence_smooth((1-p)*9)` crosses 0.5 at `p = 17/18` (`scene_cadence.c:446`); `active && hold > 0.5f` at `:460` feeds the non-active arm a `focus < 0.5`, yielding 0, gated out at `:381`. Reachable when a ~12-word line ends in a short word. | **State the symptom precisely**: `wants_particles` is `focus < 0.985` with alpha 0.88, so the word still renders as a particle cloud -- it is never *legible type*, not never drawn. Changes exported pixels; needs a real render plus `ffprobe`. |
@@ -626,7 +636,7 @@ moment.
 
 | ID | Question | Recommendation |
 | --- | --- | --- |
-| D1 | `.musi` caption typography (face, size, colour, box, anchor). Root required set is `mask & 0xff` (`project_io.c:215`) so an optional root member parses with no migration. Needs schema, codec, validation, fixtures, `musi_project_editor_support` rejection and compatibility notes together. Cadence bypasses the shared overlay entirely (`plug.c:1143`) and typesets at `height*0.20*scale`. | Ship item 8 first; take this as its own session. Sub-questions: is rejection by older builds acceptable and documented in `packaging/PRODUCT_READINESS.md`; bundled faces only or content-addressed fonts in `<stem>.assets/` with SHA-256 verify-before-use; does `CAPTION_LAYOUT_MAX_LINES 3` become runtime-selectable (it sizes `lines[]` and is baked into the documented ellipsis contract). |
+| D1 | `.musi` caption typography (face, size, colour, box, anchor). Root required set is `mask & 0xff` (`project_io.c:215`) so an optional root member parses with no migration. Needs schema, codec, validation, fixtures, `musi_project_editor_support` rejection and compatibility notes together. Cadence bypasses the shared overlay entirely (`plug.c:1143`) and typesets at `height*0.20*scale`. | **Item 8 is now shipped, so this is unblocked.** Take it as its own session. Sub-questions: is rejection by older builds acceptable and documented in `packaging/PRODUCT_READINESS.md`; bundled faces only or content-addressed fonts in `<stem>.assets/` with SHA-256 verify-before-use; does `CAPTION_LAYOUT_MAX_LINES 3` become runtime-selectable (it sizes `lines[]` and is baked into the documented ellipsis contract). |
 | D2 | 960x640 collapse policy. At 208 px against a 215 px scene-browser floor, something must disappear. | Current shipped behaviour hides the track list first and the tracks panel last. Surfacing Open/Add/Save from the toolbar in the hidden state is unimplemented. |
 | D4 | Scene-plan editing UI shape. The engine side is done: `scene_switch_remove`/`retime`/`retarget` are implemented and tested, so this gate is now purely about presentation. | A dedicated row under the waveform, not hit-testing the 1-3 px markers. Item 10's lane drag wants the same press -- the two must agree on `active_button_id` ownership before either is written. Whatever the shape, retarget must capture a fresh snapshot from the target scene or pass NULL; reusing the outgoing cue's snapshot is silently wrong between two 8-control scenes. |
 | D5 | "+ Feel" scene coverage. Widening it changes exported pixels in every scene it touches. | 3-4 scenes where a brief transient accent is defensible, documented, rather than wiring all ten into noise. `scene_constellation.c:104` uses `fabsf(event->values[0])`, so the existing 1.0f payload keeps today's flare strength. |
