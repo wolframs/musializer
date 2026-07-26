@@ -623,6 +623,22 @@ less at 2160p), and that two 1080p renders of the same input are still
 byte-identical. Note 2160p renders are slow -- a 3 s window exceeded two
 minutes; use `--render-window` with about 1 s when spot-checking 4K.
 
+**Item 11 (Cadence) landed 2026-07-26.** The line's dissolve is now applied per
+word instead of per line: a word whose window has not closed is exempt, so the
+final word -- whose window ends at exactly 1.0 by construction -- stays legible
+type through its own moment while the rest of the line still disperses. Timing
+extracted to `scene_cadence_timing.c` with 5 headless tests, following the
+`scene_*_motion.c` precedent. Photographed at cue_position 0.973 of the demo
+fixture's first cue: before, the whole line was particles; after, "quiet" reads
+as type.
+
+**Trap worth remembering:** the demo fixture's first cue ends at **5.2 s**, not
+5.4 (5.4 is the *next* cue's start). Rendering 5.1-5.4 photographs the gap
+between cues, where Cadence draws its ambient particle field -- which looks
+enough like the bug to be mistaken for it, and made two before/after pairs come
+out identical. Read the cue bounds out of the `.musi` before choosing a render
+window.
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
@@ -630,7 +646,6 @@ minutes; use `--render-window` with about 1 s when spot-checking 4K.
 | 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
 | 9 | Lyric text field: caret and selection | `lyrics_editor_ui.c` still edits only at the end of the field: typing, backspace, escape. **Paste landed 2026-07-26** via `lyrics_text_append` (all-or-nothing, line breaks flattened, 6 headless tests, mutation-verified against truncate-to-fit); `GetClipboardText` now has exactly one caller. | Caret/selection remain. Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Adding a caret index to `Lyric_Editor` **does** change the hot-reload state layout, so bump `PLUG_STATE_VERSION` then -- the paste work did not, and did not need to. |
 | 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |
-| 11 | Cadence timing | `hold = cadence_smooth((1-p)*9)` crosses 0.5 at `p = 17/18` (`scene_cadence.c:446`); `active && hold > 0.5f` at `:460` feeds the non-active arm a `focus < 0.5`, yielding 0, gated out at `:381`. Reachable when a ~12-word line ends in a short word. | **State the symptom precisely**: `wants_particles` is `focus < 0.985` with alpha 0.88, so the word still renders as a particle cloud -- it is never *legible type*, not never drawn. Changes exported pixels; needs a real render plus `ffprobe`. |
 
 ### Decision gates -- do not start without an answer
 

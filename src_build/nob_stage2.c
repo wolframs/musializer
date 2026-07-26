@@ -134,6 +134,7 @@ static void append_engine_sources(Nob_Cmd *cmd)
         "./src/scene_constellation.c",
         "./src/scene_cadence.c",
         "./src/scene_loom_weave.c",
+        "./src/scene_cadence_timing.c",
         "./src/scene_loom.c",
         "./src/scene_pentagram.c");
 }
@@ -170,6 +171,7 @@ static void append_tested_core_sources(Nob_Cmd *cmd)
         "./src/scene_orbital_lattice_motion.c",
         "./src/scene_constellation_motion.c",
         "./src/scene_loom_weave.c",
+        "./src/scene_cadence_timing.c",
         "./src/scene_routes.c",
         "./src/route_editor_state.c",
         "./src/preset_store.c",

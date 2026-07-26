@@ -1,4 +1,5 @@
 #include "scene.h"
+#include "scene_cadence_timing.h"
 
 #include <math.h>
 #include <string.h>
@@ -106,15 +107,15 @@ static size_t cadence_split_words(const char *text, Cadence_Word *words,
 // line-level cues, never measured word timestamps.
 static void cadence_assign_windows(Cadence_Word *words, size_t count)
 {
-    size_t total = 0;
-    for (size_t i = 0; i < count; ++i) total += words[i].glyphs + 1U;
-    if (total == 0) total = 1;
-    size_t before = 0;
+    unsigned glyph_counts[CADENCE_MAX_WORDS];
+    float starts[CADENCE_MAX_WORDS];
+    float ends[CADENCE_MAX_WORDS];
+    if (count == 0 || count > CADENCE_MAX_WORDS) return;
+    for (size_t i = 0; i < count; ++i) glyph_counts[i] = (unsigned)words[i].glyphs;
+    if (!cadence_timing_assign_windows(glyph_counts, count, starts, ends)) return;
     for (size_t i = 0; i < count; ++i) {
-        size_t weight = words[i].glyphs + 1U;
-        words[i].window_start = (float)before/(float)total;
-        words[i].window_end = (float)(before + weight)/(float)total;
-        before += weight;
+        words[i].window_start = starts[i];
+        words[i].window_end = ends[i];
     }
 }
 
@@ -443,7 +444,7 @@ static void cadence_draw(const void *state, const Scene_Frame *frame,
         (float)fmin(1.0, fmax(0.0,
             (frame->time_seconds - frame->lyric->start_seconds)/duration)) : 1.0f;
     // The whole line loosens back into particles over the cue's final beats.
-    float hold = cadence_smooth((1.0f - cue_position)*9.0f);
+    float hold = cadence_timing_line_hold(cue_position);
 
     Font font = renderer->font.texture.id != 0 ? renderer->font : GetFontDefault();
     float spacing = 0.0f;
@@ -455,9 +456,15 @@ static void cadence_draw(const void *state, const Scene_Frame *frame,
         bool active = false;
         float focus = cadence_word_focus(&words[i], cue_position, focus_speed,
                                          frame->audio.onset, &active);
-        focus *= hold;
+        // Per word, not per line: the last word's window ends at exactly the
+        // end of the cue, so the line's dissolve used to scale its focus toward
+        // zero over the whole of its own moment and it never settled into type.
+        float word_hold = cadence_timing_word_hold(cue_position,
+                                                   words[i].window_end, hold);
+        focus *= word_hold;
         cadence_draw_word(cadence, frame, font, &words[i], i, font_size,
-                          spacing, boundary, ink, focus, active && hold > 0.5f,
+                          spacing, boundary, ink, focus,
+                          active && word_hold > CADENCE_HOLD_LEGIBLE,
                           swarm, beat_response, glow, pixel_scale,
                           &particle_budget);
     }
