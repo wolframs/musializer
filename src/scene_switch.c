@@ -3,6 +3,11 @@
 #include <math.h>
 #include <string.h>
 
+// For scene_settings_snapshot_valid only. scene_settings.h is raylib-free and
+// already sits in both the engine and headless source lists, so this keeps the
+// module testable without a window.
+#include "scene_settings.h"
+
 void scene_switch_init(Scene_Switch_Timeline *timeline)
 {
     if (timeline == NULL) return;
@@ -150,6 +155,103 @@ Scene_Switch_Result scene_switch_cue_at(Scene_Switch_Timeline *timeline,
     return result;
 }
 
+// Stages the current cues so an edit can be validated as a whole before it
+// replaces anything. Returns false when there is nothing to edit.
+static bool scene_switch_stage(const Scene_Switch_Timeline *timeline,
+                               Scene_Switch_Cue *staged, size_t index)
+{
+    if (timeline == NULL || index >= timeline->count) return false;
+    memcpy(staged, timeline->cues, timeline->count*sizeof(staged[0]));
+    return true;
+}
+
+Scene_Switch_Result scene_switch_remove(Scene_Switch_Timeline *timeline,
+                                        size_t index,
+                                        double duration_seconds,
+                                        uint32_t scene_count)
+{
+    if (timeline == NULL) return SCENE_SWITCH_ERROR_NULL;
+    Scene_Switch_Cue staged[SCENE_SWITCH_CAPACITY];
+    if (!scene_switch_stage(timeline, staged, index)) return SCENE_SWITCH_ERROR_INDEX;
+    size_t count = timeline->count;
+
+    if (count == 1) {
+        // scene_switch_replace refuses a zero-cue publication, so the empty
+        // plan is written directly. Auto scenes cannot drive anything from an
+        // empty timeline, so leaving it enabled would strand the UI in a state
+        // where the toggle is on and nothing switches.
+        memset(timeline->cues, 0, sizeof(timeline->cues));
+        timeline->count = 0;
+        timeline->enabled = false;
+        timeline->active_index = SIZE_MAX;
+        return SCENE_SWITCH_OK;
+    }
+
+    if (index == 0) {
+        staged[1].start_seconds = 0.0;
+    } else {
+        staged[index - 1].end_seconds = staged[index].end_seconds;
+    }
+    memmove(&staged[index], &staged[index + 1],
+            (count - index - 1)*sizeof(staged[0]));
+    return scene_switch_replace(timeline, staged, count - 1, duration_seconds,
+                                scene_count);
+}
+
+Scene_Switch_Result scene_switch_retime(Scene_Switch_Timeline *timeline,
+                                        size_t index,
+                                        double start_seconds,
+                                        double duration_seconds,
+                                        uint32_t scene_count)
+{
+    if (timeline == NULL) return SCENE_SWITCH_ERROR_NULL;
+    Scene_Switch_Cue staged[SCENE_SWITCH_CAPACITY];
+    if (!scene_switch_stage(timeline, staged, index)) return SCENE_SWITCH_ERROR_INDEX;
+    if (index == 0) return SCENE_SWITCH_ERROR_BOUNDARY;
+    if (!isfinite(start_seconds)) return SCENE_SWITCH_ERROR_CUE;
+
+    // Both neighbours have to survive the move with a usable span, so the new
+    // boundary is bounded by the previous cue's start and this cue's end rather
+    // than only by the track duration.
+    if (start_seconds < staged[index - 1].start_seconds + SCENE_SWITCH_MIN_CUE_SECONDS ||
+        start_seconds > staged[index].end_seconds - SCENE_SWITCH_MIN_CUE_SECONDS) {
+        return SCENE_SWITCH_ERROR_BOUNDARY;
+    }
+    staged[index - 1].end_seconds = start_seconds;
+    staged[index].start_seconds = start_seconds;
+    return scene_switch_replace(timeline, staged, timeline->count,
+                                duration_seconds, scene_count);
+}
+
+Scene_Switch_Result scene_switch_retarget(Scene_Switch_Timeline *timeline,
+                                          size_t index,
+                                          uint32_t scene_index,
+                                          const Scene_Settings_Snapshot *settings,
+                                          double duration_seconds,
+                                          uint32_t scene_count)
+{
+    if (timeline == NULL) return SCENE_SWITCH_ERROR_NULL;
+    Scene_Switch_Cue staged[SCENE_SWITCH_CAPACITY];
+    if (!scene_switch_stage(timeline, staged, index)) return SCENE_SWITCH_ERROR_INDEX;
+    if (scene_index >= scene_count) return SCENE_SWITCH_ERROR_CUE;
+
+    if (settings == NULL) {
+        staged[index].settings = (Scene_Settings_Snapshot){0};
+    } else {
+        // Catches a carry between differently shaped scenes. It cannot catch a
+        // carry between two 8-control scenes whose values are in range for
+        // both; see the header for why NULL is the safe default.
+        if (!scene_settings_snapshot_valid(scene_index, settings) ||
+            !settings->captured) {
+            return SCENE_SWITCH_ERROR_SETTINGS;
+        }
+        staged[index].settings = *settings;
+    }
+    staged[index].scene_index = scene_index;
+    return scene_switch_replace(timeline, staged, timeline->count,
+                                duration_seconds, scene_count);
+}
+
 Scene_Switch_Result scene_switch_update(Scene_Switch_Timeline *timeline,
                                         double time_seconds,
                                         uint32_t *scene_index)
@@ -181,6 +283,7 @@ const char *scene_switch_result_string(Scene_Switch_Result result)
     static const char *const names[] = {
         "ok", "no change", "null input", "capacity violation", "invalid duration",
         "invalid cue", "cues are unsorted", "timeline coverage gap", "duplicate id",
+        "no such cue", "invalid cue boundary", "settings do not match the scene",
     };
     if ((unsigned)result >= sizeof(names)/sizeof(names[0])) return "unknown scene switch error";
     return names[result];

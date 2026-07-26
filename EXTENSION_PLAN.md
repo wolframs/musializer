@@ -564,15 +564,35 @@ list. Landed items are struck from the ranking and recorded in the session log.
 **Landed.** Track identity (SHA-256 shown as a track name), per-button
 shrink-to-fit typography, timeline tick-label contrast, command-line flags
 silently rewriting the opened project, a collapsed tracks panel stealing scene
-clicks, and the lyric editor drawing its action row past the bottom of the
-window.
+clicks, the lyric editor drawing its action row past the bottom of the window,
+item 4 ("+ Feel" honesty), the silent Auto-scenes disable, and item 3's
+`scene_switch` editing API.
+
+**Item 3 landed as API + tests only (2026-07-26).** `scene_switch_remove`,
+`scene_switch_retime` and `scene_switch_retarget` exist with 10 headless tests.
+No UI calls them yet -- that is gate D4, still unanswered. Two things learned
+while building it that the original entry got wrong:
+
+- `scene_switch_reset` does **not** delete cues; it only rewinds
+  `active_index`. The earlier note that picking a base scene "destroys the plan"
+  was wrong. It disables the plan, which is correct behaviour (a running plan
+  would override the base scene at every cued moment), and the cues survive.
+  What was actually broken was that it happened silently and autosaved.
+- The retarget trap is **not fully closable**. `scene_settings_snapshot_valid`
+  rejects a carry between differently shaped scenes, but scenes 0, 1, 5, 6 and 9
+  all expose 8 controls, and Spectral Terrarium's defaults validate as
+  Spectrum's. A stale snapshot passes and is reinterpreted control for control.
+  `scene_switch_retarget` therefore takes NULL as the safe default and the
+  caller must capture from the *target* scene.
+  `tests/test_scene_switch.c:scene_switch_retarget_cannot_catch_a_same_shaped_carry`
+  pins this limit; if it ever fails, the control tables diverged and that is
+  good news.
 
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
-| 3 | `scene_switch` remove / retime / retarget | `src/scene_switch.h:40-57` declares only init/reset/replace/update/cue_at; cues are create-only, and re-pressing "+ Scene" overwrites only within 0.001 s (`scene_switch.c:126`). No `MOUSE_BUTTON_RIGHT` exists anywhere in `src/`. | API + tests only; module already dual-listed and `tests/test_scene_switch.c` exists, so zero scaffolding. Stage into a local array and re-publish through `scene_switch_replace` so the sorted/contiguous/coverage checks re-run. Retarget must recapture or clear the settings snapshot: `scene_switch_replace` does not validate snapshots against the target scene but `scene_settings_apply_snapshot` does. |
-| 4 | Tell the truth about "+ Feel" | `rg 'frame->events' src/scene_*.c` returns exactly two consumers: `scene_loom.c:88` (routes via `semantic_lane_sample`, which needs 4 values and skips a 1-value manual event) and `scene_constellation.c:92-114`. `README.md:187` claims no coverage limit. | ~15 minutes, zero risk. README + the tooltip at `plug.c:2062-2064`. Do **not** change the payload shape: `semantic_lane.c`'s 4-value rule is contract-defined and pinned by `tests/test_semantic_lane.c:39`. |
+| 5 | Timeline control row / timecode collision | `controls.width` computes 592 while children extend to 628 (`plug.c:2052-2068,2125`) and is never read. Visible in `panel-tune-min.png`: the timecode prints through "+ Custom" and "Clear manual" below ~1125 px workspace width. | Extract a `timeline_ui_layout` taking a `Caption_Measure_Text`-style callback; parent-from-children by construction. |
 | 5 | Timeline control row / timecode collision | `controls.width` computes 592 while children extend to 628 (`plug.c:2052-2068,2125`) and is never read. Visible in `panel-tune-min.png`: the timecode prints through "+ Custom" and "Clear manual" below ~1125 px workspace width. | Extract a `timeline_ui_layout` taking a `Caption_Measure_Text`-style callback; parent-from-children by construction. |
 | 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
 | 7 | Tune inspector: collapse the empty PRESETS block | 214 px of chrome precedes the first slider; the empty block costs 98 px for one live control. | Skip the placeholder and the three disabled buttons when `preset_count == 0`. `tests/adapters/test_scene_quality.py:79/82/134` pin literal source strings -- preserve them or move the assertions in the same diff. |
@@ -587,17 +607,19 @@ window.
 | --- | --- | --- |
 | D1 | `.musi` caption typography (face, size, colour, box, anchor). Root required set is `mask & 0xff` (`project_io.c:215`) so an optional root member parses with no migration. Needs schema, codec, validation, fixtures, `musi_project_editor_support` rejection and compatibility notes together. Cadence bypasses the shared overlay entirely (`plug.c:1143`) and typesets at `height*0.20*scale`. | Ship item 8 first; take this as its own session. Sub-questions: is rejection by older builds acceptable and documented in `packaging/PRODUCT_READINESS.md`; bundled faces only or content-addressed fonts in `<stem>.assets/` with SHA-256 verify-before-use; does `CAPTION_LAYOUT_MAX_LINES 3` become runtime-selectable (it sizes `lines[]` and is baked into the documented ellipsis contract). |
 | D2 | 960x640 collapse policy. At 208 px against a 215 px scene-browser floor, something must disappear. | Current shipped behaviour hides the track list first and the tracks panel last. Surfacing Open/Add/Save from the toolbar in the hidden state is unimplemented. |
-| D4 | Scene-plan editing UI shape. | A dedicated row under the waveform, not hit-testing the 1-3 px markers. Item 10's lane drag wants the same press -- the two must agree on `active_button_id` ownership before either is written. |
+| D4 | Scene-plan editing UI shape. The engine side is done: `scene_switch_remove`/`retime`/`retarget` are implemented and tested, so this gate is now purely about presentation. | A dedicated row under the waveform, not hit-testing the 1-3 px markers. Item 10's lane drag wants the same press -- the two must agree on `active_button_id` ownership before either is written. Whatever the shape, retarget must capture a fresh snapshot from the target scene or pass NULL; reusing the outgoing cue's snapshot is silently wrong between two 8-control scenes. |
 | D5 | "+ Feel" scene coverage. Widening it changes exported pixels in every scene it touches. | 3-4 scenes where a brief transient accent is defensible, documented, rather than wiring all ten into noise. `scene_constellation.c:104` uses `fabsf(event->values[0])`, so the existing 1.0f payload keeps today's flare strength. |
 | D6 | Tune `row_height` 76 -> 64 and an interactive inspector scrollbar. | Both real wins, both the most bug-prone edits in the backlog. `row_height` couples to a bare `- 35.0f` at `plug.c:4432` six hundred lines away with no headless test. The scrollbar handler must be hoisted **above** the row loop or `scene_setting_slider` claims `active_button_id` first and drives a value to max. |
 
 ### Gaps a completeness critic found that no finding covered
 
-- **Picking a scene silently discards the scene plan.** `track_select_base_scene`
-  (`plug.c:832-843`) sets `scene_switches.enabled = false`, marks dirty, and
-  autosave commits 1.5 s later. The notice says only "Base scene changed". This
-  is a literal reading of the "setting scene changes is impractical" complaint
-  and is the same family as the command-line autosave defect already fixed.
+- ~~**Picking a scene silently discards the scene plan.**~~ **Fixed
+  2026-07-26, and the original wording overstated it.** `track_select_base_scene`
+  disables the plan but does not discard it: `scene_switch_reset` only rewinds
+  `active_index`. Disabling is correct -- a running plan overrides the base
+  scene at every cued moment, so the click would otherwise look inert. The
+  defect was that it was silent while autosave committed it 1.5 s later. The
+  notice now names the consequence and says the cues are kept.
 - **The landing screen was never reviewed.** Three of the reference captures are
   landing states and no finding mentions them; at 1080p content occupies the
   left ~66% x top ~50%.
