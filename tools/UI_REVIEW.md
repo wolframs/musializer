@@ -99,6 +99,7 @@ grabbed. See `Plug_Ui_Probe` in `src/plug.h`.
 | `lyric` | cue index, 1-based | Selects an existing cue; needs `panel=lyrics` |
 | `assist` | `confirm` | Arms the confirmation prompt; needs `panel=assist` |
 | `zoom` | factor >= 1 | Zooms the timeline strip about the playhead; `1` is the whole track |
+| `style` | `caption` | Shows the caption typography pane; needs `panel=lyrics` |
 
 It applies the same state transition the corresponding button performs, rather
 than injecting synthetic mouse or keyboard events, and it never touches project

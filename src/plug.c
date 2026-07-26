@@ -106,7 +106,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 30
+#define PLUG_STATE_VERSION 31
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -144,6 +144,10 @@ typedef struct {
     int current_track;
     Font ui_font;
     Font font;
+    // Space Grotesk at the full curated caption glyph set, for the second
+    // selectable caption face. Distinct from ui_font, which is the same family
+    // restricted to the codepoints the interface uses.
+    Font caption_alt_font;
     Shader circle;
     int circle_radius_location;
     int circle_power_location;
@@ -313,6 +317,22 @@ static Font ui_font(void)
 {
     if (p != NULL && IsFontValid(p->ui_font)) return p->ui_font;
     return GetFontDefault();
+}
+
+// The face a caption style asks for, with a defined fallback. The interface
+// face is loaded twice on purpose: p->ui_font carries only the codepoints the
+// chrome needs, so using it for captions would drop Greek and Cyrillic without
+// saying so. p->caption_alt_font carries the full curated caption set.
+static Font caption_face(const Musi_Caption_Style *style)
+{
+    if (style != NULL && style->face == MUSI_CAPTION_FACE_SPACE_GROTESK &&
+        IsFontValid(p->caption_alt_font)) {
+        return p->caption_alt_font;
+    }
+    // Alegreya, which is the caption default and the fallback for a face this
+    // build cannot load. Deliberately not GetFontDefault: raylib's bitmap face
+    // has none of the curated glyph coverage and would silently drop accents.
+    return p->font;
 }
 
 static bool ui_font_codepoint(int codepoint)
@@ -659,6 +679,10 @@ MUSIALIZER_PLUG bool plug_load_track(const char *file_path)
     size_t new_index = p->tracks.count;
     Track *new_track = &p->tracks.items[new_index];
     memset(new_track, 0, sizeof(*new_track));
+    // A zeroed style is not a valid one: face and box would both read as their
+    // first enumerator and every scale would be zero, so captions would vanish
+    // on any track opened outside a project.
+    musi_caption_style_init(&new_track->caption_style);
     double decoded_duration = GetMusicTimeLength(music);
     if (lyrics_document_init(&new_track->lyrics, decoded_duration) !=
         LYRICS_OK) {
@@ -1080,30 +1104,54 @@ static float caption_measure_raylib(const char *text, void *user_data)
     return ui_widgets_caption_measure_raylib(text, user_data);
 }
 
+static Color caption_rgba_color(uint32_t rgba)
+{
+    return (Color){
+        (unsigned char)((rgba >> 24) & 0xFFu),
+        (unsigned char)((rgba >> 16) & 0xFFu),
+        (unsigned char)((rgba >> 8) & 0xFFu),
+        (unsigned char)(rgba & 0xFFu),
+    };
+}
+
+// Horizontal placement of a caption box of `content` width inside `available`,
+// as an offset from the left edge. Vertical placement uses the same three cases
+// against height, which is why both go through one helper.
+static float caption_axis_offset(int alignment, float available, float content,
+                                 float margin)
+{
+    if (alignment < 0) return margin;
+    if (alignment > 0) return available - content - margin;
+    return (available - content)*0.5f;
+}
+
 static void draw_scene_lyric_overlay(Rectangle boundary,
                                      const Lyric_Cue *lyric,
                                      Font font,
-                                     float pixel_scale)
+                                     float pixel_scale,
+                                     const Musi_Caption_Style *style)
 {
-    if (lyric == NULL || lyric->text[0] == '\0' ||
+    if (lyric == NULL || lyric->text[0] == '\0' || style == NULL ||
         pixel_scale <= 0.0f || boundary.width < 240.0f*pixel_scale ||
         boundary.height < 160.0f*pixel_scale) return;
-    // Captions are 4.7% of frame height, so a cue typeset against the preview
-    // survives an export at any resolution. There used to be a 42 px ceiling
-    // here as well, which bound above 893 px of frame height and made the same
-    // cue occupy 4.7% of a 720p frame but only 1.94% of a 2160p one: the higher
-    // the export resolution, the smaller the subtitles got.
+    // Every measurement here is a fraction of the frame, so a cue typeset
+    // against a preview window survives an export at any resolution. There used
+    // to be a 42 px ceiling as well, which bound above 893 px of frame height
+    // and made the same cue occupy 4.7% of a 720p frame but only 1.94% of a
+    // 2160p one: the higher the export resolution, the smaller the subtitles.
     //
     // The remaining floor is a readability accommodation for small preview
-    // windows and binds only below ~425 px of frame height. It is expressed in
-    // logical pixels, hence the pixel_scale factor -- pixel_scale is the
-    // supersample factor, so boundary.height is already logical height times
-    // pixel_scale and the fraction is scale-invariant on its own.
-    float font_size = fmaxf(20.0f*pixel_scale, boundary.height*0.047f);
+    // windows. It is expressed in logical pixels, hence the pixel_scale factor
+    // -- pixel_scale is the supersample factor, so boundary.height is already
+    // logical height times pixel_scale and the fraction is scale-invariant.
+    float font_size = fmaxf(20.0f*pixel_scale,
+                            boundary.height*(float)style->size_scale);
     float spacing = 1.0f*pixel_scale;
-    float horizontal_padding = font_size*0.7f;
-    float vertical_padding = font_size*0.34f;
-    float maximum = fminf(boundary.width*0.82f,
+    float horizontal_padding = style->box == MUSI_CAPTION_BOX_PLATE ?
+        font_size*0.7f : font_size*0.12f;
+    float vertical_padding = style->box == MUSI_CAPTION_BOX_PLATE ?
+        font_size*0.34f : font_size*0.08f;
+    float maximum = fminf(boundary.width*(float)style->width_scale,
                           boundary.width - 2.0f*(horizontal_padding +
                                                 12.0f*pixel_scale));
     Caption_Raylib_Measurement measurement = {font, font_size, spacing};
@@ -1116,25 +1164,53 @@ static void draw_scene_lyric_overlay(Rectangle boundary,
         if (layout.lines[i].width > widest) widest = layout.lines[i].width;
     }
     float line_advance = font_size*1.12f;
-    float text_height = font_size +
-        (layout.line_count - 1u)*line_advance;
+    float text_height = font_size + (layout.line_count - 1u)*line_advance;
     float box_width = fminf(boundary.width - 24.0f*pixel_scale,
                             widest + horizontal_padding*2.0f);
+    float box_height = text_height + vertical_padding*2.0f;
+
+    // The anchor enumerates as row*3 + column, so the two axes fall out of the
+    // same arithmetic and cannot drift apart as values are added.
+    int column = (int)style->anchor%3 - 1;
+    int row = (int)style->anchor/3;
+    float margin = boundary.height*(float)style->margin_scale;
+    float edge_margin = fmaxf(margin, 12.0f*pixel_scale);
     Rectangle box = {
-        boundary.x + (boundary.width - box_width)*0.5f,
-        boundary.y + boundary.height - text_height - vertical_padding*2.0f -
-            boundary.height*0.065f,
+        boundary.x + caption_axis_offset(column, boundary.width, box_width,
+                                         edge_margin),
+        boundary.y + caption_axis_offset(row == 0 ? 1 : row == 2 ? -1 : 0,
+                                         boundary.height, box_height, margin),
         box_width,
-        text_height + vertical_padding*2.0f,
+        box_height,
     };
-    DrawRectangleRounded(box, 0.12f, 8, ColorAlpha(BLACK, 0.72f));
-    DrawRectangleLinesEx(box, 1.0f*pixel_scale, ColorAlpha(WHITE, 0.28f));
+
+    Color text_color = caption_rgba_color(style->text_rgba);
+    Color box_color = caption_rgba_color(style->box_rgba);
+    if (style->box == MUSI_CAPTION_BOX_PLATE) {
+        DrawRectangleRounded(box, 0.12f, 8, box_color);
+        DrawRectangleLinesEx(box, 1.0f*pixel_scale,
+                             ColorAlpha(text_color, 0.28f));
+    }
+    // The scissor is the ellipsis contract's backstop: caption_layout_utf8
+    // guarantees at most three lines, and clipping to the box means a face with
+    // unusual metrics still cannot paint outside the shape being composed.
     BeginScissorMode((int)box.x, (int)box.y, (int)box.width, (int)box.height);
     for (size_t i = 0; i < layout.line_count; ++i) {
-        DrawTextEx(font, layout.lines[i].text,
-                   (Vector2){box.x + (box.width - layout.lines[i].width)*0.5f,
-                             box.y + vertical_padding + i*line_advance},
-                   font_size, spacing, WHITE);
+        // Lines are centred within the box regardless of where the box sits, so
+        // a left-anchored caption is a left-placed block of centred text rather
+        // than ragged-right type.
+        Vector2 position = {
+            box.x + (box.width - layout.lines[i].width)*0.5f,
+            box.y + vertical_padding + i*line_advance,
+        };
+        if (style->box == MUSI_CAPTION_BOX_SHADOW) {
+            float offset = fmaxf(1.0f*pixel_scale, font_size*0.055f);
+            DrawTextEx(font, layout.lines[i].text,
+                       (Vector2){position.x + offset, position.y + offset},
+                       font_size, spacing, box_color);
+        }
+        DrawTextEx(font, layout.lines[i].text, position, font_size, spacing,
+                   text_color);
     }
     EndScissorMode();
 }
@@ -1170,8 +1246,12 @@ static void scene_render(Rectangle boundary, AudioSpectrumView spectrum, double 
     scene_instance_update(&p->scene, &frame);
     scene_instance_draw(&p->scene, &frame, &renderer, boundary);
     if (p->scene.id != SCENE_CADENCE) {
-        draw_scene_lyric_overlay(boundary, frame.lyric, renderer.font,
-                                 renderer.pixel_scale);
+        Musi_Caption_Style shipped;
+        musi_caption_style_init(&shipped);
+        const Musi_Caption_Style *style = track != NULL ?
+            &track->caption_style : &shipped;
+        draw_scene_lyric_overlay(boundary, frame.lyric, caption_face(style),
+                                 renderer.pixel_scale, style);
     }
 }
 
@@ -3105,6 +3185,13 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
                                       track->lyrics.cues[probe.lyric_selection - 1].id);
     }
 
+    if (probe.caption_style_pane) {
+        if (probe.panel != PLUG_UI_PANEL_LYRICS) return false;
+        p->lyric_editor.style_pane = true;
+    } else {
+        p->lyric_editor.style_pane = false;
+    }
+
     if (probe.assist_confirmation) {
         if (probe.panel != PLUG_UI_PANEL_ASSIST) return false;
         p->assist_confirmation_pending = true;
@@ -3633,6 +3720,7 @@ static bool build_project(Track *track, const char *project_path,
             MUSI_PROJECT_MAX_MAPPINGS_PER_SCENE,
             &project->scenes[0].mapping_count)) return false;
 
+    project->caption_style = track->caption_style;
     project->lyrics = track->lyrics;
     project->semantic_events = track->semantic_events;
     project->manual_events = track->manual_events;
@@ -4145,6 +4233,10 @@ static bool open_project_path(const char *path)
                        &p->tracks.items[previous_track_index] : NULL;
     Track *track = &p->tracks.items[new_index];
     (void)lyrics_document_replace(&track->lyrics, &project->lyrics);
+    // Validated by musi_project_validate before we get here, and gated by
+    // musi_project_editor_support, so this cannot install a style the renderer
+    // or the controls cannot represent.
+    track->caption_style = project->caption_style;
     track->scene_switches = scene_switches;
     (void)event_timeline_replace(&track->semantic_events, &project->semantic_events);
     (void)event_timeline_replace(&track->manual_events, &project->manual_events);
@@ -7243,6 +7335,30 @@ static void load_assets(void)
                  "FONT: Space Grotesk UI face unavailable; using raylib default");
         memset(&p->ui_font, 0, sizeof(p->ui_font));
     }
+    // Second pass over the same bytes: the caption face needs the full curated
+    // glyph set, not the interface subset, or a caption typeset in Space
+    // Grotesk would silently drop every Greek and Cyrillic codepoint.
+    if (data != NULL && data_size <= INT_MAX) {
+        int caption_codepoints[CAPTION_FONT_CODEPOINT_LIMIT];
+        size_t caption_count = 0;
+        if (caption_font_codepoints(caption_codepoints,
+                                    NOB_ARRAY_LEN(caption_codepoints),
+                                    &caption_count) == CAPTION_FONT_OK &&
+            caption_count <= INT_MAX) {
+            p->caption_alt_font = LoadFontFromMemory(
+                GetFileExtension(ui_font_path), data, (int)data_size, FONT_SIZE,
+                caption_codepoints, (int)caption_count);
+        }
+    }
+    if (IsFontValid(p->caption_alt_font)) {
+        GenTextureMipmaps(&p->caption_alt_font.texture);
+        SetTextureFilter(p->caption_alt_font.texture, TEXTURE_FILTER_BILINEAR);
+    } else {
+        TraceLog(LOG_WARNING,
+                 "FONT: Space Grotesk caption face unavailable; captions will "
+                 "use the default face");
+        memset(&p->caption_alt_font, 0, sizeof(p->caption_alt_font));
+    }
     plug_free_resource(data);
 
     const char *alegreya_path = "./resources/fonts/Alegreya-Regular.ttf";
@@ -7293,6 +7409,7 @@ static void load_assets(void)
 static void unload_assets(void)
 {
     if (IsFontValid(p->ui_font)) UnloadFont(p->ui_font);
+    if (IsFontValid(p->caption_alt_font)) UnloadFont(p->caption_alt_font);
     UnloadFont(p->font);
     UnloadShader(p->circle);
     for (UI_Icon icon = 0; icon < COUNT_UI_ICONS; ++icon) {
@@ -7300,6 +7417,7 @@ static void unload_assets(void)
     }
     memset(&p->ui_font, 0, sizeof(p->ui_font));
     memset(&p->font, 0, sizeof(p->font));
+    memset(&p->caption_alt_font, 0, sizeof(p->caption_alt_font));
     memset(&p->circle, 0, sizeof(p->circle));
     memset(p->icon_textures, 0, sizeof(p->icon_textures));
 }

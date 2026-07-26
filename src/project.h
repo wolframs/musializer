@@ -82,6 +82,85 @@ typedef enum Musi_Analysis_Lane_Kind {
     MUSI_LANE_KIND_COUNT
 } Musi_Analysis_Lane_Kind;
 
+// Caption typography. Faces are named rather than embedded so a project stays
+// portable; the imported face additionally carries a content-addressed asset in
+// the sibling bundle, so a project that names one is only reproducible with its
+// <stem>.assets/ directory alongside.
+typedef enum Musi_Caption_Face {
+    // The historical caption face, and still the default.
+    MUSI_CAPTION_FACE_ALEGREYA = 0,
+    // The interface face, for captions that should read as annotation.
+    MUSI_CAPTION_FACE_SPACE_GROTESK = 1,
+    // A face imported into the project's asset bundle.
+    MUSI_CAPTION_FACE_IMPORTED = 2,
+    MUSI_CAPTION_FACE_COUNT
+} Musi_Caption_Face;
+
+typedef enum Musi_Caption_Box {
+    // Text alone. Legible over a dark scene, risky over a bright one.
+    MUSI_CAPTION_BOX_NONE = 0,
+    // An offset copy of the text behind itself, so captions stay readable over
+    // changing material without a plate covering the composition.
+    MUSI_CAPTION_BOX_SHADOW = 1,
+    // The rounded plate the product shipped with.
+    MUSI_CAPTION_BOX_PLATE = 2,
+    MUSI_CAPTION_BOX_COUNT
+} Musi_Caption_Box;
+
+typedef enum Musi_Caption_Anchor {
+    MUSI_CAPTION_ANCHOR_BOTTOM_LEFT = 0,
+    MUSI_CAPTION_ANCHOR_BOTTOM_CENTER = 1,
+    MUSI_CAPTION_ANCHOR_BOTTOM_RIGHT = 2,
+    MUSI_CAPTION_ANCHOR_MIDDLE_LEFT = 3,
+    MUSI_CAPTION_ANCHOR_MIDDLE_CENTER = 4,
+    MUSI_CAPTION_ANCHOR_MIDDLE_RIGHT = 5,
+    MUSI_CAPTION_ANCHOR_TOP_LEFT = 6,
+    MUSI_CAPTION_ANCHOR_TOP_CENTER = 7,
+    MUSI_CAPTION_ANCHOR_TOP_RIGHT = 8,
+    MUSI_CAPTION_ANCHOR_COUNT
+} Musi_Caption_Anchor;
+
+// Every measurement is a fraction of frame height, never a pixel count, so a
+// project typeset against a 1280x720 preview exports identically at 3840x2160.
+// A pixel size here would reintroduce exactly the resolution dependence that
+// the fixed 42 px caption ceiling used to cause.
+#define MUSI_CAPTION_SIZE_MINIMUM 0.012
+#define MUSI_CAPTION_SIZE_MAXIMUM 0.300
+#define MUSI_CAPTION_SIZE_DEFAULT 0.047
+#define MUSI_CAPTION_MARGIN_MINIMUM 0.0
+#define MUSI_CAPTION_MARGIN_MAXIMUM 0.400
+#define MUSI_CAPTION_MARGIN_DEFAULT 0.065
+// Widest the caption box may be, as a fraction of frame width.
+#define MUSI_CAPTION_WIDTH_MINIMUM 0.20
+#define MUSI_CAPTION_WIDTH_MAXIMUM 1.00
+#define MUSI_CAPTION_WIDTH_DEFAULT 0.82
+#define MUSI_CAPTION_TEXT_RGBA_DEFAULT 0xFFFFFFFFu
+// Exactly what ColorAlpha(BLACK, 0.72f) produced before the plate colour was
+// authorable: raylib truncates 255*0.72 to 183, so 0xB8 would silently change
+// every existing project's captions by one step of alpha.
+#define MUSI_CAPTION_BOX_RGBA_DEFAULT 0x000000B7u
+
+typedef struct Musi_Font_Asset {
+    bool present;
+    char path[MUSI_PROJECT_PATH_CAPACITY];
+    char sha256[MUSI_PROJECT_ID_CAPACITY];
+    // Display name only. It labels the control; the bytes are identified by
+    // their digest, never by this string.
+    char family[MUSI_PROJECT_NAME_CAPACITY];
+} Musi_Font_Asset;
+
+typedef struct Musi_Caption_Style {
+    Musi_Caption_Face face;
+    Musi_Caption_Box box;
+    Musi_Caption_Anchor anchor;
+    double size_scale;
+    double margin_scale;
+    double width_scale;
+    uint32_t text_rgba;
+    uint32_t box_rgba;
+    Musi_Font_Asset font;
+} Musi_Caption_Style;
+
 typedef struct Musi_Project_Metadata {
     char project_id[MUSI_PROJECT_ID_CAPACITY];
     char title[MUSI_PROJECT_NAME_CAPACITY];
@@ -201,6 +280,10 @@ typedef struct Musi_Project {
     Musi_Project_Metadata metadata;
     Musi_Audio_Asset audio;
     Musi_Ascii_Image_Asset ascii_image;
+    // Optional in the file format: a project written before caption typography
+    // existed parses without it and gets the shipped defaults, which are the
+    // values that reproduce its original appearance exactly.
+    Musi_Caption_Style caption_style;
     Musi_Output_Settings output;
     uint64_t deterministic_seed;
     size_t scene_count;
@@ -229,6 +312,7 @@ typedef enum Musi_Project_Error {
     MUSI_PROJECT_ERROR_METADATA,
     MUSI_PROJECT_ERROR_AUDIO,
     MUSI_PROJECT_ERROR_ASCII_IMAGE,
+    MUSI_PROJECT_ERROR_CAPTION_STYLE,
     MUSI_PROJECT_ERROR_OUTPUT,
     MUSI_PROJECT_ERROR_COUNT,
     MUSI_PROJECT_ERROR_SCENE,
@@ -261,6 +345,7 @@ typedef enum Musi_Project_Editor_Support {
     MUSI_PROJECT_EDITOR_ERROR_PARAMETER_CUES,
     MUSI_PROJECT_EDITOR_ERROR_SCENE_LAYOUT,
     MUSI_PROJECT_EDITOR_ERROR_SCENE_MAPPINGS,
+    MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT,
 } Musi_Project_Editor_Support;
 
 void musi_project_init(Musi_Project *project);
@@ -297,5 +382,16 @@ const char *musi_blend_mode_name(Musi_Blend_Mode value);
 const char *musi_analysis_source_name(Musi_Analysis_Source value);
 const char *musi_interpolation_name(Musi_Interpolation value);
 const char *musi_analysis_lane_kind_name(Musi_Analysis_Lane_Kind value);
+const char *musi_caption_face_name(Musi_Caption_Face value);
+const char *musi_caption_box_name(Musi_Caption_Box value);
+const char *musi_caption_anchor_name(Musi_Caption_Anchor value);
+
+// The style a project has when its file predates caption typography. These are
+// exactly the values the renderer used before the field existed, so an old
+// project reopened under this build looks the same as it did.
+void musi_caption_style_init(Musi_Caption_Style *style);
+// True when the style is the untouched default, i.e. nothing to explain to the
+// user and nothing that needs the asset bundle.
+bool musi_caption_style_is_default(const Musi_Caption_Style *style);
 
 #endif // MUSIALIZER_PROJECT_H_

@@ -145,6 +145,7 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
     bool seen_assist = false;
     bool seen_lyric = false;
     bool seen_zoom = false;
+    bool seen_style = false;
     char *cursor = buffer;
     while (cursor != NULL && *cursor != '\0') {
         char *comma = strchr(cursor, ',');
@@ -192,6 +193,10 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
             }
             request->probe.timeline_zoom = factor;
             seen_zoom = true;
+        } else if (strcmp(key, "style") == 0) {
+            if (seen_style || strcmp(value, "caption") != 0) return false;
+            request->probe.caption_style_pane = true;
+            seen_style = true;
         } else if (strcmp(key, "assist") == 0) {
             if (seen_assist || strcmp(value, "confirm") != 0) return false;
             request->probe.assist_confirmation = true;
@@ -262,6 +267,8 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          prompt (needs panel=assist),\n"
         "                          zoom=FACTOR zooms the timeline strip about the\n"
         "                          playhead (1 = whole track),\n"
+        "                          style=caption shows the caption typography\n"
+        "                          pane (needs panel=lyrics),\n"
         "                          play=0|1. The transport is parked unless\n"
         "                          play=1; audio-reactive scenes need play=1 but\n"
         "                          then capture a frame that is not reproducible.\n"

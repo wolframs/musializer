@@ -31,6 +31,14 @@ static Musi_Project fixture(void)
     p.audio.mode=MUSI_ASSET_REFERENCED;strcpy(p.audio.path,"audio\\kitty.mp3");hash(p.audio.sha256,'a');
     p.audio.duration_seconds=10.5;p.audio.sample_rate=48000;p.audio.channels=2;
     p.ascii_image.present=true;strcpy(p.ascii_image.path,"show.assets/images/face.png");hash(p.ascii_image.sha256,'c');p.ascii_image.columns=96;p.ascii_image.rows=54;
+    // Every field non-default, so the round-trip memcmp below actually checks
+    // the caption style rather than confirming that zeroed defaults survive.
+    p.caption_style.face=MUSI_CAPTION_FACE_IMPORTED;p.caption_style.box=MUSI_CAPTION_BOX_SHADOW;
+    p.caption_style.anchor=MUSI_CAPTION_ANCHOR_TOP_RIGHT;p.caption_style.size_scale=0.0725;
+    p.caption_style.margin_scale=0.125;p.caption_style.width_scale=0.4;
+    p.caption_style.text_rgba=0x1A2B3C4Du;p.caption_style.box_rgba=0xFFEEDDCCu;
+    p.caption_style.font.present=true;strcpy(p.caption_style.font.path,"show.assets/fonts/inter.ttf");
+    hash(p.caption_style.font.sha256,'d');strcpy(p.caption_style.font.family,"Inter");
     p.lyrics.duration_seconds=10.5;
     p.output.width=1920;p.output.height=1080;p.output.fps_numerator=30000;p.output.fps_denominator=1001;
     /* validator currently caps numerator at 1000 */ p.output.fps_numerator=60;
@@ -705,3 +713,108 @@ TEST(project_io_transaction_paths_are_distinct_and_atomic_writes_are_owned)
     (void)rmdir(root);
 }
 #endif
+
+TEST(project_io_v1_without_caption_style_gets_the_shipped_defaults)
+{
+    // The point of making the member optional: a project written before
+    // caption typography existed must still open, and must look exactly as it
+    // did, which means the defaults have to be the old hard-coded values.
+    Musi_Project p=fixture(),decoded;size_t n;char*json=encode(&p,&n);if(!json)return;
+    char*begin=strstr(json,",\"caption_style\":");REQUIRE_TRUE(begin!=NULL);
+    char*end=strstr(begin,",\"output\":");REQUIRE_TRUE(end!=NULL);
+    size_t prefix=(size_t)(begin-json),suffix=n-(size_t)(end-json);
+    char*legacy=malloc(prefix+suffix+1);REQUIRE_TRUE(legacy!=NULL);
+    memcpy(legacy,json,prefix);memcpy(legacy+prefix,end,suffix);legacy[prefix+suffix]=0;
+    REQUIRE_TRUE(musi_project_json_deserialize(&decoded,legacy,prefix+suffix)==MUSI_PROJECT_IO_OK);
+    EXPECT_TRUE(musi_caption_style_is_default(&decoded.caption_style));
+    EXPECT_TRUE(decoded.caption_style.face==MUSI_CAPTION_FACE_ALEGREYA);
+    EXPECT_TRUE(decoded.caption_style.box==MUSI_CAPTION_BOX_PLATE);
+    EXPECT_TRUE(decoded.caption_style.anchor==MUSI_CAPTION_ANCHOR_BOTTOM_CENTER);
+    EXPECT_NEAR(decoded.caption_style.size_scale,0.047,0.0);
+    free(legacy);free(json);
+}
+
+TEST(project_io_writes_colours_as_eight_lowercase_hex_digits)
+{
+    Musi_Project p=fixture();size_t n;char*json=encode(&p,&n);if(!json)return;
+    EXPECT_TRUE(strstr(json,"\"text_rgba\":\"1a2b3c4d\"")!=NULL);
+    EXPECT_TRUE(strstr(json,"\"box_rgba\":\"ffeeddcc\"")!=NULL);
+    EXPECT_TRUE(strstr(json,"\"face\":\"imported\"")!=NULL);
+    EXPECT_TRUE(strstr(json,"\"anchor\":\"top_right\"")!=NULL);
+    free(json);
+}
+
+TEST(project_io_rejects_a_half_specified_or_misspelled_caption_style)
+{
+    Musi_Project p=fixture(),decoded;size_t n;char*json=encode(&p,&n);if(!json)return;
+    char*style=strstr(json,",\"caption_style\":{");REQUIRE_TRUE(style!=NULL);
+    char*end=strstr(style,",\"output\":");REQUIRE_TRUE(end!=NULL);
+    size_t prefix=(size_t)(style-json),suffix=n-(size_t)(end-json);
+    char*buffer=malloc(prefix+suffix+512);REQUIRE_TRUE(buffer!=NULL);
+
+    // Present but incomplete. Filling the gaps from the defaults would silently
+    // mix a shipped value into a style the author thought they had specified.
+    const char *partial=",\"caption_style\":{\"face\":\"alegreya\",\"size_scale\":0.05}";
+    memcpy(buffer,json,prefix);strcpy(buffer+prefix,partial);
+    memcpy(buffer+prefix+strlen(partial),end,suffix);buffer[prefix+strlen(partial)+suffix]=0;
+    EXPECT_TRUE(musi_project_json_deserialize(&decoded,buffer,strlen(buffer))==
+                MUSI_PROJECT_IO_ERROR_MISSING_FIELD);
+
+    // Colour spellings the format does not admit. Two ways to write one colour
+    // would break the exact-identity promise the codec makes everywhere else.
+    static const char *const bad_colours[]={"\"#ffffffff\"","\"FFFFFFFF\"","\"ffff\"","4294967295"};
+    for(size_t i=0;i<sizeof(bad_colours)/sizeof(bad_colours[0]);++i){
+        memcpy(buffer,json,prefix);
+        int written=snprintf(buffer+prefix,512,
+            ",\"caption_style\":{\"face\":\"alegreya\",\"box\":\"plate\",\"anchor\":\"bottom_center\","
+            "\"size_scale\":0.047,\"margin_scale\":0.065,\"width_scale\":0.82,"
+            "\"text_rgba\":%s,\"box_rgba\":\"000000b8\",\"font\":null}",bad_colours[i]);
+        REQUIRE_TRUE(written>0&&written<512);
+        size_t used=prefix+(size_t)written;
+        memcpy(buffer+used,end,suffix);buffer[used+suffix]=0;
+        EXPECT_TRUE(musi_project_json_deserialize(&decoded,buffer,used+suffix)!=
+                    MUSI_PROJECT_IO_OK);
+    }
+    // The same shape with a legal colour must parse, or the loop above would
+    // pass for the wrong reason.
+    memcpy(buffer,json,prefix);
+    int written=snprintf(buffer+prefix,512,
+        ",\"caption_style\":{\"face\":\"alegreya\",\"box\":\"plate\",\"anchor\":\"bottom_center\","
+        "\"size_scale\":0.047,\"margin_scale\":0.065,\"width_scale\":0.82,"
+        "\"text_rgba\":\"ffffffff\",\"box_rgba\":\"000000b8\",\"font\":null}");
+    REQUIRE_TRUE(written>0&&written<512);
+    memcpy(buffer+prefix+(size_t)written,end,suffix);buffer[prefix+(size_t)written+suffix]=0;
+    EXPECT_TRUE(musi_project_json_deserialize(&decoded,buffer,prefix+(size_t)written+suffix)==
+                MUSI_PROJECT_IO_OK);
+    free(buffer);free(json);
+}
+
+TEST(project_io_rejects_a_caption_style_out_of_range_or_disagreeing_with_its_font)
+{
+    Musi_Project p=fixture();
+    p.caption_style.face=MUSI_CAPTION_FACE_ALEGREYA;p.caption_style.font.present=false;
+    p.caption_style.font.path[0]=0;p.caption_style.font.sha256[0]=0;p.caption_style.font.family[0]=0;
+    REQUIRE_TRUE(musi_project_validate(&p).error==MUSI_PROJECT_VALID);
+
+    // An imported face with no asset, and an asset with no imported face, are
+    // both a project whose captions cannot be reproduced from the file.
+    Musi_Project bad=p;bad.caption_style.face=MUSI_CAPTION_FACE_IMPORTED;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.font.present=true;strcpy(bad.caption_style.font.path,"a.ttf");
+    hash(bad.caption_style.font.sha256,'e');strcpy(bad.caption_style.font.family,"A");
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+
+    static const double bad_sizes[]={0.0,0.011,0.31,1.0};
+    for(size_t i=0;i<sizeof(bad_sizes)/sizeof(bad_sizes[0]);++i){
+        bad=p;bad.caption_style.size_scale=bad_sizes[i];
+        EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    }
+    bad=p;bad.caption_style.margin_scale=0.5;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.width_scale=0.1;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.size_scale=1.0/0.0;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+    bad=p;bad.caption_style.anchor=(Musi_Caption_Anchor)MUSI_CAPTION_ANCHOR_COUNT;
+    EXPECT_TRUE(musi_project_validate(&bad).error==MUSI_PROJECT_ERROR_CAPTION_STYLE);
+}

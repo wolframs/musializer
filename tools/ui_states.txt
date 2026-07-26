@@ -60,3 +60,5 @@ scene-pentagram|1280x720|--project PROJECT --scene pentagram --ui-probe panel=no
 # about the playhead, so these are the only reviewable zoomed states ---
 timeline-zoom-8x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom=8
 timeline-zoom-40x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom=40
+lyrics-caption-style|1600x900|--project PROJECT --ui-probe panel=lyrics,time=6,style=caption
+lyrics-caption-style-min|960x640|--project PROJECT --ui-probe panel=lyrics,time=6,style=caption,size=960x640

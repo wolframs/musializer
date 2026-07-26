@@ -28,6 +28,14 @@ typedef struct {
     char draft_text[LYRICS_TEXT_CAPACITY];
     size_t list_first;
     bool list_follow_selection;
+    // Which editor the right-hand pane shows: the selected cue, or the caption
+    // typography that governs how every cue is rendered. They are never needed
+    // at once and the panel has room for one.
+    bool style_pane;
+    // Slider being dragged in the style pane, 0 for none. Held here rather than
+    // recomputed from the pointer so a drag that leaves the track keeps moving
+    // the control it started on.
+    uint8_t style_drag;
 
     // Direct manipulation in the timeline lane. The selection is what a drag
     // moves; selected_id above stays the single cue the editing form is bound

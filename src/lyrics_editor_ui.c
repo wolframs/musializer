@@ -448,6 +448,251 @@ static void lane_gesture_update(Lyric_Editor *editor, Track *track,
     *active = 0;
 }
 
+// Height the caption controls need below the pane header. Checked before any
+// of them is drawn, so a short panel says so instead of painting sliders
+// through the bottom edge -- the defect this panel already shipped once.
+#define CAPTION_STYLE_FORM_HEIGHT 152.0f
+
+// A plain slider. plug.c's horz_slider needs its circle shader, which this
+// module deliberately has no access to, and the caption controls do not need a
+// soft handle to be usable.
+static bool caption_slider(Lyric_Editor *editor, uint8_t id, Rectangle track_rect,
+                           double minimum, double maximum, double *value)
+{
+    float radius = track_rect.height*0.5f;
+    float left = track_rect.x + radius;
+    float span = track_rect.width - radius*2.0f;
+    if (span <= 0.0) return false;
+    double range = maximum - minimum;
+    if (!(range > 0.0)) return false;
+    double fraction = (*value - minimum)/range;
+    if (fraction < 0.0) fraction = 0.0;
+    if (fraction > 1.0) fraction = 1.0;
+
+    DrawLineEx((Vector2){left, track_rect.y + radius},
+               (Vector2){left + span, track_rect.y + radius},
+               2.0f, COLOR_UI_RULE);
+    float handle_x = left + (float)fraction*span;
+    DrawLineEx((Vector2){left, track_rect.y + radius},
+               (Vector2){handle_x, track_rect.y + radius}, 2.0f, COLOR_ACCENT);
+    DrawCircleV((Vector2){handle_x, track_rect.y + radius}, radius*0.62f, COLOR_ACCENT);
+
+    Vector2 mouse = GetMousePosition();
+    if (editor->style_drag == 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        CheckCollisionPointRec(mouse, track_rect)) {
+        editor->style_drag = id;
+    }
+    if (editor->style_drag != id) return false;
+    // Released, or the button went up while the window was unfocused. This
+    // widget owns no active_button_id, so nothing can be stranded here, but the
+    // drag must still end on its own.
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        editor->style_drag = 0;
+        return false;
+    }
+    double moved = minimum + (double)((mouse.x - left)/span)*range;
+    if (moved < minimum) moved = minimum;
+    if (moved > maximum) moved = maximum;
+    if (moved == *value) return false;
+    *value = moved;
+    return true;
+}
+
+// One row of mutually exclusive choices. Returns the newly chosen index, or -1.
+static int caption_choice_row(const Lyric_Editor_Services *services, uint64_t id,
+                              Rectangle row, const char *const *labels,
+                              size_t count, int current)
+{
+    if (count == 0 || row.width <= 0.0f) return -1;
+    int chosen = -1;
+    float gap = 4.0f;
+    float width = (row.width - gap*(float)(count - 1u))/(float)count;
+    if (width < 24.0f) return -1;
+    float font_size = ui_widgets_row_font_size(svc_font(services), labels, NULL,
+                                               count, row.height);
+    for (size_t i = 0; i < count; ++i) {
+        Rectangle box = {row.x + (float)i*(width + gap), row.y, width, row.height};
+        if (text_button_sized(services, id + i, box, labels[i],
+                              (int)i == current, font_size) & BS_CLICKED) {
+            chosen = (int)i;
+        }
+    }
+    return chosen;
+}
+
+static void caption_label(const Lyric_Editor_Services *services, const char *text,
+                          float x, float y, float height)
+{
+    Vector2 size = MeasureTextEx(svc_font(services), text, 12.0f, 1.0f);
+    DrawTextEx(svc_font(services), text, (Vector2){x, y + (height - size.y)*0.5f},
+               12.0f, 1.0f, COLOR_UI_MUTED);
+}
+
+// Swatches, not a colour wheel. A caption has to stay legible over moving
+// material, so the useful choices are few and opinionated; the alpha is baked
+// into each entry because "white at 40%" is a different decision from "grey".
+static const uint32_t CAPTION_TEXT_SWATCHES[6] = {
+    0xFFFFFFFFu, 0xF2BE42FFu, 0x7FB2FFFFu, 0x9BE8B0FFu, 0x1A1A1EFFu, 0xFFFFFFC0u,
+};
+static const uint32_t CAPTION_BOX_SWATCHES[5] = {
+    0x000000B7u, 0x00000066u, 0x000000FFu, 0xFFFFFFCCu, 0x1B2A5AC0u,
+};
+
+static void caption_swatch_row(const Lyric_Editor_Services *services, uint64_t id,
+                               Rectangle row, const uint32_t *swatches,
+                               size_t count, uint32_t current, uint32_t *value,
+                               bool *changed)
+{
+    float gap = 4.0f;
+    float width = (row.width - gap*(float)(count - 1u))/(float)count;
+    if (width < 12.0f) return;
+    for (size_t i = 0; i < count; ++i) {
+        Rectangle box = {row.x + (float)i*(width + gap), row.y, width, row.height};
+        // A checkerboard behind every swatch, so a translucent choice reads as
+        // translucent rather than as a slightly different flat colour.
+        for (int cell = 0; cell < 8; ++cell) {
+            float cw = box.width*0.25f;
+            float ch = box.height*0.5f;
+            Rectangle tile = {box.x + (float)(cell%4)*cw,
+                              box.y + (float)(cell/4)*ch, cw, ch};
+            DrawRectangleRec(tile, ((cell%4) + (cell/4))%2 == 0 ?
+                             COLOR_UI_RAISED : COLOR_UI_SURFACE);
+        }
+        Color color = {
+            (unsigned char)((swatches[i] >> 24) & 0xFFu),
+            (unsigned char)((swatches[i] >> 16) & 0xFFu),
+            (unsigned char)((swatches[i] >> 8) & 0xFFu),
+            (unsigned char)(swatches[i] & 0xFFu),
+        };
+        DrawRectangleRec(box, color);
+        bool selected = swatches[i] == current;
+        DrawRectangleLinesEx(box, selected ? 2.0f : 1.0f,
+                             selected ? COLOR_ACCENT : COLOR_UI_RULE);
+        if (button_with_id(services, id + i, box) & BS_CLICKED) {
+            *value = swatches[i];
+            *changed = true;
+        }
+    }
+}
+
+static void draw_caption_style_form(Lyric_Editor *editor, Track *track,
+                                    Rectangle form,
+                                    const Lyric_Editor_Services *services)
+{
+    Musi_Caption_Style *style = &track->caption_style;
+    if (form.height < CAPTION_STYLE_FORM_HEIGHT || form.width < 520.0f) {
+        DrawTextEx(svc_font(services), "Enlarge the window to edit caption style.",
+                   (Vector2){form.x, form.y}, 15.0f, 1.0f, COLOR_UI_MUTED);
+        return;
+    }
+    // Two columns across the whole panel. The cue list is hidden while this
+    // pane is open, which is what buys the width: stacking these controls into
+    // the 48% form column needed 208 px of height that the panel does not have.
+    const float column_gap = 24.0f;
+    const float label_width = 62.0f;
+    float column_width = (form.width - column_gap)*0.5f;
+    float left_x = form.x + label_width;
+    float left_width = column_width - label_width;
+    float right_label_x = form.x + column_width + column_gap;
+    float right_x = right_label_x + label_width;
+    float right_width = column_width - label_width;
+    bool changed = false;
+
+    static const char *const face_labels[2] = {"Alegreya", "Space Grotesk"};
+    Rectangle face_row = {left_x, form.y, left_width, 26.0f};
+    caption_label(services, "FACE", form.x, face_row.y, face_row.height);
+    int face = caption_choice_row(services, UINT64_C(0x4341504641434500), face_row,
+                                  face_labels, 2, (int)style->face);
+    if (face >= 0 && (Musi_Caption_Face)face != style->face) {
+        style->face = (Musi_Caption_Face)face;
+        changed = true;
+    }
+
+    static const char *const box_labels[3] = {"None", "Shadow", "Plate"};
+    Rectangle box_row = {left_x, form.y + 32.0f, left_width, 26.0f};
+    caption_label(services, "BACKING", form.x, box_row.y, box_row.height);
+    int box = caption_choice_row(services, UINT64_C(0x4341504242475200), box_row,
+                                 box_labels, 3, (int)style->box);
+    if (box >= 0 && (Musi_Caption_Box)box != style->box) {
+        style->box = (Musi_Caption_Box)box;
+        changed = true;
+    }
+
+    // The anchor grid mirrors the frame: the top-left cell puts captions in the
+    // top-left of the video. The choice is spatial, and a row of nine names
+    // would be worse than nine 22 px cells.
+    caption_label(services, "PLACE", form.x, form.y + 64.0f, 66.0f);
+    for (int cell = 0; cell < 9; ++cell) {
+        // The enum counts up from the bottom row because bottom-centre is the
+        // default and belongs at zero; the grid draws downward from the top.
+        int drawn_row = cell/3;
+        int value = (2 - drawn_row)*3 + cell%3;
+        Rectangle cell_rect = {left_x + (float)(cell%3)*24.0f,
+                               form.y + 64.0f + (float)drawn_row*24.0f, 22.0f, 22.0f};
+        bool selected = (int)style->anchor == value;
+        DrawRectangleRec(cell_rect, selected ? COLOR_ACCENT : COLOR_UI_RAISED);
+        DrawRectangleLinesEx(cell_rect, 1.0f, COLOR_UI_RULE);
+        if (button_with_id(services, UINT64_C(0x4341504150430000) + (unsigned)cell,
+                           cell_rect) & BS_CLICKED) {
+            style->anchor = (Musi_Caption_Anchor)value;
+            changed = true;
+        }
+    }
+    DrawTextEx(svc_font(services),
+               "Sizes are fractions of the frame, so exports match the preview.",
+               (Vector2){form.x, form.y + 140.0f}, 12.0f, 1.0f, COLOR_UI_MUTED);
+
+    const float readout_width = 44.0f;
+    float slider_width = right_width - readout_width - 6.0f;
+    struct {
+        const char *label;
+        double *value;
+        double minimum;
+        double maximum;
+        uint8_t id;
+    } sliders[3] = {
+        {"SIZE", &style->size_scale, MUSI_CAPTION_SIZE_MINIMUM,
+         MUSI_CAPTION_SIZE_MAXIMUM, 1},
+        {"WIDTH", &style->width_scale, MUSI_CAPTION_WIDTH_MINIMUM,
+         MUSI_CAPTION_WIDTH_MAXIMUM, 2},
+        {"INSET", &style->margin_scale, MUSI_CAPTION_MARGIN_MINIMUM,
+         MUSI_CAPTION_MARGIN_MAXIMUM, 3},
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        float row_y = form.y + (float)i*26.0f;
+        caption_label(services, sliders[i].label, right_label_x, row_y, 22.0f);
+        if (slider_width < 60.0f) continue;
+        Rectangle bar = {right_x, row_y, slider_width, 22.0f};
+        if (caption_slider(editor, sliders[i].id, bar, sliders[i].minimum,
+                           sliders[i].maximum, sliders[i].value)) {
+            changed = true;
+        }
+        char readout[16];
+        snprintf(readout, sizeof(readout), "%.1f%%", *sliders[i].value*100.0);
+        Vector2 size = MeasureTextEx(svc_font(services), readout, 12.0f, 1.0f);
+        DrawTextEx(svc_font(services), readout,
+                   (Vector2){right_x + right_width - size.x,
+                             row_y + (22.0f - size.y)*0.5f},
+                   12.0f, 1.0f, COLOR_UI_INK);
+    }
+
+    Rectangle text_row = {right_x, form.y + 86.0f, right_width, 22.0f};
+    caption_label(services, "INK", right_label_x, text_row.y, text_row.height);
+    caption_swatch_row(services, UINT64_C(0x4341504954585400), text_row,
+                       CAPTION_TEXT_SWATCHES, 6, style->text_rgba,
+                       &style->text_rgba, &changed);
+
+    Rectangle plate_row = {right_x, form.y + 114.0f, right_width, 22.0f};
+    caption_label(services, "PLATE", right_label_x, plate_row.y, plate_row.height);
+    // Kept live even with backing "None": switching back should restore the
+    // colour that was chosen rather than reset it.
+    caption_swatch_row(services, UINT64_C(0x43415042504C4100), plate_row,
+                       CAPTION_BOX_SWATCHES, 5, style->box_rgba,
+                       &style->box_rgba, &changed);
+
+    if (changed) services->mark_project_dirty(track);
+}
+
 void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_length,
                             const Timeline_View *view,
                             Rectangle lane, Font font,
@@ -627,6 +872,26 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
         list.height,
     };
 
+    // The caption pane takes the whole panel. Typography needs two columns of
+    // controls and the cue list is not part of the decision being made, so
+    // hiding it is what makes the controls fit at all.
+    if (editor->style_pane) {
+        Rectangle toggle = {list.x, list.y - 3.0f, 58.0f, 34.0f};
+        if (text_button_sized(services, UINT64_C(0x43415053544C4500), toggle,
+                              "Cues", false, 14.0f) & BS_CLICKED) {
+            editor->style_pane = false;
+        }
+        DrawTextEx(svc_font(services), "CAPTION STYLE",
+                   (Vector2){toggle.x + toggle.width + 8.0f, list.y},
+                   18.0f, 1.0f, signal);
+        Rectangle style_form = {
+            boundary.x + padding, list.y + 38.0f,
+            boundary.width - padding*2.0f, boundary.height - padding*2.0f - 38.0f,
+        };
+        draw_caption_style_form(editor, track, style_form, services);
+        return;
+    }
+
     DrawTextEx(svc_font(services), "LYRIC CUES", (Vector2){list.x, list.y},
                18.0f, 1.0f, signal);
     char cue_count[48];
@@ -714,9 +979,34 @@ void lyric_editor_ui_draw(Lyric_Editor *editor, Track *track, double playhead,
         DrawRectangleRec(scrollbar, COLOR_ACCENT);
     }
 
-    DrawTextEx(svc_font(services), editor->draft_new ? "NEW CUE" : "SELECTED CUE",
-               (Vector2){form.x, form.y}, 18.0f, 1.0f, signal);
+    // The pane toggle takes the header's place. A caption style and a cue edit
+    // are never wanted at once, and the panel has room for exactly one of them.
+    Rectangle style_toggle = {form.x, form.y - 3.0f, 58.0f, 34.0f};
+    if (text_button_sized(services, UINT64_C(0x43415053544C4500), style_toggle,
+                          "Style", editor->style_pane, 14.0f) & BS_CLICKED) {
+        // Switching pane hides the draft, so it goes through the same guard as
+        // every other context change.
+        if (!editor->style_pane) {
+            if (lyric_editor_ui_allow_context_change(editor, track, services)) {
+                editor->style_pane = true;
+                editor->text_active = false;
+            }
+        } else {
+            editor->style_pane = false;
+        }
+    }
     Rectangle add = {form.x + form.width - 92.0f, form.y - 3.0f, 92.0f, 34.0f};
+    const char *pane_header = editor->style_pane ? "CAPTION STYLE" :
+                              editor->draft_new ? "NEW CUE" : "SELECTED CUE";
+    // Drawn only where it fits between the toggle and the document buttons; a
+    // header printed through Export is how this row would fail on a narrow
+    // panel, and the toggle already names the pane.
+    Vector2 header_size = MeasureTextEx(svc_font(services), pane_header, 18.0f, 1.0f);
+    float header_x = style_toggle.x + style_toggle.width + 8.0f;
+    if (header_x + header_size.x < form.x + form.width - 258.0f - 8.0f) {
+        DrawTextEx(svc_font(services), pane_header,
+                   (Vector2){header_x, form.y}, 18.0f, 1.0f, signal);
+    }
     Rectangle import_button = {add.x - 83.0f, add.y, 77.0f, add.height};
     Rectangle export_button = {import_button.x - 83.0f, add.y, 77.0f, add.height};
     const char *document_labels[3] = {"Export", "Import", "Add cue"};

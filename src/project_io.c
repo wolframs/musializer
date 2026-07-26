@@ -87,6 +87,17 @@ static void events_write(Writer*w,const Event_Timeline*timeline)
     for(size_t i=0;i<timeline->count;++i){const Event_Record*e=&timeline->events[i];if(i)lit(w,",");lit(w,"{\"timestamp_seconds\":");real(w,e->timestamp_seconds);lit(w,",\"id\":");u64(w,e->id);lit(w,",\"type\":");string(w,event_names[e->type-EVENT_TYPE_LYRIC]);lit(w,",\"values\":[");for(size_t j=0;j<e->value_count;++j){if(j)lit(w,",");real(w,e->values[j]);}lit(w,"]}");}
     lit(w,"]");
 }
+// Colours are written as eight lowercase hex digits rather than an integer:
+// a .musi is meant to be readable by the person who authored it, and
+// "ffffffff" says "opaque white" where 4294967295 says nothing.
+static void rgba(Writer*w,uint32_t value)
+{
+    static const char digits[]="0123456789abcdef";
+    char out[11];out[0]='"';
+    for(int i=0;i<8;++i)out[1+i]=digits[(value>>(28-4*i))&0xFu];
+    out[9]='"';out[10]=0;lit(w,out);
+}
+
 static void project_write(Writer*w,const Musi_Project*p)
 {
     lit(w,"{\"schema_version\":\"musializer.project/v1\",\"metadata\":{");
@@ -98,6 +109,17 @@ static void project_write(Writer*w,const Musi_Project*p)
     lit(w,",\"sample_rate\":");u64(w,p->audio.sample_rate);lit(w,",\"channels\":");u64(w,p->audio.channels);
     lit(w,"},\"ascii_image\":");
     if(p->ascii_image.present){lit(w,"{\"path\":");string(w,p->ascii_image.path);lit(w,",\"sha256\":");string(w,p->ascii_image.sha256);lit(w,",\"columns\":");u64(w,p->ascii_image.columns);lit(w,",\"rows\":");u64(w,p->ascii_image.rows);lit(w,"}");}else lit(w,"null");
+    lit(w,",\"caption_style\":{\"face\":");string(w,musi_caption_face_name(p->caption_style.face));
+    lit(w,",\"box\":");string(w,musi_caption_box_name(p->caption_style.box));
+    lit(w,",\"anchor\":");string(w,musi_caption_anchor_name(p->caption_style.anchor));
+    lit(w,",\"size_scale\":");real(w,p->caption_style.size_scale);
+    lit(w,",\"margin_scale\":");real(w,p->caption_style.margin_scale);
+    lit(w,",\"width_scale\":");real(w,p->caption_style.width_scale);
+    lit(w,",\"text_rgba\":");rgba(w,p->caption_style.text_rgba);
+    lit(w,",\"box_rgba\":");rgba(w,p->caption_style.box_rgba);
+    lit(w,",\"font\":");
+    if(p->caption_style.font.present){lit(w,"{\"path\":");string(w,p->caption_style.font.path);lit(w,",\"sha256\":");string(w,p->caption_style.font.sha256);lit(w,",\"family\":");string(w,p->caption_style.font.family);lit(w,"}");}else lit(w,"null");
+    lit(w,"}");
     lit(w,",\"output\":{\"width\":");u64(w,p->output.width);lit(w,",\"height\":");u64(w,p->output.height);
     lit(w,",\"fps_numerator\":");u64(w,p->output.fps_numerator);lit(w,",\"fps_denominator\":");u64(w,p->output.fps_denominator);
     lit(w,",\"start_seconds\":");real(w,p->output.start_seconds);lit(w,",\"end_seconds\":");real(w,p->output.end_seconds);
@@ -211,8 +233,69 @@ static bool parse_events(Parser*x,Event_Timeline*timeline)
 static bool parse_scene_preset(Parser*x,Musi_Scene_Preset*s)
 {static const char*names[]={"id","scene_name","name","settings"};uint64_t mask=0;bool first=true;char k[80];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,4);if(f<0)UNKNOWN();SEEN(f);if(f==0){if(!ju64(x,&s->id))return false;}else if(f==1){if(!jstring(x,s->scene_name,sizeof(s->scene_name)))return false;}else if(f==2){if(!jstring(x,s->name,sizeof(s->name)))return false;}else if(!parse_float_array(x,s->settings,SCENE_SETTINGS_MAX_CONTROLS,&s->setting_count))return false;}if(mask!=15){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}return true;}
 
+static bool parse_rgba(Parser*x,uint32_t*out)
+{
+    char text[16];
+    if(!jstring(x,text,sizeof(text)))return false;
+    // Exactly eight lowercase hex digits. Accepting "#fff" or uppercase would
+    // make two spellings of one colour, and the format promises exact identity.
+    uint32_t value=0;
+    for(int i=0;i<8;++i){
+        char c=text[i];int digit;
+        if(c>='0'&&c<='9')digit=c-'0';
+        else if(c>='a'&&c<='f')digit=10+(c-'a');
+        else{x->error=MUSI_PROJECT_IO_ERROR_STRING;return false;}
+        value=(value<<4)|(uint32_t)digit;
+    }
+    if(text[8]!=0){x->error=MUSI_PROJECT_IO_ERROR_STRING;return false;}
+    *out=value;return true;
+}
+
+static bool parse_font_asset(Parser*x,Musi_Font_Asset*a)
+{
+    ws(x);
+    if(x->p+4<=x->end&&memcmp(x->p,"null",4)==0){x->p+=4;memset(a,0,sizeof(*a));return true;}
+    static const char*names[]={"path","sha256","family"};uint64_t mask=0;bool first=true;char k[80];
+    if(!take(x,'{'))return false;
+    while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;
+        int f=field_index(k,names,3);if(f<0)UNKNOWN();SEEN(f);
+        char*o=f==0?a->path:f==1?a->sha256:a->family;
+        size_t cap=f==0?sizeof(a->path):f==1?sizeof(a->sha256):sizeof(a->family);
+        if(!jstring(x,o,cap))return false;}
+    if(mask!=7){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}
+    a->present=true;return true;
+}
+
+static bool parse_caption_style(Parser*x,Musi_Caption_Style*s)
+{
+    static const char*faces[]={"alegreya","space_grotesk","imported"};
+    static const char*boxes[]={"none","shadow","plate"};
+    static const char*anchors[]={"bottom_left","bottom_center","bottom_right",
+                                 "middle_left","middle_center","middle_right",
+                                 "top_left","top_center","top_right"};
+    static const char*names[]={"face","box","anchor","size_scale","margin_scale",
+                               "width_scale","text_rgba","box_rgba","font"};
+    uint64_t mask=0;bool first=true;char k[80];int e;
+    if(!take(x,'{'))return false;
+    while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;
+        int f=field_index(k,names,9);if(f<0)UNKNOWN();SEEN(f);
+        if(f==0){if(!enum_string(x,faces,3,&e))return false;s->face=e;}
+        else if(f==1){if(!enum_string(x,boxes,3,&e))return false;s->box=e;}
+        else if(f==2){if(!enum_string(x,anchors,9,&e))return false;s->anchor=e;}
+        else if(f==3){if(!jdouble(x,&s->size_scale))return false;}
+        else if(f==4){if(!jdouble(x,&s->margin_scale))return false;}
+        else if(f==5){if(!jdouble(x,&s->width_scale))return false;}
+        else if(f==6){if(!parse_rgba(x,&s->text_rgba))return false;}
+        else if(f==7){if(!parse_rgba(x,&s->box_rgba))return false;}
+        else if(!parse_font_asset(x,&s->font))return false;}
+    // Every member is required once the object is present. A half-specified
+    // style would silently mix the author's intent with the shipped defaults.
+    if((mask&UINT64_C(0x1ff))!=UINT64_C(0x1ff)){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}
+    return true;
+}
+
 static bool parse_project(Parser*x,Musi_Project*p)
-{static const char*names[]={"schema_version","metadata","audio","output","deterministic_seed","scenes","cues","analysis_lanes","lyrics","scene_switches","manual_events","semantic_events","scene_presets","ascii_image"};uint64_t mask=0;bool first=true;char k[80],version[64];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,14);if(f<0)UNKNOWN();SEEN(f);switch(f){case 0:if(!jstring(x,version,sizeof(version)))return false;if(strcmp(version,"musializer.project/v1")){x->error=MUSI_PROJECT_IO_ERROR_SCHEMA;return false;}p->schema_version=MUSI_PROJECT_SCHEMA_VERSION;break;case 1:if(!parse_metadata(x,&p->metadata))return false;break;case 2:if(!parse_audio(x,&p->audio))return false;break;case 3:if(!parse_output(x,&p->output))return false;break;case 4:if(!ju64(x,&p->deterministic_seed))return false;break;case 5:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_count&&!take(x,','))return false;if(p->scene_count>=MUSI_PROJECT_MAX_SCENES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene(x,&p->scenes[p->scene_count++]))return false;}break;case 6:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->cue_count&&!take(x,','))return false;if(p->cue_count>=MUSI_PROJECT_MAX_CUES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_cue(x,&p->cues[p->cue_count++]))return false;}break;case 7:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->analysis_lane_count&&!take(x,','))return false;if(p->analysis_lane_count>=MUSI_PROJECT_MAX_ANALYSIS_LANES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_lane(x,&p->analysis_lanes[p->analysis_lane_count++]))return false;}break;case 8:if(!parse_lyrics(x,&p->lyrics))return false;break;case 9:if(!parse_switches(x,&p->scene_switches))return false;break;case 10:if(!parse_events(x,&p->manual_events))return false;break;case 11:if(!parse_events(x,&p->semantic_events))return false;break;case 12:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_preset_count&&!take(x,','))return false;if(p->scene_preset_count>=MUSI_PROJECT_MAX_SCENE_PRESETS){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene_preset(x,&p->scene_presets[p->scene_preset_count++]))return false;}break;case 13:if(!parse_ascii_image(x,&p->ascii_image))return false;break;}}
+{static const char*names[]={"schema_version","metadata","audio","output","deterministic_seed","scenes","cues","analysis_lanes","lyrics","scene_switches","manual_events","semantic_events","scene_presets","ascii_image","caption_style"};uint64_t mask=0;bool first=true;char k[80],version[64];if(!take(x,'{'))return false;while(1){ws(x);if(x->p<x->end&&*x->p=='}'){++x->p;break;}if(!member(x,k,sizeof(k),&first))return false;int f=field_index(k,names,15);if(f<0)UNKNOWN();SEEN(f);switch(f){case 0:if(!jstring(x,version,sizeof(version)))return false;if(strcmp(version,"musializer.project/v1")){x->error=MUSI_PROJECT_IO_ERROR_SCHEMA;return false;}p->schema_version=MUSI_PROJECT_SCHEMA_VERSION;break;case 1:if(!parse_metadata(x,&p->metadata))return false;break;case 2:if(!parse_audio(x,&p->audio))return false;break;case 3:if(!parse_output(x,&p->output))return false;break;case 4:if(!ju64(x,&p->deterministic_seed))return false;break;case 5:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_count&&!take(x,','))return false;if(p->scene_count>=MUSI_PROJECT_MAX_SCENES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene(x,&p->scenes[p->scene_count++]))return false;}break;case 6:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->cue_count&&!take(x,','))return false;if(p->cue_count>=MUSI_PROJECT_MAX_CUES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_cue(x,&p->cues[p->cue_count++]))return false;}break;case 7:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->analysis_lane_count&&!take(x,','))return false;if(p->analysis_lane_count>=MUSI_PROJECT_MAX_ANALYSIS_LANES){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_lane(x,&p->analysis_lanes[p->analysis_lane_count++]))return false;}break;case 8:if(!parse_lyrics(x,&p->lyrics))return false;break;case 9:if(!parse_switches(x,&p->scene_switches))return false;break;case 10:if(!parse_events(x,&p->manual_events))return false;break;case 11:if(!parse_events(x,&p->semantic_events))return false;break;case 12:if(!take(x,'['))return false;while(1){ws(x);if(x->p<x->end&&*x->p==']'){++x->p;break;}if(p->scene_preset_count&&!take(x,','))return false;if(p->scene_preset_count>=MUSI_PROJECT_MAX_SCENE_PRESETS){x->error=MUSI_PROJECT_IO_ERROR_CAPACITY;return false;}if(!parse_scene_preset(x,&p->scene_presets[p->scene_preset_count++]))return false;}break;case 13:if(!parse_ascii_image(x,&p->ascii_image))return false;break;case 14:if(!parse_caption_style(x,&p->caption_style))return false;break;}}
  if((mask&UINT64_C(0xff))!=UINT64_C(0xff)){x->error=MUSI_PROJECT_IO_ERROR_MISSING_FIELD;return false;}p->lyrics.duration_seconds=p->audio.duration_seconds;return true;}
 
 Musi_Project_Io_Result musi_project_json_serialize(const Musi_Project*p,char*out,size_t cap,size_t*required)

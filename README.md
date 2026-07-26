@@ -185,6 +185,16 @@ The normal workflow is:
    line breaks become spaces and the panel reports that. There is no caret or
    selection yet: text is edited at the end of the field.
 
+   **Style** in the same panel governs how every cue is rendered: face
+   (Alegreya or Space Grotesk), backing (none, drop shadow, or the rounded
+   plate), one of nine placements in the frame, size, maximum width, inset from
+   the edges, and ink and plate colour. Every measurement is a fraction of the
+   frame rather than a pixel count, so a caption typeset against the preview
+   window exports the same at 720p and at 2160p. The settings are saved in the
+   project; a `.musi` written before this existed opens with the values that
+   reproduce its original appearance, and a project that carries an explicit
+   style will not open in an older build.
+
    Timing can also be edited directly in the cue lane under the waveform. A
    click selects a cue and binds the form to it; <kbd>Ctrl</kbd>+click adds or
    removes one cue; <kbd>Shift</kbd>+click takes everything between the anchor

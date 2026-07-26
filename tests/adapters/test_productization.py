@@ -287,7 +287,13 @@ class DistributionManifestTests(unittest.TestCase):
         self.assertIn("resources/fonts/SpaceGrotesk-OFL.txt", build)
         self.assertIn("SpaceGrotesk-Regular.otf", plug)
         self.assertIn("static Font ui_font(void)", plug)
+        # Exactly one fallback to raylib's built-in bitmap face, in ui_font.
+        # The caption resolver must fall back to Alegreya instead: the default
+        # face carries none of the curated glyph coverage, so falling back to it
+        # would silently drop accents, Greek and Cyrillic from a caption.
         self.assertEqual(plug.count("GetFontDefault()"), 1)
+        self.assertIn("static Font caption_face(const Musi_Caption_Style *style)", plug)
+        self.assertIn("caption_alt_font", plug)
 
     def test_ux_audit_critical_recovery_paths_are_wired(self):
         plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")

@@ -63,11 +63,40 @@ void musi_project_init(Musi_Project *project)
     project->output.fps_denominator = 1;
     project->output.format = MUSI_OUTPUT_MP4_H264;
     project->output.quality = MUSI_OUTPUT_QUALITY_HIGH;
+    musi_caption_style_init(&project->caption_style);
     project->lyrics.schema_version = LYRICS_DOCUMENT_SCHEMA_VERSION;
     project->lyrics.next_id = 1;
     project->lyrics.revision = 1;
     event_timeline_init(&project->semantic_events);
     event_timeline_init(&project->manual_events);
+}
+
+void musi_caption_style_init(Musi_Caption_Style *style)
+{
+    if (style == NULL) return;
+    memset(style, 0, sizeof(*style));
+    style->face = MUSI_CAPTION_FACE_ALEGREYA;
+    style->box = MUSI_CAPTION_BOX_PLATE;
+    style->anchor = MUSI_CAPTION_ANCHOR_BOTTOM_CENTER;
+    style->size_scale = MUSI_CAPTION_SIZE_DEFAULT;
+    style->margin_scale = MUSI_CAPTION_MARGIN_DEFAULT;
+    style->width_scale = MUSI_CAPTION_WIDTH_DEFAULT;
+    style->text_rgba = MUSI_CAPTION_TEXT_RGBA_DEFAULT;
+    style->box_rgba = MUSI_CAPTION_BOX_RGBA_DEFAULT;
+}
+
+bool musi_caption_style_is_default(const Musi_Caption_Style *style)
+{
+    if (style == NULL) return false;
+    Musi_Caption_Style shipped;
+    musi_caption_style_init(&shipped);
+    return style->face == shipped.face && style->box == shipped.box &&
+           style->anchor == shipped.anchor &&
+           style->size_scale == shipped.size_scale &&
+           style->margin_scale == shipped.margin_scale &&
+           style->width_scale == shipped.width_scale &&
+           style->text_rgba == shipped.text_rgba &&
+           style->box_rgba == shipped.box_rgba && !style->font.present;
 }
 
 static bool scene_id_exists(const Musi_Project *project, uint64_t id)
@@ -115,6 +144,32 @@ Musi_Project_Validation musi_project_validate(const Musi_Project *project)
           ascii->columns > ASCII_GRID_MAX_COLUMNS || ascii->rows == 0 ||
           ascii->rows > ASCII_GRID_MAX_ROWS))) {
         return validation(MUSI_PROJECT_ERROR_ASCII_IMAGE, 0, 0);
+    }
+    const Musi_Caption_Style *caption = &project->caption_style;
+    // The imported face and the font asset are one fact stated twice. Either
+    // arrangement where they disagree would open a project whose captions are
+    // typeset in a face the file does not carry.
+    if (!enum_in_range((int) caption->face, MUSI_CAPTION_FACE_COUNT) ||
+        !enum_in_range((int) caption->box, MUSI_CAPTION_BOX_COUNT) ||
+        !enum_in_range((int) caption->anchor, MUSI_CAPTION_ANCHOR_COUNT) ||
+        !isfinite(caption->size_scale) ||
+        caption->size_scale < MUSI_CAPTION_SIZE_MINIMUM ||
+        caption->size_scale > MUSI_CAPTION_SIZE_MAXIMUM ||
+        !isfinite(caption->margin_scale) ||
+        caption->margin_scale < MUSI_CAPTION_MARGIN_MINIMUM ||
+        caption->margin_scale > MUSI_CAPTION_MARGIN_MAXIMUM ||
+        !isfinite(caption->width_scale) ||
+        caption->width_scale < MUSI_CAPTION_WIDTH_MINIMUM ||
+        caption->width_scale > MUSI_CAPTION_WIDTH_MAXIMUM ||
+        (caption->face == MUSI_CAPTION_FACE_IMPORTED) != caption->font.present ||
+        (!caption->font.present &&
+         (caption->font.path[0] != '\0' || caption->font.sha256[0] != '\0' ||
+          caption->font.family[0] != '\0')) ||
+        (caption->font.present &&
+         (!bounded_string(caption->font.path, sizeof(caption->font.path), false) ||
+          !sha256_string(caption->font.sha256) ||
+          !bounded_string(caption->font.family, sizeof(caption->font.family), false)))) {
+        return validation(MUSI_PROJECT_ERROR_CAPTION_STYLE, 0, 0);
     }
     if (project->output.width < 16 || project->output.width > 16384 ||
         project->output.height < 16 || project->output.height > 16384 ||
@@ -319,7 +374,8 @@ const char *musi_project_error_string(Musi_Project_Error error)
 {
     static const char *const names[] = {
         "valid", "null project", "unsupported schema version", "invalid metadata",
-        "invalid audio asset", "invalid ASCII image asset", "invalid output settings", "capacity/count violation",
+        "invalid audio asset", "invalid ASCII image asset",
+        "invalid caption style", "invalid output settings", "capacity/count violation",
         "invalid scene", "invalid parameter mapping", "invalid cue", "cues are unsorted",
         "cues overlap", "invalid analysis lane", "duplicate stable id",
         "invalid lyrics", "invalid scene-switch suggestions", "invalid scene preset", "invalid manual event",
@@ -338,6 +394,15 @@ Musi_Project_Editor_Support musi_project_editor_support(
     if (project->audio.mode != MUSI_ASSET_REFERENCED &&
         project->audio.mode != MUSI_ASSET_IMPORTED) {
         return MUSI_PROJECT_EDITOR_ERROR_AUDIO_MODE;
+    }
+    // An imported caption face names a file in the sibling asset bundle that
+    // this build cannot publish or verify yet. Opening such a project would
+    // typeset in the fallback face and then autosave that substitution over the
+    // author's choice, which is exactly the silent normalization the editor
+    // support check exists to prevent.
+    if (project->caption_style.face == MUSI_CAPTION_FACE_IMPORTED ||
+        project->caption_style.font.present) {
+        return MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT;
     }
     if (fabs(project->output.start_seconds) > 0.000001 ||
         fabs(project->output.end_seconds - project->audio.duration_seconds) >
@@ -377,6 +442,7 @@ const char *musi_project_editor_support_string(Musi_Project_Editor_Support suppo
         "parameter automation cues are not supported by this editor yet",
         "the scene must cover the full track, be enabled, opaque, and Normal blend",
         "only built-in scene settings are supported, persisted as slider constants or audio-driven routes",
+        "an imported caption face is not supported by this editor yet",
     };
     return (unsigned)support < sizeof(names)/sizeof(names[0]) ?
            names[support] : "unknown editor compatibility result";
@@ -505,5 +571,13 @@ MUSI_NAME_FUNCTION(musi_interpolation_name, Musi_Interpolation, MUSI_INTERPOLATI
                    "step", "linear", "smoothstep", "ease_in", "ease_out")
 MUSI_NAME_FUNCTION(musi_analysis_lane_kind_name, Musi_Analysis_Lane_Kind, MUSI_LANE_KIND_COUNT,
                    "measured_signal", "lyric_timing", "semantic_score")
+MUSI_NAME_FUNCTION(musi_caption_face_name, Musi_Caption_Face, MUSI_CAPTION_FACE_COUNT,
+                   "alegreya", "space_grotesk", "imported")
+MUSI_NAME_FUNCTION(musi_caption_box_name, Musi_Caption_Box, MUSI_CAPTION_BOX_COUNT,
+                   "none", "shadow", "plate")
+MUSI_NAME_FUNCTION(musi_caption_anchor_name, Musi_Caption_Anchor, MUSI_CAPTION_ANCHOR_COUNT,
+                   "bottom_left", "bottom_center", "bottom_right",
+                   "middle_left", "middle_center", "middle_right",
+                   "top_left", "top_center", "top_right")
 
 #undef MUSI_NAME_FUNCTION

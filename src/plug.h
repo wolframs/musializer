@@ -102,6 +102,8 @@ typedef struct {
     // can photograph is a zoom level nobody reviews. 0 or 1 leaves the whole
     // track in view.
     double timeline_zoom;
+    // Show the caption-style pane instead of the cue form. Needs panel=lyrics.
+    bool caption_style_pane;
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

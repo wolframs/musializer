@@ -60,6 +60,9 @@ typedef struct {
     size_t ascii_rows;
     char ascii_image_path[PLUG_RELOAD_PATH_CAPACITY];
     char ascii_image_sha256[SHA256_HEX_SIZE];
+    // Caption typography for this project's lyric overlay. Preview and export
+    // read the same struct, so what the workspace shows is what renders.
+    Musi_Caption_Style caption_style;
     char project_path[PLUG_RELOAD_PATH_CAPACITY];
     Musi_Project_Metadata project_metadata;
     bool project_metadata_initialized;

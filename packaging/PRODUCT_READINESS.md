@@ -53,10 +53,18 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 - **Disabled text is a house rule, not a conformance claim.** WCAG exempts
   disabled controls; the palette holds them above 3:1 and strictly below the
   muted colour so "unavailable" and "secondary" stay distinguishable.
-- **Captions cannot be restyled.** Caption face, size and colour are fixed and
-  not part of the `.musi` format, so a user who needs larger subtitles has no
-  control. Caption size is a fixed fraction of frame height, so it is at least
-  consistent across export resolutions. This is gate D1.
+- **Captions are restylable, within a fixed set of faces.** Face, backing,
+  placement, size, width, inset and colour are authored in the Lyrics panel and
+  persisted in `.musi`. Two bundled faces are selectable. Importing an arbitrary
+  font is **not implemented**: the format reserves `caption_style.font` and the
+  validator enforces that an imported face carries its asset, but nothing
+  publishes or verifies that asset yet, so `musi_project_editor_support` rejects
+  such a project rather than opening it in a substitute face and autosaving the
+  substitution. Colour is chosen from swatches, not a full picker.
+- **A project with an explicit caption style will not open in an older build.**
+  The codec rejects unknown root members by design, so `caption_style` is a
+  one-way step for any file the editor has saved since this build. That is the
+  cost of the strict-JSON contract and is not going to change.
 - **Non-Latin lyrics render as missing glyphs.** The bundled atlas covers
   Latin, Greek and Cyrillic. A Japanese or Arabic cue validates, persists and
   exports without warning, and per-codepoint drawing means no shaping or
