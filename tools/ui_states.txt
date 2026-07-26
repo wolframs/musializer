@@ -55,3 +55,8 @@ scene-constellation|1280x720|--project PROJECT --scene constellation --ui-probe 
 scene-cadence|1280x720|--project PROJECT --scene cadence --ui-probe panel=none,time=6,play=1,size=1280x720
 scene-loom|1280x720|--project PROJECT --scene loom --ui-probe panel=none,time=6,play=1,size=1280x720
 scene-pentagram|1280x720|--project PROJECT --scene pentagram --ui-probe panel=none,time=6,play=1,size=1280x720
+
+# --- timeline zoom: the strip cannot be scrolled by the probe, only zoomed
+# about the playhead, so these are the only reviewable zoomed states ---
+timeline-zoom-8x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom=8
+timeline-zoom-40x|1600x900|--project PROJECT --ui-probe panel=lyrics,time=10,zoom=40

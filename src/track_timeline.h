@@ -29,11 +29,6 @@ size_t track_timeline_build_waveform(const float *samples,
 double track_timeline_seek_relative(double current_seconds,
                                     double delta_seconds,
                                     double duration_seconds);
-double track_timeline_seek_from_x(double current_seconds,
-                                  double pointer_x,
-                                  double left,
-                                  double width,
-                                  double duration_seconds);
 
 // Raylib cannot seek tracker-module streams. Keep transport affordances
 // truthful for those extensions while preserving all decoded audio formats.

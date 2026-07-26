@@ -9,6 +9,7 @@
 
 #include "editor_draft.h"
 #include "lyrics.h"
+#include "timeline_view.h"
 #include "track.h"
 #include "ui_notice.h"
 #include "ui_theme.h"
@@ -52,6 +53,7 @@ void lyric_editor_ui_text_input_update(Lyric_Editor *editor,
                                        const Lyric_Editor_Services *services);
 
 void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_length,
+                               const Timeline_View *view,
                                Rectangle lane, Font font,
                                bool editor_open_on_click,
                                const Lyric_Editor_Services *services);

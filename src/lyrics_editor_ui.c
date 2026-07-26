@@ -238,6 +238,7 @@ static void lyric_time_row(const Lyric_Editor_Services *s, Rectangle boundary,
 }
 
 void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_length,
+                            const Timeline_View *view,
                             Rectangle lane, Font font,
                             bool editor_open_on_click,
                             const Lyric_Editor_Services *services)
@@ -248,16 +249,30 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
     const Color lyric_color = (Color){242, 190, 66, 255};
     for (size_t i = 0; i < track->scene_switches.count; ++i) {
         const Scene_Switch_Cue *cue = &track->scene_switches.cues[i];
-        float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
+        float x = (float)timeline_view_x_at(view, cue->start_seconds, lane.x, lane.width);
+        if (x < lane.x || x > lane.x + lane.width) continue;
         DrawLineEx((Vector2){x, lane.y}, (Vector2){x, lane.y + lane.height},
                    1.0f + cue->strength*2.0f, ColorAlpha((Color){0, 230, 118, 255}, 0.58f));
     }
     for (size_t i = 0; i < track->lyrics.count; ++i) {
         const Lyric_Cue *cue = &track->lyrics.cues[i];
-        float left = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
-        float right = lane.x + (float)(cue->end_seconds/track_length)*lane.width;
+        float left = (float)timeline_view_x_at(view, cue->start_seconds, lane.x, lane.width);
+        float right = (float)timeline_view_x_at(view, cue->end_seconds, lane.x, lane.width);
+        if (right < lane.x || left > lane.x + lane.width) continue;
         if (right - left < 3.0f) right = left + 3.0f;
+        // Clip the drawn block to the lane, but only after the hit test has the
+        // true edges: a block whose start scrolled off the left must not offer
+        // a start-edge grab handle at the window edge, which would be a handle
+        // for a boundary that is not there.
         Rectangle block = {left, lane.y + 3.0f, right - left, lane.height - 6.0f};
+        if (block.x < lane.x) {
+            block.width -= lane.x - block.x;
+            block.x = lane.x;
+        }
+        if (block.x + block.width > lane.x + lane.width) {
+            block.width = lane.x + lane.width - block.x;
+        }
+        if (block.width < 1.0f) continue;
         bool selected = cue->id == editor->selected_id;
         Color fill = ColorAlpha(lyric_color, selected ? 0.82f : 0.38f);
         if (CheckCollisionPointRec(GetMousePosition(), block)) fill = ColorAlpha(lyric_color, 0.68f);
@@ -282,7 +297,9 @@ void lyric_editor_ui_draw_lane(Lyric_Editor *editor, Track *track, float track_l
     if (lane.height >= 18.0f) {
         for (size_t i = 0; i < track->scene_switches.count; ++i) {
             const Scene_Switch_Cue *cue = &track->scene_switches.cues[i];
-            float x = lane.x + (float)(cue->start_seconds/track_length)*lane.width;
+            float x = (float)timeline_view_x_at(view, cue->start_seconds,
+                                                lane.x, lane.width);
+            if (x < lane.x) continue;
             const char *name = scene_stable_name((Scene_Id)cue->scene_index);
             Vector2 size = MeasureTextEx(font, name, 11.0f, 1.0f);
             if (x + size.x + 8.0f >= lane.x + lane.width) continue;

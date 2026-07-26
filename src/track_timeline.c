@@ -102,16 +102,3 @@ double track_timeline_seek_relative(double current_seconds,
     return current + delta_seconds;
 }
 
-double track_timeline_seek_from_x(double current_seconds,
-                                  double pointer_x,
-                                  double left,
-                                  double width,
-                                  double duration_seconds)
-{
-    if (!isfinite(pointer_x) || !isfinite(left) || !isfinite(width) ||
-        width <= 0.0 || !isfinite(duration_seconds) || duration_seconds <= 0.0) {
-        return clamp_position(current_seconds, duration_seconds);
-    }
-    double fraction = (pointer_x - left)/width;
-    return clamp_position(fraction*duration_seconds, duration_seconds);
-}

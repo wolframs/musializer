@@ -42,18 +42,6 @@ TEST(track_timeline_relative_seek_is_exact_and_clamped)
     EXPECT_NEAR(track_timeline_seek_relative(NAN, 1.0, 60.0), 0.0, 0.0);
 }
 
-TEST(track_timeline_pointer_seek_maps_and_clamps_to_waveform)
-{
-    EXPECT_NEAR(track_timeline_seek_from_x(7.0, 150.0, 100.0, 200.0, 60.0),
-                15.0, 0.0);
-    EXPECT_NEAR(track_timeline_seek_from_x(7.0, 20.0, 100.0, 200.0, 60.0),
-                0.0, 0.0);
-    EXPECT_NEAR(track_timeline_seek_from_x(7.0, 400.0, 100.0, 200.0, 60.0),
-                60.0, 0.0);
-    EXPECT_NEAR(track_timeline_seek_from_x(7.0, 150.0, 100.0, 0.0, 60.0),
-                7.0, 0.0);
-}
-
 TEST(track_timeline_seek_capability_matches_decoder_contract)
 {
     EXPECT_TRUE(track_timeline_path_is_seekable("song.wav"));

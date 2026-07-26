@@ -96,6 +96,12 @@ typedef struct {
     // it no capture can show the cue-editing form, which is where the panel's
     // worst layout defects live.
     unsigned lyric_selection;
+    // Zoom the timeline strip by this factor about the probe's playhead. The
+    // probe applies state transitions and cannot turn a mouse wheel, so without
+    // this knob no capture can show a zoomed strip -- and a zoom level nobody
+    // can photograph is a zoom level nobody reviews. 0 or 1 leaves the whole
+    // track in view.
+    double timeline_zoom;
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

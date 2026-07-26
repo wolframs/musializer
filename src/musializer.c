@@ -144,6 +144,7 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
     bool seen_play = false;
     bool seen_assist = false;
     bool seen_lyric = false;
+    bool seen_zoom = false;
     char *cursor = buffer;
     while (cursor != NULL && *cursor != '\0') {
         char *comma = strchr(cursor, ',');
@@ -181,6 +182,16 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
             }
             request->probe.lyric_selection = (unsigned)index;
             seen_lyric = true;
+        } else if (strcmp(key, "zoom") == 0) {
+            char *end = NULL;
+            errno = 0;
+            double factor = strtod(value, &end);
+            if (seen_zoom || end == value || *end != '\0' || errno != 0 ||
+                !isfinite(factor) || factor < 1.0 || factor > 100000.0) {
+                return false;
+            }
+            request->probe.timeline_zoom = factor;
+            seen_zoom = true;
         } else if (strcmp(key, "assist") == 0) {
             if (seen_assist || strcmp(value, "confirm") != 0) return false;
             request->probe.assist_confirmation = true;
@@ -249,6 +260,8 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          assist=confirm arms the Assist confirmation\n"
         "                          prompt, lyric=N selects the nth lyric cue\n"
         "                          prompt (needs panel=assist),\n"
+        "                          zoom=FACTOR zooms the timeline strip about the\n"
+        "                          playhead (1 = whole track),\n"
         "                          play=0|1. The transport is parked unless\n"
         "                          play=1; audio-reactive scenes need play=1 but\n"
         "                          then capture a frame that is not reproducible.\n"

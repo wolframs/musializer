@@ -88,9 +88,19 @@ class DistributionManifestTests(unittest.TestCase):
 
         self.assertEqual(build.count('"./src/track_timeline.c"'), 2)
         self.assertIn("track_timeline_build_waveform", plug)
-        self.assertIn("track_timeline_seek_from_x", plug)
         self.assertIn("track_timeline_path_is_seekable", plug)
-        self.assertIn('"Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s"', plug)
+        # Pointer seeking moved from track_timeline_seek_from_x, which assumed
+        # the whole track spanned the strip, to the zoomable view. The strip and
+        # the scrubber must agree about where a moment is, so both go through
+        # timeline_view; a plug.c that maps pixels itself is the regression.
+        self.assertEqual(build.count('"./src/timeline_view.c"'), 2)
+        self.assertIn("timeline_view_seconds_at(", plug)
+        self.assertNotIn("track_timeline_seek_from_x", plug)
+        self.assertIn(
+            '"Arrows: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s'
+            '  |  Wheel: zoom, middle-drag: pan"',
+            plug,
+        )
         self.assertNotIn('"-0.1 s"', plug)
         self.assertNotIn('"+0.1 s"', plug)
         self.assertIn("1.25f, COLOR_TIMELINE_CURSOR", plug)

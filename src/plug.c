@@ -39,6 +39,7 @@
 #include "ui_widgets.h"
 #include "lyrics_editor_layout.h"
 #include "timeline_layout.h"
+#include "timeline_view.h"
 #include "workspace_layout.h"
 #define NOB_IMPLEMENTATION
 #define NOB_STRIP_PREFIX
@@ -105,7 +106,7 @@ MUSIALIZER_PLUG void *plug_load_resource(const char *file_path, size_t *size)
 #define PREVIEW_FPS 60
 
 #define PLUG_STATE_MAGIC UINT64_C(0x4D555349504C5547)
-#define PLUG_STATE_VERSION 28
+#define PLUG_STATE_VERSION 29
 
 typedef enum {
     UI_ICON_FULLSCREEN,
@@ -188,6 +189,21 @@ typedef struct {
     bool timeline_scrubbing;
     bool timeline_scrub_restore_playing;
     double timeline_scrub_seconds;
+    // Zoom/pan window onto the current track. Every seconds<->pixel conversion
+    // in the timeline strip goes through it, so it is the one place that
+    // decides what "here" means for the waveform, the cue lane and the
+    // scrubber alike. Reset whenever the loaded track changes.
+    Timeline_View timeline_view;
+    bool timeline_panning;
+    // Panning tracks the pointer's pixel delta rather than the moment under it:
+    // seconds_at clamps to the track, so an anchor dragged past either end
+    // would stick and the view would stop following the hand.
+    float timeline_pan_anchor_x;
+    // The duration the view was last established against. Comparing it each
+    // frame resets the zoom on track load, track switch and project open from
+    // one place, instead of needing a call at every site that can change which
+    // audio is current -- the kind of list that goes stale silently.
+    double timeline_view_duration;
 
     // Scene engine
     Scene_Instance scene;
@@ -1451,7 +1467,8 @@ static void record_scene_cue(Track *track)
 static void draw_lyric_lane(Rectangle lane, Track *track, float track_length)
 {
     Lyric_Editor_Services services = lyric_editor_services();
-    lyric_editor_ui_draw_lane(&p->lyric_editor, track, track_length, lane, ui_font(),
+    lyric_editor_ui_draw_lane(&p->lyric_editor, track, track_length,
+                           &p->timeline_view, lane, ui_font(),
                            p->lyrics_editor_open, &services);
 }
 
@@ -2006,7 +2023,15 @@ static void seek_track_by(Track *track, double delta_seconds)
     seek_track_to(track, target);
 }
 
-static void draw_track_waveform(Rectangle boundary, const Track *track)
+// The envelope is built once at load time as TRACK_TIMELINE_MAX_BINS buckets
+// spanning the whole track, so a zoomed view resamples that fixed envelope
+// rather than the PCM, which is not retained. At the 0.25 s span floor a
+// four-minute track offers about two bins, and the drawing becomes a coarse
+// block -- honest, since the underlying detail genuinely is not there. The lyric
+// blocks and the tick labels stay exact at every zoom because they are computed
+// from timings, not from the envelope.
+static void draw_track_waveform(Rectangle boundary, const Track *track,
+                                const Timeline_View *view, double duration)
 {
     DrawRectangleRec(boundary, COLOR_UI_RAISED);
     DrawRectangleLinesEx(boundary, 1.0f, COLOR_UI_RULE);
@@ -2016,7 +2041,8 @@ static void draw_track_waveform(Rectangle boundary, const Track *track)
                1.0f, ColorAlpha(COLOR_UI_MUTED, 0.28f));
 
     size_t bin_count = track->timeline_waveform.count;
-    if (bin_count == 0 || boundary.width < 1.0f || boundary.height < 4.0f) {
+    if (bin_count == 0 || boundary.width < 1.0f || boundary.height < 4.0f ||
+        !isfinite(duration) || duration <= 0.0) {
         const char *message = "Waveform unavailable";
         Vector2 size = MeasureTextEx(ui_font(), message, 12.0f, 1.0f);
         DrawTextEx(ui_font(), message,
@@ -2029,9 +2055,15 @@ static void draw_track_waveform(Rectangle boundary, const Track *track)
     size_t columns = (size_t)floorf(boundary.width);
     if (columns > 4096u) columns = 4096u;
     float amplitude = fmaxf(1.0f, boundary.height*0.43f);
+    const double bins_per_second = (double)bin_count/duration;
     for (size_t column = 0; column < columns; ++column) {
-        size_t first = column*bin_count/columns;
-        size_t end = (column + 1u)*bin_count/columns;
+        double column_start = timeline_view_seconds_at(
+            view, boundary.x + (double)column, boundary.x, boundary.width, duration);
+        double column_end = timeline_view_seconds_at(
+            view, boundary.x + (double)column + 1.0, boundary.x, boundary.width, duration);
+        size_t first = (size_t)(column_start*bins_per_second);
+        size_t end = (size_t)(column_end*bins_per_second);
+        if (first >= bin_count) first = bin_count - 1u;
         if (end <= first) end = first + 1u;
         if (end > bin_count) end = bin_count;
         float minimum = 0.0f;
@@ -2068,6 +2100,50 @@ static void update_transport_shortcuts(Track *track)
     seek_track_by(track, (double)direction*step);
 }
 
+// Wheel zooms about the pointer, shift+wheel and middle-drag pan. The pan claim
+// is released whenever the middle button is not held rather than on the release
+// edge alone: a release delivered while the window is unfocused would otherwise
+// strand the id and freeze every button in the application (AGENTS.md).
+static void timeline_zoom_input(Rectangle lane, Vector2 mouse, double duration)
+{
+    if (!isfinite(duration) || duration <= 0.0) return;
+    const uint64_t pan_id = UINT64_C(0x54494D45504E4E47);
+    bool over = CheckCollisionPointRec(mouse, lane);
+
+    float wheel = GetMouseWheelMove();
+    if (over && wheel != 0.0f && p->active_button_id == 0) {
+        bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        if (shift) {
+            timeline_view_pan(&p->timeline_view, duration,
+                              -(double)wheel*p->timeline_view.span_seconds*0.18);
+        } else {
+            double anchor = timeline_view_seconds_at(&p->timeline_view, mouse.x,
+                                                     lane.x, lane.width, duration);
+            timeline_view_zoom(&p->timeline_view, duration,
+                               pow(1.3, (double)wheel), anchor);
+        }
+    }
+
+    if (over && p->active_button_id == 0 &&
+        IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE)) {
+        p->active_button_id = pan_id;
+        p->timeline_panning = true;
+        p->timeline_pan_anchor_x = mouse.x;
+    }
+    if (p->active_button_id == pan_id) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) {
+            double per_pixel = timeline_view_seconds_per_pixel(&p->timeline_view,
+                                                               lane.width);
+            timeline_view_pan(&p->timeline_view, duration,
+                              -(double)(mouse.x - p->timeline_pan_anchor_x)*per_pixel);
+            p->timeline_pan_anchor_x = mouse.x;
+        } else {
+            p->timeline_panning = false;
+            p->active_button_id = 0;
+        }
+    }
+}
+
 static void timeline(Rectangle timeline_boundary, Track *track)
 {
     DrawRectangleRec(timeline_boundary, COLOR_TIMELINE_BACKGROUND);
@@ -2076,6 +2152,17 @@ static void timeline(Rectangle timeline_boundary, Track *track)
                                            GetMusicTimePlayed(track->music);
     float len = GetMusicTimeLength(track->music);
     if (len <= 0.0f) return;
+
+    // Establishing the view here rather than at every track-changing call site
+    // means a freshly zeroed Plug, a hot reload from an older layout and a
+    // switch to a differently long track all arrive at a legal window.
+    if (!isfinite(p->timeline_view_duration) ||
+        fabs(p->timeline_view_duration - (double)len) > 1e-3) {
+        timeline_view_reset(&p->timeline_view, (double)len);
+        p->timeline_view_duration = (double)len;
+        p->timeline_panning = false;
+    }
+    timeline_view_clamp(&p->timeline_view, (double)len);
 
     const float controls_height = 38.0f;
     const float transport_height = 32.0f;
@@ -2262,7 +2349,7 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     }
 
     const char *shortcut = track->transport_seekable ?
-        "Arrow keys: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s" :
+        "Arrows: 1 s  |  Ctrl: 0.1 s  |  Shift: 10 s  |  Wheel: zoom, middle-drag: pan" :
         "Precise seeking is unavailable for module audio";
     Vector2 shortcut_size = MeasureTextEx(ui_font(), shortcut, 12.0f, 1.0f);
     if (seek_x + margin + shortcut_size.x < transport_right) {
@@ -2289,13 +2376,26 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         fminf(22.0f, waveform_lane.height),
     };
 
+    // Following the playhead only while the transport is running keeps a manual
+    // pan from being yanked back under the user mid-gesture.
+    if (IsMusicStreamPlaying(track->music) && !p->timeline_scrubbing &&
+        !p->timeline_panning) {
+        timeline_view_reveal(&p->timeline_view, (double)len, (double)played);
+    }
+    const Timeline_View *view = &p->timeline_view;
+
     BeginScissorMode((int)waveform_lane.x, (int)waveform_lane.y,
                      (int)waveform_lane.width, (int)waveform_lane.height);
-    draw_track_waveform(waveform_lane, track);
+    draw_track_waveform(waveform_lane, track, view, (double)len);
 
-    double tick_step = len > 600.0f ? 60.0 : len > 180.0f ? 30.0 : 10.0;
-    for (double seconds = 0.0; seconds < len; seconds += tick_step) {
-        float tick_x = waveform_lane.x + (float)(seconds/len)*waveform_lane.width;
+    double tick_step = timeline_view_tick_step(view->span_seconds);
+    double first_tick = floor(view->start_seconds/tick_step)*tick_step;
+    for (double seconds = first_tick;
+         seconds < view->start_seconds + view->span_seconds + tick_step;
+         seconds += tick_step) {
+        if (seconds < 0.0 || seconds > len) continue;
+        float tick_x = (float)timeline_view_x_at(view, seconds, waveform_lane.x,
+                                                 waveform_lane.width);
         DrawLineEx((Vector2){tick_x, waveform_lane.y},
                    (Vector2){tick_x, waveform_lane.y + waveform_lane.height},
                    1.0f, COLOR_UI_RULE);
@@ -2323,9 +2423,11 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     Event_Timeline_View events = combined_scene_events();
     for (size_t i = 0; i < events.count; ++i) {
         const Event_Record *event = &events.events[i];
-        float t = (float)(event->timestamp_seconds/len);
-        if (t < 0.0f || t > 1.0f) continue;
-        float marker_x = waveform_lane.x + t*waveform_lane.width;
+        if (event->timestamp_seconds < 0.0 || event->timestamp_seconds > len) continue;
+        float marker_x = (float)timeline_view_x_at(view, event->timestamp_seconds,
+                                                   waveform_lane.x, waveform_lane.width);
+        if (marker_x < waveform_lane.x - 8.0f ||
+            marker_x > waveform_lane.x + waveform_lane.width + 8.0f) continue;
         Color color = event_type_color(event->type);
         DrawLineEx((Vector2){marker_x, waveform_lane.y},
                    (Vector2){marker_x, waveform_lane.y + waveform_lane.height},
@@ -2335,7 +2437,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     }
 
     draw_lyric_lane(lyric_lane, track, len);
-    float x = waveform_lane.x + played/len*waveform_lane.width;
+    float x = (float)timeline_view_x_at(view, (double)played,
+                                        waveform_lane.x, waveform_lane.width);
     DrawLineEx((Vector2){x, waveform_lane.y},
                (Vector2){x, waveform_lane.y + waveform_lane.height},
                1.25f, COLOR_TIMELINE_CURSOR);
@@ -2374,6 +2477,36 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         if (panel.height > 80.0f) draw_export_panel(panel, track);
     }
 
+    // The zoom state has to be legible or a scrolled strip reads as corrupted
+    // data. The readout and its Fit button appear only while zoomed, and are
+    // processed before the scrubber below so that pressing Fit claims the id
+    // first and does not also seek the transport.
+    if (!timeline_view_is_whole(view, (double)len) && waveform_lane.height >= 40.0f) {
+        char zoom_label[48];
+        double span = view->span_seconds;
+        if (span >= 60.0) {
+            snprintf(zoom_label, sizeof(zoom_label), "%.0f s visible", span);
+        } else if (span >= 1.0) {
+            snprintf(zoom_label, sizeof(zoom_label), "%.1f s visible", span);
+        } else {
+            snprintf(zoom_label, sizeof(zoom_label), "%.0f ms visible", span*1000.0);
+        }
+        Rectangle fit = {
+            waveform_lane.x + waveform_lane.width - 46.0f - 8.0f,
+            waveform_lane.y + 6.0f, 46.0f, 20.0f,
+        };
+        Vector2 zoom_size = MeasureTextEx(ui_font(), zoom_label, 12.0f, 1.0f);
+        Vector2 zoom_position = {fit.x - 8.0f - zoom_size.x,
+                                 fit.y + (fit.height - zoom_size.y)*0.5f};
+        DrawRectangleRec((Rectangle){zoom_position.x - 4.0f, zoom_position.y - 2.0f,
+                                     zoom_size.x + 8.0f, zoom_size.y + 4.0f},
+                         COLOR_UI_RAISED);
+        DrawTextEx(ui_font(), zoom_label, zoom_position, 12.0f, 1.0f, COLOR_UI_MUTED);
+        if (text_button(UINT64_C(0x5A4F4F4D46495421), fit, "Fit", false) & BS_CLICKED) {
+            timeline_view_reset(&p->timeline_view, (double)len);
+        }
+    }
+
     Vector2 mouse = GetMousePosition();
     const uint64_t drag_id = UINT64_C(0x5345454B44524147);
     if (track->transport_seekable && p->active_button_id == 0 &&
@@ -2387,8 +2520,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
     }
     if (p->active_button_id == drag_id) {
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            p->timeline_scrub_seconds = track_timeline_seek_from_x(
-                GetMusicTimePlayed(track->music), mouse.x, waveform_lane.x,
+            p->timeline_scrub_seconds = timeline_view_seconds_at(
+                &p->timeline_view, mouse.x, waveform_lane.x,
                 waveform_lane.width, len);
         }
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -2401,6 +2534,8 @@ static void timeline(Rectangle timeline_boundary, Track *track)
             p->active_button_id = 0;
         }
     }
+
+    timeline_zoom_input(waveform_lane, mouse, (double)len);
 
     // TODO: enable the user to render a specific region instead of the whole song.
 }
@@ -2979,6 +3114,19 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
         if (!track->transport_seekable) return false;
         seek_track_to(track, probe.seek_seconds);
     }
+
+    if (probe.timeline_zoom > 1.0) {
+        if (track == NULL || !isfinite(probe.timeline_zoom)) return false;
+        double duration = (double)GetMusicTimeLength(track->music);
+        if (!(duration > 0.0)) return false;
+        // Anchor on the playhead so `time=` and `zoom=` compose: the moment the
+        // capture is about stays in frame instead of being scrolled away.
+        timeline_view_reset(&p->timeline_view, duration);
+        p->timeline_view_duration = duration;
+        timeline_view_zoom(&p->timeline_view, duration, probe.timeline_zoom,
+                           (double)GetMusicTimePlayed(track->music));
+    }
+
     // A running transport makes every capture a different frame. Park it after
     // seeking, because seek_track_to resumes the stream to refill the decoder.
     if (track != NULL) {
