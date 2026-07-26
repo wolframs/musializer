@@ -31,7 +31,7 @@ if sys.version_info >= (3, 10):
 
 SCHEMA_VERSION = "musializer.doctor/v1"
 ROOT = Path(__file__).resolve().parents[1]
-CAPABILITIES = ("preview", "export", "local_lyrics", "remote_mimo")
+CAPABILITIES = ("preview", "export", "local_lyrics", "remote_mimo", "font_import")
 
 Which = Callable[[str], Optional[str]]
 FindSpec = Callable[[str], Any]
@@ -156,7 +156,7 @@ def audit(*, root: Path = ROOT, analysis_dir: Optional[Path] = None,
     python_ok = sys.version_info >= (3, 10)
     checks.append(_check(
         "python", python_ok, "Python 3.10 or newer",
-        required_for=("local_lyrics", "remote_mimo"),
+        required_for=("local_lyrics", "remote_mimo", "font_import"),
         detail=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
     ))
     numpy_ok = find_spec("numpy") is not None
@@ -190,6 +190,22 @@ def audit(*, root: Path = ROOT, analysis_dir: Optional[Path] = None,
     checks.append(_check(
         "lyric_assets", not missing, "Local lyric helpers, prompt, and schemas",
         required_for=("local_lyrics",),
+        detail="present" if not missing else "missing: " + ", ".join(missing),
+    ))
+
+    # Reachability is deliberately not probed: a doctor run must not itself
+    # open the network boundary it is reporting on. This says the helper and
+    # its contract are installed, which is the part a distribution can get
+    # wrong. Whether fonts.google.com answers is between the user and their
+    # connection, and the import surfaces that failure where it happens.
+    font_assets = (
+        "tools/google_fonts.py", "tools/analysis_io.py",
+        "schemas/font-import-v1.schema.json",
+    )
+    missing = _missing_files(root, font_assets)
+    checks.append(_check(
+        "font_assets", not missing, "Google Fonts import helper and schema",
+        required_for=("font_import",),
         detail="present" if not missing else "missing: " + ", ".join(missing),
     ))
 
@@ -285,6 +301,7 @@ def render_human(report: Mapping[str, Any]) -> str:
         "export": "MP4 export",
         "local_lyrics": "Local Whisper + Codex lyrics",
         "remote_mimo": "Remote MiMo analysis",
+        "font_import": "Google Fonts caption face import",
     }
     for name in CAPABILITIES:
         capability = report["capabilities"][name]

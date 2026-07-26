@@ -28,6 +28,8 @@ SUPPORT_FILES = (
     "schemas/lyric-timing-v1.schema.json",
     "schemas/semantic-notes-v1.schema.json",
     "schemas/semantic-score-v1.schema.json",
+    "tools/google_fonts.py",
+    "schemas/font-import-v1.schema.json",
 )
 
 
@@ -95,7 +97,8 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("Preview/playback: READY", doctor.render_human(report))
 
     def test_missing_optional_stacks_do_not_block_preview(self):
-        for relative in ("tools/import_whisper.py", "tools/mimo_openrouter.py"):
+        for relative in ("tools/import_whisper.py", "tools/mimo_openrouter.py",
+                         "tools/google_fonts.py"):
             (self.root / relative).unlink()
         with mock.patch.object(
             doctor.external_analysis, "_default_whisper_paths",
@@ -115,6 +118,10 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(report["capabilities"]["remote_mimo"]["ready"])
         self.assertIn("ffmpeg", report["capabilities"]["export"]["missing"])
         self.assertNotIn("ffprobe", report["capabilities"]["export"]["missing"])
+        # A distribution that shipped without the helper must say so, and must
+        # say it without having tried to reach the network to find out.
+        self.assertFalse(report["capabilities"]["font_import"]["ready"])
+        self.assertIn("font_assets", report["capabilities"]["font_import"]["missing"])
 
     def test_writable_probe_handles_existing_missing_and_file_paths(self):
         existing = self.root / "existing"
