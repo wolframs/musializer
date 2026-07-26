@@ -112,6 +112,19 @@ does not get reviewed. An unknown key, a repeated key, an unparsable
 value, or a panel requested without a track is an error, so a typo in a capture
 script cannot quietly photograph the wrong state.
 
+Some states are reached by environment rather than by probe key. The Tune
+inspector's preset block, for instance, cannot be populated by clicking from a
+capture, but `MUSIALIZER_PRESET_STORE` overrides the per-user store path, so a
+store written by `preset_store_save` makes the populated block photographable:
+
+```sh
+MUSIALIZER_PRESET_STORE=/tmp/presets.json tools/ui_capture.sh build/ui-review/shots
+```
+
+Build such a fixture with the real serializer rather than hand-authoring the
+JSON; the store is strict and a hand-written file that fails to load leaves the
+library empty, which looks exactly like the state you were trying to leave.
+
 `play=0` parks the transport so repeated runs of a chrome or panel state are
 comparable. The spectrum analyzer is fed by the audio callback, so a parked
 transport decays every audio-reactive scene toward its idle state: judging
