@@ -36,6 +36,36 @@ staging directory, `.env`, and Python bytecode caches are not packaged.
 
 ## Known product gaps
 
+### Accessibility
+
+- **The workspace is mouse-only.** There is no keyboard focus model: no tab
+  order, no focus index, and no focus ring anywhere in `src/`. Every control
+  must be clicked. This is the largest accessibility gap in the product and it
+  is not scheduled.
+- **Body text meets WCAG 2.1 AA; control borders do not.** Every text/background
+  pair in the palette clears 4.5:1 and is asserted by
+  `tests/test_ui_contrast.c`. An enabled button, however, is white on a
+  near-white panel (about 1.02:1) with a 1 px border at 1.41:1, against the 3:1
+  WCAG 1.4.11 asks of a boundary that identifies a control. The deviation is
+  measured and pinned by that suite rather than left to drift; resolving it is
+  gate D7 in `EXTENSION_PLAN.md` because the same colour is every divider and
+  rail in the workspace.
+- **Disabled text is a house rule, not a conformance claim.** WCAG exempts
+  disabled controls; the palette holds them above 3:1 and strictly below the
+  muted colour so "unavailable" and "secondary" stay distinguishable.
+- **Captions cannot be restyled.** Caption face, size and colour are fixed and
+  not part of the `.musi` format, so a user who needs larger subtitles has no
+  control. Caption size is a fixed fraction of frame height, so it is at least
+  consistent across export resolutions. This is gate D1.
+- **Non-Latin lyrics render as missing glyphs.** The bundled atlas covers
+  Latin, Greek and Cyrillic. A Japanese or Arabic cue validates, persists and
+  exports without warning, and per-codepoint drawing means no shaping or
+  bidirectional support even with a different face.
+- No screen-reader support of any kind, and none is planned while the UI is a
+  single immediate-mode canvas.
+
+### Platform and packaging
+
 - The macOS `.app` is not signed, notarized, or placed in a DMG, and it does not
   register `.musi` Finder document handling. Analysis helpers are packaged, but
   their Python dependencies, optional local models, Codex login, and remote

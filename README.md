@@ -189,6 +189,13 @@ The normal workflow is:
    the playhead, select and tune the scene, then choose **+ Scene**. The cue
    captures the scene's tuning at that moment; seeking and export reload the
    same snapshot. Cue boundaries currently use deterministic cuts.
+   **Scene cues are create-only in the interface.** Pressing **+ Scene** again
+   at the same instant replaces a cue, but there is no way yet to remove one,
+   move its boundary, or point it at another scene without clearing the plan
+   and rebuilding it; the engine supports all three and the editing surface is
+   the next step. Choosing a base scene also turns **Auto scenes** off, because
+   a running plan would otherwise override it at every cued moment. The cues
+   are kept and come back when you re-enable it.
 6. Add manual visualization events with **+ Feel** and **+ Custom**, or import
    an image into ASCII Field. Both record a single-value marker at the playhead,
    and **Constellation is currently the only scene that reacts to them**: it
