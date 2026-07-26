@@ -601,12 +601,22 @@ original estimate of "~1125 px workspace width" was loose; the real threshold is
 `content - timecode - 12 px < 628 px`, and the narrowest supported band is 680 px
 (a 960 px window with the inspector open).
 
+**Item 7 landed (2026-07-26).** With `preset_count == 0` the block collapses
+from 98 px to 42 px: the count and a single "Save new" button, no dead nav row
+and no three disabled actions. One more slider is visible at 960x640 with the
+inspector open. The populated path is unchanged, verified by seeding a real
+preset store through `preset_store_save` and re-capturing --
+`MUSIALIZER_PRESET_STORE=<file>` overrides the per-user path, which is the way
+to photograph any preset state. The four-button row's "Save new" also
+ellipsized to "Save ne…" in a quarter-width cell and is now "Save"; the
+collapsed state keeps "Save new" because it has the room and is the onboarding
+moment.
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
 | 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
-| 7 | Tune inspector: collapse the empty PRESETS block | 214 px of chrome precedes the first slider; the empty block costs 98 px for one live control. | Skip the placeholder and the three disabled buttons when `preset_count == 0`. `tests/adapters/test_scene_quality.py:79/82/134` pin literal source strings -- preserve them or move the assertions in the same diff. |
 | 8 | Caption geometry, resolution independence | Caption size is `min(42*ps, max(20*ps, h*0.047))` (`plug.c:1072`) where `pixel_scale` is only the supersample factor, so the 42 px cap binds above 893 px and the same cue is typeset at 4.7% of frame height at 720p and 1.944% at 2160p. | Prerequisite for D1. Verify 720p output is byte-identical first as a canary. Keep `border = 1.0f * pixel_scale`. |
 | 9 | Lyric text field: caret, selection, paste | `lyrics_editor_ui.c:164-180` is the whole implementation -- backspace, escape, append. `GetClipboardText` appears nowhere in `src/`. | Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Paste must be refused whole when over-long, never cut mid-sequence: `validate_text` rejects truncated UTF-8. Bump `PLUG_STATE_VERSION`. |
 | 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |

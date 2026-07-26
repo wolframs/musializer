@@ -3352,6 +3352,23 @@ static void shared_presets_persist(void)
     }
 }
 
+// Saves the scene's current values as a new shared preset. Shared by the
+// populated preset block and the collapsed empty state, which offers this as
+// its only action.
+static void scene_settings_save_new_preset(size_t scene_index,
+                                           const Scene_Settings *settings,
+                                           size_t *selected)
+{
+    if (!shared_presets_editable()) return;
+    char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
+    snprintf(name, sizeof(name), "Preset %llu",
+             (unsigned long long)p->shared_presets.next_id);
+    if (scene_settings_preset_save(&p->shared_presets, scene_index, name,
+                                   settings, selected)) {
+        shared_presets_persist();
+    }
+}
+
 // Copies a project's track-local presets into the shared library (identity:
 // scene + exact values). The project keeps its own copies untouched so old
 // files round-trip byte-stable; the user simply sees their presets appear
@@ -4966,10 +4983,32 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     char preset_status[64];
     snprintf(preset_status, sizeof(preset_status), "PRESETS  %zu / %u",
              preset_count, SCENE_SETTINGS_PRESETS_PER_SCENE);
+    const float small_gap = 5.0f;
+    float content_top;
+
+    if (preset_count == 0) {
+        // With no presets there is nothing to page through, load, update or
+        // delete, and only "Save new" does anything. The full block cost 98 px
+        // of a panel whose first slider is what the user opened it for, so the
+        // empty state collapses to the count and the one live action.
+        DrawTextEx(ui_font(), preset_status,
+                   (Vector2){boundary.x + padding, preset_y + 9.0f},
+                   13.0f, 1.0f, COLOR_UI_MUTED);
+        Rectangle save_only = {
+            boundary.x + boundary.width - padding - 96.0f, preset_y, 96.0f, 30.0f,
+        };
+        if ((text_button(UINT64_C(0x5052455345545341), save_only,
+                         "Save new", false) & BS_CLICKED) != 0) {
+            scene_settings_save_new_preset(scene_index, editable_settings, selected);
+        }
+        tooltip(save_only, "Save the current values as a reusable preset",
+                SIDE_BOTTOM, false);
+        content_top = preset_y + 42.0f;
+    } else {
+
     DrawTextEx(ui_font(), preset_status,
                (Vector2){boundary.x + padding, preset_y + 3.0f},
                13.0f, 1.0f, COLOR_UI_MUTED);
-    const float small_gap = 5.0f;
     float nav_y = preset_y + 22.0f;
     Rectangle previous = {boundary.x + padding, nav_y, 34.0f, 28.0f};
     Rectangle next = {boundary.x + boundary.width - padding - 34.0f,
@@ -4977,28 +5016,16 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
     Rectangle preset_name = {previous.x + previous.width + small_gap, nav_y,
                              next.x - previous.x - previous.width - small_gap*2.0f,
                              28.0f};
-    if (preset_count > 0) {
-        if ((text_button(UINT64_C(0x5052455345545052), previous, "<", false) &
-             BS_CLICKED) != 0) {
-            *selected = (*selected + preset_count - 1)%preset_count;
-        }
-        if ((text_button(UINT64_C(0x5052455345544E58), next, ">", false) &
-             BS_CLICKED) != 0) {
-            *selected = (*selected + 1)%preset_count;
-        }
-        disabled_text_button(preset_name,
-            p->shared_presets.items[scene_index][*selected].name, true);
-    } else {
-        disabled_text_button(previous, "<", false);
-        DrawRectangleLinesEx(preset_name, 1.0f, ColorAlpha(COLOR_UI_RULE, 0.72f));
-        Vector2 empty_size = MeasureTextEx(ui_font(), "Save a preset to see it here",
-                                           UI_FONT_CAPTION, 0.0f);
-        DrawTextEx(ui_font(), "Save a preset to see it here",
-                   (Vector2){preset_name.x + (preset_name.width - empty_size.x)*0.5f,
-                             preset_name.y + (preset_name.height - empty_size.y)*0.5f},
-                   UI_FONT_CAPTION, 0.0f, COLOR_UI_MUTED);
-        disabled_text_button(next, ">", false);
+    if ((text_button(UINT64_C(0x5052455345545052), previous, "<", false) &
+         BS_CLICKED) != 0) {
+        *selected = (*selected + preset_count - 1)%preset_count;
     }
+    if ((text_button(UINT64_C(0x5052455345544E58), next, ">", false) &
+         BS_CLICKED) != 0) {
+        *selected = (*selected + 1)%preset_count;
+    }
+    disabled_text_button(preset_name,
+        p->shared_presets.items[scene_index][*selected].name, true);
 
     float action_y = nav_y + 34.0f;
     float action_width = (boundary.width - padding*2.0f - small_gap*3.0f)*0.25f;
@@ -5011,11 +5038,13 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
                         action_width, 30.0f};
     const char *delete_label = p->scene_preset_delete_confirmation ?
                                "Confirm" : "Delete";
+    // "Save new" does not fit a quarter-width cell and ellipsized to "Save ne…".
+    // "Update" and "Delete" sit beside it, so the shorter label is unambiguous.
     const char *save_label = preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE ?
-                             "Full" : "Save new";
+                             "Full" : "Save";
     const char *preset_labels[4] = {"Load", save_label, "Update", delete_label};
     float preset_font = uniform_row_font_size(preset_labels, 4, action_width, 30.0f);
-    if (preset_count > 0) {
+    {
         if ((text_button_sized(UINT64_C(0x5052455345544150), apply,
                                preset_labels[0], false, preset_font) & BS_CLICKED) != 0 &&
             scene_settings_preset_apply(&p->shared_presets, scene_index,
@@ -5056,28 +5085,19 @@ static void scene_settings_panel(Rectangle boundary, Track *track)
         tooltip(remove, p->scene_preset_delete_confirmation ?
                 "Click again to permanently remove this preset" :
                 "Remove the selected preset", SIDE_BOTTOM, false);
-    } else {
-        disabled_text_button_sized(apply, preset_labels[0], false, preset_font);
-        disabled_text_button_sized(replace, preset_labels[2], false, preset_font);
-        // No preset to confirm against, so this always reads as the plain action.
-        disabled_text_button_sized(remove, "Delete", false, preset_font);
     }
-    if (preset_count < SCENE_SETTINGS_PRESETS_PER_SCENE &&
-        (text_button_sized(UINT64_C(0x5052455345545341), save,
-                           save_label, false, preset_font) & BS_CLICKED) != 0 &&
-        shared_presets_editable()) {
-        char name[SCENE_SETTINGS_PRESET_NAME_CAPACITY];
-        snprintf(name, sizeof(name), "Preset %llu",
-                 (unsigned long long)p->shared_presets.next_id);
-        if (scene_settings_preset_save(&p->shared_presets, scene_index,
-                                       name, editable_settings, selected)) {
-            shared_presets_persist();
+    if (preset_count < SCENE_SETTINGS_PRESETS_PER_SCENE) {
+        if ((text_button_sized(UINT64_C(0x5052455345545341), save,
+                               save_label, false, preset_font) & BS_CLICKED) != 0) {
+            scene_settings_save_new_preset(scene_index, editable_settings, selected);
         }
-    } else if (preset_count >= SCENE_SETTINGS_PRESETS_PER_SCENE) {
+    } else {
         disabled_text_button_sized(save, save_label, false, preset_font);
     }
 
-    const float content_top = action_y + 42.0f;
+    content_top = action_y + 42.0f;
+    }
+
     const float footer_height = 44.0f;
     const float row_height = 76.0f;
     size_t setting_count = scene_settings_count(p->scene.id);
