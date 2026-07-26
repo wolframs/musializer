@@ -653,20 +653,68 @@ so much -- ten scenes in five rows stop being better past ~52 px tiles -- so the
 remaining surplus has nowhere useful to go without new content. This is a
 product question, not a layout bug.
 
+**Items 10 and D4 landed 2026-07-26, and D1 landed with them.** The operator
+answered both gates directly: they want ctrl/shift multi-select in the lane,
+drag-to-move a selection, drag-to-resize a block, and the zoom that makes those
+gestures possible at all; and they want caption typography.
+
+- `timeline_view.c` is the single seconds<->pixels authority for the strip. The
+  waveform, tick labels, event markers, lyric blocks, playhead and scrubber all
+  go through it, so they cannot disagree about where a moment is. Wheel zooms
+  about the pointer, shift+wheel and middle-drag pan, floor 0.25 s. 14 headless
+  tests. `track_timeline_seek_from_x` is gone: it assumed the whole track
+  spanned the strip, which is the assumption zoom breaks.
+- `lyrics_shift_many` needs no rollback path. A uniform shift preserves the
+  selection's internal order, the unselected cues do not move, and `cue_compare`
+  breaks ties on the unique id so no two cues can compare equal -- therefore the
+  only failure mode is an individually invalid cue, which is checked before
+  anything is written. `lyrics_shift_headroom` reports exactly what the commit
+  will accept, and a test pins the two together in both directions.
+- `lyric_lane_edit.c` holds what a screenshot cannot check: hit zones, the rule
+  that a boundary scrolled out of view offers no handle, the 18 px floor below
+  which a block is all handles and could never be moved, and the ctrl/shift
+  selection algebra. 11 tests.
+- Caption typography is `caption_style` in `.musi`: an optional root member, all
+  members required once present, colours as eight lowercase hex digits, and an
+  imported face that must agree with its asset. Defaults reproduce the previous
+  appearance byte-for-byte -- confirmed by a 720p canary, and note the plate
+  alpha is **0xB7**, not 0xB8, because raylib truncates `255*0.72`.
+
+**Not implemented, and deliberately rejected rather than degraded:** importing
+an arbitrary font. The operator asked for "bundled + import from Google Fonts",
+read as importing a downloaded OFL `.ttf`/`.otf` from disk. The format reserves
+`caption_style.font`, validation enforces face/asset agreement, and
+`musi_project_editor_support` returns
+`MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT` so such a project cannot be opened in
+a substitute face and then autosaved over. What is left to build:
+
+| Step | Where | Note |
+| --- | --- | --- |
+| `MUSI_PROJECT_ASSET_FONT` category | `project_io.h/.c` | Four lines: the enum, the `"fonts"` directory name, and two `category !=` guards. The copy/verify/publish machinery is already generic. |
+| Bundle on save | `plug.c` `save_project_to_path` | Mirror the ASCII image path exactly: `musi_project_bundle_asset` before `musi_project_atomic_write`, `musi_project_reference_published_asset` for metadata autosaves. This is the transactional write path; do not improvise here. |
+| Verify on open | `plug.c` project load | `musi_project_resolve_bundled_asset_path` plus a SHA-256 match **before** the face is used. Never fall back to an unverified external path. |
+| Track + runtime handle | `track.h`, `plug.c` | `caption_font_path`/`caption_font_sha256` beside the ASCII image pair; a `p->caption_imported_font` reloaded when the path changes. |
+| Import control | `lyrics_editor_ui.c` style pane | A third face choice plus a file dialog. The face must not become `imported` until the bytes verify and the font loads. |
+| Drop the rejection | `project.c` | Remove `MUSI_PROJECT_EDITOR_ERROR_CAPTION_FONT` and its readiness note together. |
+
+An in-application download from fonts.google.com is a **separate** decision: it
+would be a new network boundary and needs the same explicit opt-in and privacy
+disclosure as MiMo/OpenRouter. It is not implied by "import from Google Fonts".
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
 | 9 | Lyric text field: caret and selection | `lyrics_editor_ui.c` still edits only at the end of the field: typing, backspace, escape. **Paste landed 2026-07-26** via `lyrics_text_append` (all-or-nothing, line breaks flattened, 6 headless tests, mutation-verified against truncate-to-fit); `GetClipboardText` now has exactly one caller. | Caret/selection remain. Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Adding a caret index to `Lyric_Editor` **does** change the hot-reload state layout, so bump `PLUG_STATE_VERSION` then -- the paste work did not, and did not need to. |
-| 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |
+| 12 | Import an arbitrary caption face | See the table above. | The only part of the operator's caption request that did not ship. |
 
 ### Decision gates -- do not start without an answer
 
 | ID | Question | Recommendation |
 | --- | --- | --- |
-| D1 | `.musi` caption typography (face, size, colour, box, anchor). Root required set is `mask & 0xff` (`project_io.c:215`) so an optional root member parses with no migration. Needs schema, codec, validation, fixtures, `musi_project_editor_support` rejection and compatibility notes together. Cadence bypasses the shared overlay entirely (`plug.c:1143`) and typesets at `height*0.20*scale`. | **Item 8 is now shipped, so this is unblocked.** Take it as its own session. Sub-questions: is rejection by older builds acceptable and documented in `packaging/PRODUCT_READINESS.md`; bundled faces only or content-addressed fonts in `<stem>.assets/` with SHA-256 verify-before-use; does `CAPTION_LAYOUT_MAX_LINES 3` become runtime-selectable (it sizes `lines[]` and is baked into the documented ellipsis contract). |
+| ~~D1~~ | ~~`.musi` caption typography~~ | **Answered and landed 2026-07-26.** Bundled faces only for now; `CAPTION_LAYOUT_MAX_LINES` stayed at 3 and is still baked into the documented ellipsis contract; Cadence still bypasses the shared overlay and is recorded in `cadence-overhauls-2026-07-26.md`. |
 | D2 | 960x640 collapse policy. At 208 px against a 215 px scene-browser floor, something must disappear. | Current shipped behaviour hides the track list first and the tracks panel last. Surfacing Open/Add/Save from the toolbar in the hidden state is unimplemented. |
-| D4 | Scene-plan editing UI shape. The engine side is done: `scene_switch_remove`/`retime`/`retarget` are implemented and tested, so this gate is now purely about presentation. | A dedicated row under the waveform, not hit-testing the 1-3 px markers. Item 10's lane drag wants the same press -- the two must agree on `active_button_id` ownership before either is written. Whatever the shape, retarget must capture a fresh snapshot from the target scene or pass NULL; reusing the outgoing cue's snapshot is silently wrong between two 8-control scenes. |
+| D4 | Scene-plan editing UI shape. The engine side is done: `scene_switch_remove`/`retime`/`retarget` are implemented and tested. | **Partly answered.** The operator asked for lyric-lane manipulation, which shipped, so the ownership question is settled: the lane claims the press for the whole gesture and releases it unconditionally when the button is up. Scene cues still have no editing UI. Whatever shape it takes must share that press discipline, and retarget must capture a fresh snapshot from the target scene or pass NULL -- reusing the outgoing cue's snapshot is silently wrong between two 8-control scenes. |
 | D5 | "+ Feel" scene coverage. Widening it changes exported pixels in every scene it touches. | 3-4 scenes where a brief transient accent is defensible, documented, rather than wiring all ten into noise. `scene_constellation.c:104` uses `fabsf(event->values[0])`, so the existing 1.0f payload keeps today's flare strength. |
 | D6 | Tune `row_height` 76 -> 64 and an interactive inspector scrollbar. | Both real wins, both the most bug-prone edits in the backlog. `row_height` couples to a bare `- 35.0f` at `plug.c:4432` six hundred lines away with no headless test. The scrollbar handler must be hoisted **above** the row loop or `scene_setting_slider` claims `active_button_id` first and drives a value to max. |
 | D7 | Control-border contrast. An enabled button is `COLOR_UI_RAISED` (white) on `COLOR_UI_SURFACE` (near-white), about 1.02:1, so its 1 px `COLOR_UI_RULE` border at **1.41:1** is very nearly the only thing identifying the control (`ui_widgets.c:224`). WCAG 1.4.11 asks 3:1 for component boundaries. Measured and pinned by `tests/test_ui_contrast.c`. | Not fixed unilaterally: `COLOR_UI_RULE` is also every divider, scrollbar rail, plot border and panel separator (20+ sites), so darkening it to 3:1 changes the near-white Swiss look the product is built around. Options, in increasing disruption: give buttons their own darker border constant and leave dividers alone; darken the rule everywhere; or accept the deviation and document it in `packaging/PRODUCT_READINESS.md` as a known accessibility limit. The first is probably right and is a small change now that the palette is a single source of truth in `ui_palette.h`. |
