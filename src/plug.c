@@ -1154,11 +1154,29 @@ static bool select_base_scene(Scene_Id selected)
     if (selected < 0 || selected >= COUNT_SCENES || p->scene.id == selected) return false;
     if (track != NULL && !route_editor_allow_active_context_change()) return false;
     if (!scene_instance_select(&p->scene, selected, scene_seed_for_track(track))) return false;
+    // A running scene plan overrides the base scene at every cued moment, so
+    // picking a base scene has to switch Auto scenes off or the click would
+    // appear to do nothing. That is defensible, but it used to happen silently
+    // and autosave persisted it a second and a half later. The cues themselves
+    // survive: scene_switch_reset only rewinds the playback cursor.
+    bool disabled_plan = track != NULL && track->scene_switches.enabled &&
+                         track->scene_switches.count > 0;
+    size_t kept_cues = track != NULL ? track->scene_switches.count : 0;
     if (track != NULL) track_select_base_scene(track, selected);
     mark_project_dirty(track);
     char detail[UI_NOTICE_DETAIL_CAPACITY];
-    snprintf(detail, sizeof(detail), "%s is now the track's base scene.",
-             scene_name(selected));
+    if (disabled_plan) {
+        // The notice card wraps to three 14 px lines in 358 px, so roughly 135
+        // characters survive. "Spectral Terrarium" plus a three-digit cue count
+        // is the worst case; keep this string short enough to clear it.
+        snprintf(detail, sizeof(detail),
+                 "%s is now the track's base scene. Auto scenes was turned off; "
+                 "its %zu cues are kept for when you re-enable it.",
+                 scene_name(selected), kept_cues);
+    } else {
+        snprintf(detail, sizeof(detail), "%s is now the track's base scene.",
+                 scene_name(selected));
+    }
     notice_push(UI_NOTICE_INFO, "Base scene changed", detail, NULL, false);
     return true;
 }
@@ -2063,9 +2081,13 @@ static void timeline(Rectangle timeline_boundary, Track *track)
         "Edit timed lyric content and synchronization",
         "Stage local or model-assisted analysis",
         "Configure and render a deterministic MP4",
-        "Record a feeling marker at the playhead",
+        // Manual markers carry one value, so the semantic lane (which requires
+        // the four-value analysis payload) skips them and only Constellation's
+        // generic event path reads them. Say so rather than implying every
+        // scene responds; see README step 6.
+        "Record a feeling marker at the playhead. Only Constellation reacts.",
         "Cue this scene and its current tuning at the playhead",
-        "Record a custom marker at the playhead",
+        "Record a custom marker at the playhead. Only Constellation reacts.",
     };
     const float control_widths[6] = {74.0f, 74.0f, 90.0f, 74.0f, 82.0f, 86.0f};
     const uint32_t types[6] = {

@@ -185,7 +185,12 @@ The normal workflow is:
    captures the scene's tuning at that moment; seeking and export reload the
    same snapshot. Cue boundaries currently use deterministic cuts.
 6. Add manual visualization events with **+ Feel** and **+ Custom**, or import
-   an image into ASCII Field.
+   an image into ASCII Field. Both record a single-value marker at the playhead,
+   and **Constellation is currently the only scene that reacts to them**: it
+   flares the node nearest the marker for about a second. Loom reads the
+   semantic lane rather than manual markers, because it needs the four-value
+   energy/tension/valence/confidence payload that only imported analysis
+   produces. The other eight scenes ignore manual events entirely.
 7. Open **Export**, choose resolution, frame rate, and quality, then select the
    destination. The action is disabled with an explanation when FFmpeg is not
    discoverable, before a destination picker opens. Progress reports the exact
