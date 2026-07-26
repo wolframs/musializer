@@ -5318,7 +5318,10 @@ static void scene_browser(Rectangle boundary)
     const size_t rows = (COUNT_SCENES + columns - 1)/columns;
     float row_height = (boundary.height - header_height - footer_height - padding*2.0f
                       - gap*(rows - 1))/(float)rows;
-    if (row_height > 38.0f) row_height = 38.0f;
+    // Paired with WORKSPACE_SCENES_MAXIMUM: the browser is only given height
+    // above 292 px because these tiles can now use it. Raising one without the
+    // other changes nothing.
+    if (row_height > 52.0f) row_height = 52.0f;
     if (row_height < 24.0f) row_height = 24.0f;
     float column_width = (boundary.width - padding*2.0f - gap)/(float)columns;
     // Scene names range from "Loom" to "Spectral Terrarium" in a grid of equal
@@ -6724,7 +6727,7 @@ static void preview_screen(void)
             float sidebar_height = h - timeline_height;
             Workspace_Sidebar sidebar;
             if (!workspace_sidebar_layout(tracks_panel_width, sidebar_height,
-                                          &sidebar)) {
+                                          p->tracks.count, &sidebar)) {
                 sidebar = (Workspace_Sidebar){
                     .tracks = {0.0f, 0.0f, tracks_panel_width, 0.0f},
                     .scenes = {0.0f, 0.0f, tracks_panel_width,

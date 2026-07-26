@@ -65,15 +65,28 @@ bool workspace_tracks_action_row(Tracks_Panel_Mode mode, float *top, float *heig
 }
 
 bool workspace_sidebar_layout(float sidebar_width, float sidebar_height,
-                              Workspace_Sidebar *out)
+                              size_t track_count, Workspace_Sidebar *out)
 {
     if (out == NULL) return false;
     if (!isfinite(sidebar_width) || !isfinite(sidebar_height)) return false;
     if (sidebar_width <= 0.0f || sidebar_height <= 0.0f) return false;
 
-    // The scene browser is served first: it has a hard content floor and, unlike
-    // the tracks panel, no collapsed form to fall back to.
-    float scenes_height = sidebar_height - WORKSPACE_TRACKS_STACKED_MINIMUM;
+    // What the tracks panel actually needs for its chrome and its rows. Asking
+    // for its content instead of taking the remainder is the whole point: an
+    // empty or short list no longer turns a taller window into whitespace.
+    float tracks_wanted = WORKSPACE_TRACKS_STACKED_HEADER +
+                          (float)track_count*sidebar_width*WORKSPACE_TRACKS_ITEM_RATIO;
+    if (!isfinite(tracks_wanted) || tracks_wanted < WORKSPACE_TRACKS_STACKED_MINIMUM) {
+        tracks_wanted = WORKSPACE_TRACKS_STACKED_MINIMUM;
+    }
+    if (tracks_wanted > WORKSPACE_TRACKS_MAXIMUM) {
+        tracks_wanted = WORKSPACE_TRACKS_MAXIMUM;
+    }
+
+    // The scene browser then takes what is left, still bounded by its own floor
+    // and cap, so surplus height reaches the scene grid rather than the gap
+    // under the track list.
+    float scenes_height = sidebar_height - tracks_wanted;
     if (scenes_height > WORKSPACE_SCENES_MAXIMUM) {
         scenes_height = WORKSPACE_SCENES_MAXIMUM;
     }

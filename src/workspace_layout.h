@@ -2,6 +2,7 @@
 #define MUSIALIZER_WORKSPACE_LAYOUT_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 
 // The workspace sidebar splits one vertical budget between the tracks panel and
 // the scene browser. That split used to be three lines of inline arithmetic in
@@ -54,7 +55,19 @@ typedef enum {
 // scene_browser draws a 27 px header, a 36 px footer, 16 px of padding, four
 // 4 px gaps, and five rows that clamp to a 24 px floor: 27+36+16+16+120.
 #define WORKSPACE_SCENES_MINIMUM 215.0f
-#define WORKSPACE_SCENES_MAXIMUM 292.0f
+// Raised from 292 together with the scene-tile cap in plug.c's scene_browser.
+// 292 was exactly enough for 38 px tiles, so raising either one alone changes
+// nothing: the browser either cannot use the extra height or is not given it.
+// 355 = 27 header + 36 footer + 16 padding + 5 rows of 52 + 4 gaps of 4.
+#define WORKSPACE_SCENES_MAXIMUM 355.0f
+
+// A track row is `sidebar_width*0.2` tall (see plug.c's tracks_panel), so the
+// panel's content height depends on the width it was given.
+#define WORKSPACE_TRACKS_ITEM_RATIO 0.2f
+// Enough for a long track list to stay usable without starving the browser;
+// the scene floor is what actually protects the browser, this just stops an
+// enormous list asking for the whole sidebar.
+#define WORKSPACE_TRACKS_MAXIMUM 520.0f
 
 typedef struct {
     Ui_Rect tracks;   // Zero height when tracks_mode is TRACKS_PANEL_HIDDEN.
@@ -68,8 +81,12 @@ typedef struct {
 // degrades through the mode ladder, disappearing rather than overflowing.
 //
 // Returns false and leaves *out untouched for non-finite or non-positive input.
+// track_count sizes the tracks panel to its content rather than letting it
+// absorb every spare pixel. The empty list used to be the only elastic region
+// in the sidebar, so a taller window grew whitespace under the tracks while the
+// scene grid stayed pinned at its cap. Surplus now raises the browser instead.
 bool workspace_sidebar_layout(float sidebar_width, float sidebar_height,
-                              Workspace_Sidebar *out);
+                              size_t track_count, Workspace_Sidebar *out);
 
 // Offset and height of the action row a mode draws, measured from the panel top.
 // Returns false for TRACKS_PANEL_HIDDEN, which draws no row.

@@ -639,11 +639,24 @@ enough like the bug to be mistaken for it, and made two before/after pairs come
 out identical. Read the cue bounds out of the `.musi` before choosing a render
 window.
 
+**Item 6 landed (2026-07-26).** `workspace_sidebar_layout` takes a track count
+and sizes the tracks panel to its content (`124 + count*width*0.2`) instead of
+letting it absorb every spare pixel; the browser then takes the remainder. Both
+caps were raised together as the entry insisted -- `WORKSPACE_SCENES_MAXIMUM`
+292 -> 355 and the tile cap 38 -> 52 -- because raising either alone changes
+nothing. Scene tiles are 37% taller at 720p and above. The sweep test now covers
+five track counts (0, 1, 3, 12, 512) at every height.
+
+**Honest limit:** the tracks panel is still the overflow region, so at 1080p with
+a single track there is real whitespace under the list. The browser only absorbs
+so much -- ten scenes in five rows stop being better past ~52 px tiles -- so the
+remaining surplus has nowhere useful to go without new content. This is a
+product question, not a layout bug.
+
 ### Remaining, safe to implement
 
 | # | Item | Mechanism | Notes |
 | --- | --- | --- | --- |
-| 6 | Invert sidebar elasticity | The empty track list is the only elastic region; the scene grid and timeline are hard-capped. | Extend `workspace_sidebar_layout` so tracks are content-fit and the surplus raises the scene-browser cap. The 292 cap achieves nothing while the 38 px row cap at `plug.c:5209-5210` stands -- raise both or neither. Do not route surplus into the timeline: `lane_height` is pinned to 58 whenever a panel is open. |
 | 9 | Lyric text field: caret and selection | `lyrics_editor_ui.c` still edits only at the end of the field: typing, backspace, escape. **Paste landed 2026-07-26** via `lyrics_text_append` (all-or-nothing, line breaks flattened, 6 headless tests, mutation-verified against truncate-to-fit); `GetClipboardText` now has exactly one caller. | Caret/selection remain. Reset the caret at all three `draft_text` writers or a stale index becomes an insert offset past `strlen`. Adding a caret index to `Lyric_Editor` **does** change the hot-reload state layout, so bump `PLUG_STATE_VERSION` then -- the paste work did not, and did not need to. |
 | 10 | Lyric direct manipulation in the lane | The lane only selects and the scrubber steals the press; the finest adjustment is a 0.1 s nudge. | Claim `active_button_id` on press and **release unconditionally on mouse-up** -- `ui_widgets.c:147-156` only frees an id through the owning widget, so an unreleased claim freezes every button in the app. |
 
