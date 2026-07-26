@@ -398,10 +398,14 @@ runtime dependency after a successful save.
 The v1 schema deliberately describes future composition features that this
 editor cannot yet preserve. This build opens only its lossless editor subset:
 full-track referenced or imported audio, integer-frame-rate H.264 MP4 output,
-one enabled opaque full-track Normal scene, and Musializer's canonical slider
-constants, built-in audio-driven routes, and scene-cue snapshots. Other
-schema-valid composition features are rejected with an explicit
-unsupported-feature error instead of being silently rewritten.
+one enabled opaque full-track Normal scene, Musializer's canonical slider
+constants, built-in audio-driven routes, scene-cue snapshots, and — for an
+imported caption face — a path this editor could itself have written into the
+sibling asset bundle. Other schema-valid composition features are rejected with
+an explicit unsupported-feature error instead of being silently rewritten. An
+imported face at an absolute or traversing path is refused for the same reason:
+opening it would typeset in a substitute face and then autosave that
+substitution over the author's choice.
 
 An imported ASCII image is stored as a verified image asset with its derived
 grid dimensions. Reopening the project verifies the image identity and rebuilds
