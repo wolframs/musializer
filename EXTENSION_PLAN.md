@@ -1284,6 +1284,42 @@ prerequisite for D1. Each new engine `.c` must appear in **both** lists in
   lookup, word-level timing in the C model, CUDA whisper rebuild (the /tmp
   whisper.cpp build is CPU-only; a toolkit install is the user's call).
 
+### 2026-07-26 - working the UI backlog
+
+Five backlog items and one completeness-critic gap, each verified in the running
+application rather than only in tests.
+
+- **Item 4, "+ Feel" honesty.** Manual markers carry one value; `semantic_lane.c`
+  requires four, so Loom skips them and Constellation is the only scene in the
+  set that reacts. README step 6 and both tooltips now say so. The payload shape
+  was deliberately not touched.
+- **The base-scene gap, and a correction.** Picking a base scene turns Auto
+  scenes off, which is right -- a running plan would override it at every cued
+  moment -- but it happened silently while autosave committed it. The notice now
+  names the consequence. The earlier claim that this *discarded* the plan was
+  wrong: `scene_switch_reset` only rewinds `active_index`.
+- **Item 3, scene cue editing.** `scene_switch_remove`/`retime`/`retarget`, each
+  staging a copy and re-publishing through `scene_switch_replace` so the
+  coverage checks re-run and a rejected edit changes nothing. 11 tests. The
+  retarget trap turned out to be only partly closable and is documented and
+  pinned as such.
+- **Item 5, timeline band collision.** `timeline_layout.c` computes the parent
+  extent from the children. Photographed: the timecode used to print through
+  "+ Custom" and "Clear manual" at 960x640 with the inspector open, and the
+  no-inspector case is pixel-identical after the fix.
+- **Item 7, empty preset block.** 98 px collapses to 42 px, gaining a slider.
+  The populated path was verified by seeding a real store and re-capturing.
+- **Item 8, caption geometry.** The 42 px ceiling is gone; captions are a flat
+  4.7% of frame height. The 720p canary was byte-identical before and after,
+  1080p changed, and two 1080p renders still match each other. Unblocks D1.
+- **Item 9, partial.** Ctrl+V pastes into a lyric cue, whole or not at all,
+  through `lyrics_text_append`. Mutation-verified: truncate-to-fit fails exactly
+  the two all-or-nothing tests. Caret and selection remain open.
+
+Validation throughout: 259/259 C tests in debug, release and ASan+UBSan;
+120/120 Python; release and hotreload profiles; real 720p/1080p/2160p renders
+with `ffprobe` checks; no leaked processes.
+
 ### 2026-07-25 / 2026-07-26 - headless UI review loop and the defects it found
 
 - Built a non-disruptive UI review workflow: `--ui-probe` sets deterministic
