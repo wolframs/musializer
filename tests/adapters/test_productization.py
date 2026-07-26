@@ -192,6 +192,34 @@ class DistributionManifestTests(unittest.TestCase):
             autosave,
         )
 
+    def test_an_authored_lyric_sheet_reaches_the_helper_only_when_it_is_used(self):
+        plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")
+        # Skip the forward declaration; the definition is the one with a body.
+        start = plug.index("static bool start_assist_job(Assist_Mode mode, Track *track)\n{")
+        end = plug.index("static uint32_t assist_mode_lanes(", start)
+        spawn = plug[start:end]
+
+        # The flag is passed only for modes that align authored lyrics, and
+        # only when the chosen file is still there. Passing it for a scene or
+        # MiMo run would advertise a reference those runs never read.
+        self.assertIn('"--lyrics-file", track->lyrics_reference_path', spawn)
+        self.assertIn("assist_mode_uses_lyric_reference(mode)", spawn)
+        self.assertIn("FileExists(track->lyrics_reference_path)", spawn)
+        self.assertLess(
+            spawn.index("assist_mode_uses_lyric_reference(mode)"),
+            spawn.index('"--lyrics-file"'),
+        )
+
+        # The helper must actually accept it, or the run dies on an unknown
+        # argument at the point where it is hardest to see why.
+        helper = (ROOT / "tools/external_analysis.py").read_text(encoding="utf-8")
+        self.assertIn('assist.add_argument("--lyrics-file"', helper)
+
+        # A sibling sheet is left to the helper's own discovery, so the rule
+        # lives in exactly one place and cannot drift. The panel may resolve a
+        # sibling to *display* it; the spawn must not re-derive one to send.
+        self.assertNotIn("assist_lyric_sibling_path", spawn)
+
     def test_assist_state_policy_is_wired_into_every_product_target(self):
         build = (ROOT / "src_build/nob_stage2.c").read_text(encoding="utf-8")
         plug = (ROOT / "src/plug.c").read_text(encoding="utf-8")

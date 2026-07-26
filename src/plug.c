@@ -2109,6 +2109,60 @@ static void draw_assist_artifact_actions(float x, float y, float gap)
     }
 }
 
+// Which lyric sheet a run would use, and where it lives. The chosen file wins,
+// matching the helper's own priority, and a chosen file that has since been
+// moved or deleted falls back rather than failing the run later with a path
+// nobody can see.
+static Assist_Lyric_Reference resolve_lyric_reference(const Track *track,
+                                                      char *path, size_t capacity)
+{
+    if (path != NULL && capacity > 0) path[0] = '\0';
+    if (track == NULL) return ASSIST_LYRIC_REFERENCE_NONE;
+    if (track->lyrics_reference_path[0] != '\0' &&
+        FileExists(track->lyrics_reference_path)) {
+        if (path != NULL) snprintf(path, capacity, "%s", track->lyrics_reference_path);
+        return ASSIST_LYRIC_REFERENCE_CHOSEN;
+    }
+    char sibling[PLUG_RELOAD_PATH_CAPACITY];
+    if (track->file_path != NULL &&
+        assist_lyric_sibling_path(track->file_path, sibling, sizeof(sibling)) &&
+        FileExists(sibling)) {
+        if (path != NULL) snprintf(path, capacity, "%s", sibling);
+        return ASSIST_LYRIC_REFERENCE_SIBLING;
+    }
+    return ASSIST_LYRIC_REFERENCE_NONE;
+}
+
+// Bounded here so an accidental pick -- a whole album's worth of text, or a
+// binary -- is refused where the user can see it, not deep inside the helper.
+#define ASSIST_LYRIC_REFERENCE_BYTE_LIMIT (1u*1024u*1024u)
+
+static void choose_lyric_reference(Track *track)
+{
+    const char *filters[] = {"*.txt", "*.lyrics.txt"};
+    char *path = tinyfd_openFileDialog("Choose authored lyrics", "./",
+                                       NOB_ARRAY_LEN(filters), filters,
+                                       "lyric text", 0);
+    if (path == NULL) return;
+    int length = GetFileLength(path);
+    if (length <= 0 || (unsigned)length > ASSIST_LYRIC_REFERENCE_BYTE_LIMIT) {
+        notice_push(UI_NOTICE_ERROR, "That lyrics file was not used",
+                    "The file is empty or larger than the one megabyte a lyric "
+                    "sheet is allowed to be.", path, true);
+        return;
+    }
+    if (strlen(path) >= sizeof(track->lyrics_reference_path)) {
+        notice_push(UI_NOTICE_ERROR, "That lyrics file was not used",
+                    "Its path is too long for this installation.", path, true);
+        return;
+    }
+    snprintf(track->lyrics_reference_path, sizeof(track->lyrics_reference_path),
+             "%s", path);
+    notice_push(UI_NOTICE_INFO, "Lyrics reference selected",
+                "The next timed-lyrics run will synchronize these lines against "
+                "Whisper instead of transcribing.", path, false);
+}
+
 static void draw_assist_panel(Rectangle boundary, Track *track)
 {
     const Color signal = COLOR_ACCENT;
@@ -2140,7 +2194,12 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
     Assist_Panel_Content content = assist_panel_content(
         p->assist_job_state, p->assist_confirmation_pending,
         p->assist_candidate != NULL);
-    Assist_Ui_Layout layout = assist_ui_layout(boundary.width, content);
+    char reference_path[PLUG_RELOAD_PATH_CAPACITY];
+    Assist_Lyric_Reference reference = resolve_lyric_reference(
+        track, reference_path, sizeof(reference_path));
+    bool reference_row = assist_mode_uses_lyric_reference(p->assist_mode);
+    Assist_Ui_Layout layout = assist_ui_layout(boundary.width, content,
+                                               reference_row);
     float button_width = (boundary.width - padding*2.0f -
                           gap*(float)(layout.mode_columns - 1u))/
                          (float)layout.mode_columns;
@@ -2286,7 +2345,45 @@ static void draw_assist_panel(Rectangle boundary, Track *track)
         DrawTextEx(ui_font(), assist_mode_data_boundary(p->assist_mode),
                    (Vector2){boundary.x + padding, action_y + 21.0f},
                    14.0f, 1.0f, COLOR_UI_MUTED);
-        Rectangle start = {boundary.x + padding, action_y + 48.0f,
+        float start_offset = 48.0f;
+        if (layout.reference_y > 0.0f) {
+            // Naming the file the run will actually use, before it runs. The
+            // aligner is the best lyric path in the product and it used to be
+            // reachable only by knowing that a sibling <stem>.lyrics.txt is
+            // what the helper looks for.
+            float reference_y = boundary.y + layout.reference_y;
+            char line[256];
+            snprintf(line, sizeof(line), "Lyrics: %s",
+                     reference == ASSIST_LYRIC_REFERENCE_NONE ? "none chosen" :
+                     GetFileName(reference_path));
+            DrawTextEx(ui_font(), line, (Vector2){boundary.x + padding, reference_y},
+                       14.0f, 1.0f,
+                       reference == ASSIST_LYRIC_REFERENCE_NONE ? COLOR_UI_MUTED :
+                                                                  COLOR_UI_INK);
+            DrawTextEx(ui_font(), assist_lyric_reference_summary(reference),
+                       (Vector2){boundary.x + padding, reference_y + 18.0f},
+                       13.0f, 1.0f, COLOR_UI_MUTED);
+            Rectangle choose = {boundary.x + boundary.width - padding - 152.0f,
+                                reference_y - 4.0f, 152.0f, UI_BUTTON_HEIGHT};
+            Rectangle clear = {choose.x - 84.0f - gap, choose.y, 84.0f,
+                               UI_BUTTON_HEIGHT};
+            // Drawn only where they fit inside the panel. A control painted
+            // past the edge still claims presses from whatever is under it.
+            bool room = clear.x > boundary.x + padding + 240.0f;
+            if (room && (text_button(UINT64_C(0x4C5952494352454F), choose,
+                                     reference == ASSIST_LYRIC_REFERENCE_NONE ?
+                                     "Choose lyrics..." : "Replace lyrics...",
+                                     false) & BS_CLICKED)) {
+                choose_lyric_reference(track);
+            }
+            if (room && track->lyrics_reference_path[0] != '\0' &&
+                (text_button(UINT64_C(0x4C59524943524643), clear, "Clear", false) &
+                 BS_CLICKED)) {
+                track->lyrics_reference_path[0] = '\0';
+            }
+            start_offset = layout.reference_y - layout.content_y + 40.0f;
+        }
+        Rectangle start = {boundary.x + padding, action_y + start_offset,
                            144.0f, UI_BUTTON_HEIGHT};
         Rectangle cancel = {start.x + start.width + gap, start.y, 94.0f, start.height};
         if (helpers_available) {
@@ -3244,6 +3341,14 @@ static bool start_assist_job(Assist_Mode mode, Track *track)
     if (mode == ASSIST_MODE_MIMO || mode == ASSIST_MODE_ALL) {
         nob_cmd_append(&command, "--zdr");
     }
+    // Only an explicitly chosen sheet is passed. A sibling <stem>.lyrics.txt is
+    // left to the helper's own discovery, so there is exactly one rule for it
+    // rather than two that can drift apart.
+    if (assist_mode_uses_lyric_reference(mode) &&
+        track->lyrics_reference_path[0] != '\0' &&
+        FileExists(track->lyrics_reference_path)) {
+        nob_cmd_append(&command, "--lyrics-file", track->lyrics_reference_path);
+    }
 #ifdef _WIN32
     bool started = nob_cmd_run(&command, .async = &processes, .max_procs = 1,
                                .stderr_path = p->assist_log_path,
@@ -3702,6 +3807,17 @@ MUSIALIZER_PLUG bool plug_apply_ui_probe(Plug_Ui_Probe probe)
     if (probe.assist_confirmation) {
         if (probe.panel != PLUG_UI_PANEL_ASSIST) return false;
         p->assist_confirmation_pending = true;
+    }
+
+    if (probe.lyrics_reference_path[0] != '\0') {
+        if (track == NULL || !FileExists(probe.lyrics_reference_path) ||
+            strlen(probe.lyrics_reference_path) >=
+                sizeof(track->lyrics_reference_path)) {
+            return false;
+        }
+        snprintf(track->lyrics_reference_path,
+                 sizeof(track->lyrics_reference_path), "%s",
+                 probe.lyrics_reference_path);
     }
 
     if (probe.seek_requested) {
@@ -7556,7 +7672,8 @@ static void preview_screen(void)
                     p->assist_job_state, p->assist_confirmation_pending,
                     p->assist_candidate != NULL);
                 Assist_Ui_Layout assist_layout = assist_ui_layout(
-                    workspace_width - 12.0f, assist_content);
+                    workspace_width - 12.0f, assist_content,
+                    assist_mode_uses_lyric_reference(p->assist_mode));
                 timeline_height = assist_timeline_height(
                     (float)h, toolbar_height, assist_layout.required_height);
             } else if (p->lyrics_editor_open) {

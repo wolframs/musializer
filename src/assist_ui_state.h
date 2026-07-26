@@ -43,6 +43,29 @@ typedef enum Assist_Panel_Content {
     ASSIST_PANEL_EMPTY,
 } Assist_Panel_Content;
 
+// Where the authored lyric text a lyrics run will synchronize against is coming
+// from. The helper's own priority is override, then a sibling
+// <stem>.lyrics.txt, then an unsynchronized tag embedded in the audio. The
+// first two are knowable from here; the third is not, because reading it needs
+// ffprobe, so it is never claimed -- only mentioned as still possible.
+typedef enum Assist_Lyric_Reference {
+    ASSIST_LYRIC_REFERENCE_NONE = 0,
+    ASSIST_LYRIC_REFERENCE_SIBLING,
+    ASSIST_LYRIC_REFERENCE_CHOSEN,
+} Assist_Lyric_Reference;
+
+// Whether a mode aligns authored lyrics at all. Offering the control on a mode
+// that ignores it would promise something the run does not do.
+bool assist_mode_uses_lyric_reference(Assist_Mode mode);
+const char *assist_lyric_reference_summary(Assist_Lyric_Reference reference);
+
+// The sibling the helper looks for: "<directory>/<stem>.lyrics.txt", matching
+// pathlib's stem rule, which strips only the final extension and treats a
+// leading dot as part of the name rather than as an extension. Returns false
+// when the result would not fit, leaving the output untouched.
+bool assist_lyric_sibling_path(const char *audio_path, char *output,
+                               size_t capacity);
+
 typedef struct Assist_Ui_Layout {
     size_t mode_columns;
     size_t mode_rows;
@@ -50,6 +73,10 @@ typedef struct Assist_Ui_Layout {
     float mode_row_height;
     float status_y;
     float content_y;
+    // Where the lyric-reference line starts, relative to the panel. Zero when
+    // there is no such row, which is also what makes "is the row present?" a
+    // question the drawing code can ask without repeating the policy.
+    float reference_y;
     float required_height;
 } Assist_Ui_Layout;
 
@@ -89,8 +116,13 @@ bool assist_candidate_conflicts_with_lyric_draft(bool replaces_lyrics,
 // Pure layout policy used by the Raylib surface and headless tests. Widths at
 // and above the supported 960 px window keep all modes on one row; narrower
 // embedders receive a two-column grid rather than clipped buttons.
+// reference_row adds the lyric-reference line and its controls to the
+// confirmation step. It is a parameter rather than an assumption because the
+// row only exists for modes that use a reference, and a panel that reserves
+// height it never draws pushes the scene preview down for nothing.
 Assist_Ui_Layout assist_ui_layout(float panel_width,
-                                  Assist_Panel_Content content);
+                                  Assist_Panel_Content content,
+                                  bool reference_row);
 
 // Converts desired Assist content height into a timeline height while keeping
 // a useful scene preview at supported small-window sizes.

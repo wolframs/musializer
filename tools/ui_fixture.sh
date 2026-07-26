@@ -76,6 +76,14 @@ wait "$xvfb_pid" 2>/dev/null || true
 [ -f "$OUT/demo.musi" ] || { echo "fixture project was not written; see $OUT/fixture.log" >&2; exit 1; }
 grep -c 'applied 8 lyrics, 3 scene sections' "$OUT/fixture.log" >/dev/null || {
     echo "bridge did not apply as expected; see $OUT/fixture.log" >&2; exit 1; }
+# An authored lyric sheet, so the Assist confirmation step's reference row is
+# photographable in its "chosen" state. The probe cannot open a file dialog.
+cat > "$OUT/reference.lyrics.txt" <<'REFERENCE'
+We were carving light out of the quiet
+and the room was holding its breath
+Every pipe hummed a different colour
+REFERENCE
+
 # A family list for the caption face browser. Written here rather than fetched,
 # because a capture run must never be the thing that contacts Google Fonts. The
 # entries are real families, so the coverage notes a review reads are the ones

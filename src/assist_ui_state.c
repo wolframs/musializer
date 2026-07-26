@@ -1,6 +1,7 @@
 #include "assist_ui_state.h"
 
 #include <math.h>
+#include <string.h>
 
 bool assist_job_is_active(Assist_Job_State state)
 {
@@ -165,8 +166,59 @@ bool assist_candidate_conflicts_with_lyric_draft(bool replaces_lyrics,
     return replaces_lyrics && targets_active_track && draft_is_dirty;
 }
 
+bool assist_mode_uses_lyric_reference(Assist_Mode mode)
+{
+    return mode == ASSIST_MODE_LYRICS || mode == ASSIST_MODE_ALL;
+}
+
+const char *assist_lyric_reference_summary(Assist_Lyric_Reference reference)
+{
+    switch (reference) {
+    case ASSIST_LYRIC_REFERENCE_CHOSEN:
+        return "Your lyrics will be timed against Whisper and shown verbatim.";
+    case ASSIST_LYRIC_REFERENCE_SIBLING:
+        return "Found beside the audio. It will be timed and shown verbatim.";
+    case ASSIST_LYRIC_REFERENCE_NONE:
+        break;
+    }
+    // Deliberately not "no lyrics will be used": an unsynchronized tag inside
+    // the audio container is still picked up, and only ffprobe can say whether
+    // one is there. Promising transcription outright would be a guess.
+    return "Whisper will transcribe the words itself, unless the audio file "
+           "carries a lyrics tag.";
+}
+
+bool assist_lyric_sibling_path(const char *audio_path, char *output,
+                               size_t capacity)
+{
+    if (audio_path == NULL || audio_path[0] == '\0' || output == NULL ||
+        capacity == 0) {
+        return false;
+    }
+    size_t length = strlen(audio_path);
+    // Find the final extension, ignoring one that belongs to a parent
+    // directory, and treating a leading dot as part of the name.
+    size_t name_start = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (audio_path[i] == '/' || audio_path[i] == '\\') name_start = i + 1;
+    }
+    size_t stem_end = length;
+    for (size_t i = length; i > name_start + 1; --i) {
+        if (audio_path[i - 1] == '.') {
+            stem_end = i - 1;
+            break;
+        }
+    }
+    static const char suffix[] = ".lyrics.txt";
+    if (stem_end + sizeof(suffix) > capacity) return false;
+    memcpy(output, audio_path, stem_end);
+    memcpy(output + stem_end, suffix, sizeof(suffix));
+    return true;
+}
+
 Assist_Ui_Layout assist_ui_layout(float panel_width,
-                                  Assist_Panel_Content content)
+                                  Assist_Panel_Content content,
+                                  bool reference_row)
 {
     Assist_Ui_Layout layout = {0};
     layout.mode_columns = isfinite(panel_width) && panel_width >= 760.0f ? 4u : 2u;
@@ -186,6 +238,15 @@ Assist_Ui_Layout assist_ui_layout(float panel_width,
     case ASSIST_PANEL_CANCELLING: content_height = 44.0f; break;
     case ASSIST_PANEL_CANDIDATE: content_height = 118.0f; break;
     case ASSIST_PANEL_EMPTY: content_height = 84.0f; break;
+    }
+    // The reference line and its buttons sit between the data boundary and
+    // Start, so only the confirmation step grows. The buttons share the label's
+    // row rather than taking one of their own: a taller panel here comes
+    // straight out of the scene preview, which at the supported 960x640 minimum
+    // has only 150 px to give.
+    if (reference_row && content == ASSIST_PANEL_CONFIRMATION) {
+        layout.reference_y = layout.content_y + 42.0f;
+        content_height += 34.0f;
     }
     layout.required_height = layout.content_y + content_height + 10.0f;
     return layout;

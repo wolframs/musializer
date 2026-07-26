@@ -69,6 +69,13 @@ typedef struct {
     // empty unless caption_style.font.present.
     char caption_font_path[PLUG_RELOAD_PATH_CAPACITY];
     char caption_licence_path[PLUG_RELOAD_PATH_CAPACITY];
+    // An authored lyric sheet the next Assist lyrics run should synchronize
+    // against, chosen by the user. Session state, deliberately not written to
+    // the .musi: it is an input to analysis rather than project content, the
+    // words end up in the project as cues anyway, and every other asset this
+    // format records is content-addressed and bundled. Storing a bare absolute
+    // path to a file outside the bundle would be the one exception.
+    char lyrics_reference_path[PLUG_RELOAD_PATH_CAPACITY];
     char project_path[PLUG_RELOAD_PATH_CAPACITY];
     Musi_Project_Metadata project_metadata;
     bool project_metadata_initialized;

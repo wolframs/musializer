@@ -33,6 +33,11 @@ lyrics-selected-720p|1280x720|--project PROJECT --ui-probe panel=lyrics,lyric=2,
 lyrics-selected-1080p|1920x1080|--project PROJECT --ui-probe panel=lyrics,lyric=2,time=6,size=1920x1080
 assist-confirm-min|960x640|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,size=960x640
 assist-confirm-720p|1280x720|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,size=1280x720
+# The authored-lyrics reference row on the confirmation step. The fixture
+# sheet is written by tools/ui_fixture.sh; lyrics-file= selects it, because
+# the probe cannot open a file dialog.
+assist-lyrics-reference|1280x720|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,lyrics-file=build/ui-review/reference.lyrics.txt,size=1280x720
+assist-lyrics-reference-min|960x640|--project PROJECT --ui-probe panel=assist,assist=confirm,time=6,lyrics-file=build/ui-review/reference.lyrics.txt,size=960x640
 panel-tune-720p|1280x720|--project PROJECT --ui-probe panel=tune,time=6,size=1280x720
 panel-tune-min|960x640|--project PROJECT --ui-probe panel=tune,time=6,size=960x640
 panel-export-720p|1280x720|--project PROJECT --ui-probe panel=export,time=6,size=1280x720

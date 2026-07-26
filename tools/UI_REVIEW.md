@@ -101,6 +101,7 @@ grabbed. See `Plug_Ui_Probe` in `src/plug.h`.
 | `zoom` | factor >= 1 | Zooms the timeline strip about the playhead; `1` is the whole track |
 | `style` | `caption` | Shows the caption typography pane; needs `panel=lyrics` |
 | `fonts` | `consent` or a path | Shows the caption face browser; a path loads that family list from disk. Needs `panel=lyrics` |
+| `lyrics-file` | path | Selects an authored lyric sheet on the current track, so the Assist reference row is photographable in its chosen state |
 
 It applies the same state transition the corresponding button performs, rather
 than injecting synthetic mouse or keyboard events, and it never touches project

@@ -120,6 +120,10 @@ typedef struct {
     // the parser owns and then handed across the plug boundary, so a pointer
     // into that buffer would dangle by the time it is read.
     char font_catalogue_path[PLUG_UI_PROBE_PATH_CAPACITY];
+    // An authored lyric sheet to select on the current track, so the Assist
+    // confirmation step's reference row can be photographed in its "chosen"
+    // state. The probe cannot open a file dialog.
+    char lyrics_reference_path[PLUG_UI_PROBE_PATH_CAPACITY];
 } Plug_Ui_Probe;
 
 #define LIST_OF_PLUGS \

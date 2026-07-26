@@ -147,6 +147,7 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
     bool seen_zoom = false;
     bool seen_style = false;
     bool seen_fonts = false;
+    bool seen_lyrics_file = false;
     char *cursor = buffer;
     while (cursor != NULL && *cursor != '\0') {
         char *comma = strchr(cursor, ',');
@@ -218,6 +219,16 @@ static bool parse_ui_probe(const char *spec, Command_Line_Ui_Probe *request)
             if (seen_assist || strcmp(value, "confirm") != 0) return false;
             request->probe.assist_confirmation = true;
             seen_assist = true;
+        } else if (strcmp(key, "lyrics-file") == 0) {
+            if (seen_lyrics_file) return false;
+            int written = snprintf(request->probe.lyrics_reference_path,
+                                   sizeof(request->probe.lyrics_reference_path),
+                                   "%s", value);
+            if (written <= 0 ||
+                (size_t)written >= sizeof(request->probe.lyrics_reference_path)) {
+                return false;
+            }
+            seen_lyrics_file = true;
         } else if (strcmp(key, "time") == 0) {
             if (seen_time || !parse_seconds(value, &request->probe.seek_seconds)) {
                 return false;
@@ -286,6 +297,8 @@ static void print_command_line_help(FILE *stream, const char *program)
         "                          playhead (1 = whole track),\n"
         "                          style=caption shows the caption typography\n"
         "                          pane (needs panel=lyrics),\n"
+        "                          lyrics-file=PATH selects an authored lyric\n"
+        "                          sheet for the next Assist lyrics run,\n"
         "                          fonts=consent shows the face browser's network\n"
         "                          consent panel; fonts=PATH loads a family list\n"
         "                          from disk instead, so a capture never opens a\n"

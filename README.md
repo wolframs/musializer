@@ -287,10 +287,17 @@ glyphs.
 Assistance is optional and capability-based:
 
 - **Measured section planning** is local and derives timing/structure from PCM.
-- **Timed lyrics** first looks for the lyrics you already have: an explicit
-  lyrics text file, a sibling `<track>.lyrics.txt`, or unsynchronized lyrics
-  embedded in the audio file's metadata (ID3 `USLT`-style tags). When one is
-  found, a fully local deterministic aligner synchronizes those authored lines
+- **Timed lyrics** first looks for the lyrics you already have. Use **Choose
+  lyrics…** on the Assist confirmation step to pick a text file; the panel then
+  names the sheet it is about to use, so you can see before starting whether
+  this run will time your words or transcribe its own. Without an explicit
+  choice it still finds a sibling `<track>.lyrics.txt` beside the audio, or
+  unsynchronized lyrics embedded in the audio file's metadata (ID3 `USLT`-style
+  tags). The choice is per session and is not saved into the project: the words
+  end up in the project as cues anyway, and a bare path to a file outside the
+  asset bundle is not something a portable `.musi` should carry.
+  When a sheet is found, a fully local deterministic aligner synchronizes those
+  authored lines
   against Whisper's word timing — the authored text is displayed verbatim,
   section headings and stage directions are filtered out, backing lines are
   kept, hallucinated evidence stretches are ignored, and any line that found
