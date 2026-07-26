@@ -225,6 +225,36 @@ def load_catalogue(
     return reduced
 
 
+CATALOGUE_INDEX_HEADER = "musializer.font-catalogue/v1"
+
+
+def write_catalogue_index(catalogue: dict[str, Any], path: Path) -> int:
+    """Emit the catalogue as bounded TSV for the application to read.
+
+    The renderer has no JSON parser and does not want one for this: a
+    tab-separated table with a version header is what the analysis bridge
+    already uses, and it is trivially bounded on the reading side. Family
+    names are validated on the way in, so no field can contain a tab or a
+    newline and the table cannot be made ragged by a catalogue change.
+    """
+    lines = [f"{CATALOGUE_INDEX_HEADER}\t{catalogue['family_count']}"]
+    for entry in catalogue["families"]:
+        family = entry["family"]
+        category = entry.get("category", "")
+        subsets = ",".join(entry.get("subsets", ()))
+        if any("\t" in field or "\n" in field for field in (family, category, subsets)):
+            raise AnalysisValidationError(
+                f"catalogue entry for {family!r} contains a field separator"
+            )
+        lines.append(f"{family}\t{category}\t{subsets}")
+    payload = "\n".join(lines) + "\n"
+    temporary = path.with_name(path.name + ".partial")
+    temporary.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(payload, encoding="utf-8")
+    temporary.replace(path)
+    return len(catalogue["families"])
+
+
 def resolve_truetype_url(
     family: str,
     *,
@@ -357,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
     catalogue.add_argument("cache", type=Path)
     catalogue.add_argument("--max-age", type=float, default=DEFAULT_MAX_AGE_SECONDS)
     catalogue.add_argument("--force", action="store_true")
+    catalogue.add_argument(
+        "--index", type=Path,
+        help="also write the catalogue as bounded TSV for the application",
+    )
 
     fetch = subparsers.add_parser("fetch", help="download one family")
     fetch.add_argument("family")
@@ -375,10 +409,13 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 force=args.force,
             )
+            if args.index is not None:
+                write_catalogue_index(result, args.index)
             print(json.dumps({
                 "schema_version": result["schema_version"],
                 "family_count": result["family_count"],
                 "cache": str(args.cache),
+                "index": str(args.index) if args.index else None,
             }))
         else:
             print(json.dumps(fetch_family(family, args.output, timeout=args.timeout)))
