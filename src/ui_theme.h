@@ -3,25 +3,30 @@
 
 #include <raylib.h>
 
-// Shared desktop-UI palette, HUD metrics, font metrics, and key bindings.
-// These were originally private to plug.c; they move here unchanged so
-// extracted UI modules use the same visual language without re-defining it.
-// Values are verbatim from plug.c; do not "tidy" them here.
+#include "ui_palette.h"
 
-#define COLOR_ACCENT                  GetColor(0x002FA7FF)
-#define COLOR_BACKGROUND              GetColor(0x151515FF)
-#define COLOR_UI_SURFACE              GetColor(0xF7F7F8FF)
-#define COLOR_UI_RAISED               GetColor(0xFFFFFFFF)
-#define COLOR_UI_INK                  GetColor(0x141414FF)
-#define COLOR_UI_MUTED                GetColor(0x66666BFF)
-#define COLOR_UI_DISABLED             GetColor(0x929298FF)
-#define COLOR_UI_RULE                 GetColor(0xD2D2D6FF)
-#define COLOR_UI_DANGER               GetColor(0xC62828FF)
-#define COLOR_UI_WARNING              GetColor(0xB26A00FF)
-#define COLOR_UI_SUCCESS              GetColor(0x18794EFF)
+// Shared desktop-UI palette, HUD metrics, font metrics, and key bindings.
+// These were originally private to plug.c; they move here so extracted UI
+// modules use the same visual language without re-defining it.
+//
+// The colour values themselves live in ui_palette.h, which is raylib-free so
+// tests/test_ui_contrast.c can check the same numbers the application draws
+// with. Add a colour there, not here.
+
+#define COLOR_ACCENT                  GetColor(UI_RGBA_ACCENT)
+#define COLOR_BACKGROUND              GetColor(UI_RGBA_BACKGROUND)
+#define COLOR_UI_SURFACE              GetColor(UI_RGBA_UI_SURFACE)
+#define COLOR_UI_RAISED               GetColor(UI_RGBA_UI_RAISED)
+#define COLOR_UI_INK                  GetColor(UI_RGBA_UI_INK)
+#define COLOR_UI_MUTED                GetColor(UI_RGBA_UI_MUTED)
+#define COLOR_UI_DISABLED             GetColor(UI_RGBA_UI_DISABLED)
+#define COLOR_UI_RULE                 GetColor(UI_RGBA_UI_RULE)
+#define COLOR_UI_DANGER               GetColor(UI_RGBA_UI_DANGER)
+#define COLOR_UI_WARNING              GetColor(UI_RGBA_UI_WARNING)
+#define COLOR_UI_SUCCESS              GetColor(UI_RGBA_UI_SUCCESS)
 #define COLOR_TRACK_PANEL_BACKGROUND  COLOR_UI_SURFACE
 #define COLOR_TRACK_BUTTON_BACKGROUND COLOR_UI_RAISED
-#define COLOR_TRACK_BUTTON_HOVEROVER  GetColor(0xE7EAF2FF)
+#define COLOR_TRACK_BUTTON_HOVEROVER  GetColor(UI_RGBA_TRACK_BUTTON_HOVEROVER)
 #define COLOR_TRACK_BUTTON_SELECTED   COLOR_ACCENT
 #define COLOR_TIMELINE_CURSOR         COLOR_ACCENT
 #define COLOR_TIMELINE_BACKGROUND     COLOR_UI_SURFACE
